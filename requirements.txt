@@ -1,0 +1,42 @@
+# =============================
+# Web App Framework
+# =============================
+streamlit
+
+# =============================
+# Data Processing & Analysis
+# =============================
+pandas
+sqlalchemy
+pymysql
+
+# =============================
+# Google Sheets Integration
+# =============================
+google-auth
+google-api-python-client
+
+# =============================
+# Environment Configuration
+# =============================
+python-dotenv
+
+# =============================
+# Optional: Data Visualization
+# =============================
+plotly             # Interactive plots, charts, dashboards
+matplotlib         # Basic charts if needed
+seaborn            # Statistical plots (if running locally)
+
+# =============================
+# Optional: Excel/CSV Utilities
+# =============================
+openpyxl           # Excel read/write support (xlsx)
+xlsxwriter         # Advanced Excel formatting (optional)
+
+# =============================
+# Optional: Performance Utilities
+# =============================
+cachetools         # For caching logic (used in larger Streamlit apps)
+
+altair
