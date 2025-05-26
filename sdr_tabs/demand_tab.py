@@ -26,6 +26,7 @@ def select_data_source():
     return st.radio(
         "Select Outbound Demand Source:",
         ["OC Only", "Forecast Only", "Both"],
+        index=2,  # ✅ Set "Both" as default
         horizontal=True
     )
 
@@ -54,6 +55,9 @@ def load_and_prepare_data(source):
 
 
 # === Unify column format between OC and Forecast sources ===
+# === Trong function standardize_df() ===
+# Cập nhật để preserve cột is_converted_to_oc
+
 def standardize_df(df, is_forecast):
     df = df.copy()
     df["etd"] = pd.to_datetime(df["etd"], errors="coerce")
@@ -63,10 +67,14 @@ def standardize_df(df, is_forecast):
         df['demand_quantity'] = pd.to_numeric(df['standard_quantity'], errors='coerce').fillna(0)
         df['value_in_usd'] = pd.to_numeric(df.get('total_amount_usd', 0), errors='coerce').fillna(0)
         df['demand_number'] = df.get('forecast_number', '')
+        # Preserve is_converted_to_oc column
+        df['is_converted_to_oc'] = df.get('is_converted_to_oc', 'No')
     else:
         df['demand_quantity'] = pd.to_numeric(df['pending_standard_delivery_quantity'], errors='coerce').fillna(0)
         df['value_in_usd'] = pd.to_numeric(df.get('outstanding_amount_usd', 0), errors='coerce').fillna(0)
         df['demand_number'] = df.get('oc_number', '')
+        # OC records don't have this column
+        df['is_converted_to_oc'] = 'N/A'  # Not Applicable for OC records
 
     df['product_name'] = df['product_name'].astype(str)
     df['pt_code'] = df['pt_code'].astype(str)
@@ -79,7 +87,12 @@ def standardize_df(df, is_forecast):
     return df
 
 
+
+
 # === UI filters for legal entity, customer, product, brand, ETD ===
+# === Thêm filter mới cho conversion status ===
+# Trong function apply_outbound_filters()
+
 def apply_outbound_filters(df):
     with st.expander("📎 Filters", expanded=True):
         col1, col2, col3 = st.columns(3)
@@ -100,6 +113,13 @@ def apply_outbound_filters(df):
             default_end = df["etd"].max().date() if pd.notnull(df["etd"].max()) else datetime.today().date()
             end_date = st.date_input("To Date (ETD)", default_end)
 
+        # New filter for conversion status
+        col7, col8, col9 = st.columns(3)
+        with col7:
+            if 'is_converted_to_oc' in df.columns:
+                conversion_options = df["is_converted_to_oc"].dropna().unique().tolist()
+                selected_conversion = st.multiselect("Conversion Status", sorted(conversion_options))
+
     filtered_df = df.copy()
     if selected_entity:
         filtered_df = filtered_df[filtered_df["legal_entity"].isin(selected_entity)]
@@ -109,6 +129,10 @@ def apply_outbound_filters(df):
         filtered_df = filtered_df[filtered_df["pt_code"].isin(selected_product)]
     if selected_brand:
         filtered_df = filtered_df[filtered_df["brand"].isin(selected_brand)]
+    
+    # Apply conversion status filter if available
+    if 'is_converted_to_oc' in df.columns and 'selected_conversion' in locals() and selected_conversion:
+        filtered_df = filtered_df[filtered_df["is_converted_to_oc"].isin(selected_conversion)]
 
     # Convert to Timestamp for compatibility
     start_ts = pd.to_datetime(start_date)
@@ -124,31 +148,93 @@ def apply_outbound_filters(df):
 
 
 # === Render outbound demand table + summary statistics ===
+# === Trong function show_outbound_summary() ===
+# Thay thế phần display_df để thêm cột is_converted_to_oc cho forecast
+
 def show_outbound_summary(filtered_df):
     st.markdown("### 🔍 Outbound Demand Details")
 
     total_unique_products = filtered_df["pt_code"].nunique()
     total_value_usd = filtered_df["value_in_usd"].sum()
 
-    st.markdown(f"🔢 Total Unique Products: **{int(total_unique_products):,}**  💵 Total Value (USD): **${total_value_usd:,.2f}**")
+    # Check for missing dates
+    missing_etd_count = filtered_df["etd"].isna().sum()
+    
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Total Unique Products", f"{int(total_unique_products):,}")
+    with col2:
+        st.metric("Total Value (USD)", f"${total_value_usd:,.2f}")
+    with col3:
+        if missing_etd_count > 0:
+            st.metric("⚠️ Missing ETD", f"{missing_etd_count} records", delta_color="inverse")
 
-    display_df = filtered_df[[ 
+    # Prepare display columns based on source type
+    base_columns = [
         "pt_code", "product_name", "brand", "package_size", "standard_uom",
         "etd", "demand_quantity", "value_in_usd", "source_type", "demand_number", 
         "customer", "legal_entity"
-    ]].copy()
+    ]
+    
+    # Add is_converted_to_oc column if we have forecast data
+    if 'is_converted_to_oc' in filtered_df.columns:
+        display_columns = base_columns + ["is_converted_to_oc"]
+    else:
+        display_columns = base_columns
+    
+    display_df = filtered_df[display_columns].copy()
 
+    # Sort to put missing ETD records first
+    display_df["etd_is_null"] = display_df["etd"].isna()
+    display_df = display_df.sort_values(["etd_is_null", "etd"], ascending=[False, True])
+    display_df = display_df.drop("etd_is_null", axis=1)
+
+    # Format columns
     display_df["demand_quantity"] = display_df["demand_quantity"].apply(lambda x: f"{x:,.0f}")
     display_df["value_in_usd"] = display_df["value_in_usd"].apply(lambda x: f"${x:,.2f}")
-    display_df["etd"] = pd.to_datetime(display_df["etd"], errors="coerce").dt.strftime("%Y-%m-%d")
+    display_df["etd"] = display_df["etd"].apply(
+        lambda x: "❌ Missing" if pd.isna(x) else x.strftime("%Y-%m-%d")
+    )
 
-    st.dataframe(display_df, use_container_width=True)
+    # Apply styling to highlight missing dates
+    def highlight_missing_dates(row):
+        if row["etd"] == "❌ Missing":
+            return ["background-color: #ffcccc"] * len(row)
+        return [""] * len(row)
 
+    styled_df = display_df.style.apply(highlight_missing_dates, axis=1)
+    st.dataframe(styled_df, use_container_width=True)
+
+    # Add conversion status summary for forecast data
+    if filtered_df["source_type"].str.contains("Forecast").any():
+        st.markdown("### 📈 Forecast Conversion Status")
+        forecast_df = filtered_df[filtered_df["source_type"] == "Forecast"]
+        
+        if not forecast_df.empty and 'is_converted_to_oc' in forecast_df.columns:
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                total_forecast = len(forecast_df)
+                st.metric("Total Forecast Lines", f"{total_forecast:,}")
+            
+            with col2:
+                converted = len(forecast_df[forecast_df["is_converted_to_oc"] == "Yes"])
+                conversion_rate = (converted / total_forecast * 100) if total_forecast > 0 else 0
+                st.metric("Converted to OC", f"{converted:,} ({conversion_rate:.1f}%)")
+            
+            with col3:
+                not_converted = len(forecast_df[forecast_df["is_converted_to_oc"] == "No"])
+                st.metric("Not Converted", f"{not_converted:,}")
 
 # === Group and pivot demand data by day/week/month ===
 def show_grouped_demand_summary(filtered_df, start_date, end_date):
     st.markdown("### 📦 Grouped Demand by Product (Pivot View)")
     st.markdown(f"📅 Showing demand from **{start_date}** to **{end_date}**")
+
+    # Check for missing ETD
+    missing_etd_count = filtered_df["etd"].isna().sum()
+    if missing_etd_count > 0:
+        st.warning(f"⚠️ Found {missing_etd_count} records with missing ETD dates")
 
     col_period, col_filter = st.columns(2)
     with col_period:
@@ -157,6 +243,9 @@ def show_grouped_demand_summary(filtered_df, start_date, end_date):
         show_only_nonzero = st.checkbox("Show only products with quantity > 0", value=True)
 
     df_summary = filtered_df.copy()
+    
+    # Filter out records with missing ETD for pivot view
+    df_summary = df_summary[df_summary["etd"].notna()]
 
     # Create "period" field depending on time aggregation level
     if period == "Daily":
@@ -185,53 +274,50 @@ def show_grouped_demand_summary(filtered_df, start_date, end_date):
     if show_only_nonzero:
         pivot_df = pivot_df[pivot_df.iloc[:, 2:].sum(axis=1) > 0]
 
-    # Format quantities
-    pivot_df.iloc[:, 2:] = pivot_df.iloc[:, 2:].applymap(lambda x: f"{x:,.0f}")
-    st.dataframe(pivot_df, use_container_width=True)
+    # Create display version with formatted quantities
+    display_pivot = pivot_df.copy()
+    for col in display_pivot.columns[2:]:  # Skip product_name and pt_code columns
+        display_pivot[col] = display_pivot[col].apply(lambda x: f"{x:,.0f}")
+
+    st.dataframe(display_pivot, use_container_width=True)
 
     # Summary row: total quantity + value across all products per period
     df_grouped = df_summary.copy()
     df_grouped["demand_quantity"] = pd.to_numeric(df_grouped["demand_quantity"], errors='coerce').fillna(0)
     df_grouped["value_in_usd"] = pd.to_numeric(df_grouped["value_in_usd"], errors='coerce').fillna(0)
 
-    pivot_qty = df_grouped.groupby("period").agg(total_quantity=("demand_quantity", "sum")).T
-    pivot_val = df_grouped.groupby("period").agg(total_value_usd=("value_in_usd", "sum")).T
+    # Calculate aggregates
+    qty_by_period = df_grouped.groupby("period")["demand_quantity"].sum()
+    val_by_period = df_grouped.groupby("period")["value_in_usd"].sum()
 
-    pivot_qty.index = ["🔢 TOTAL QUANTITY"]
-    pivot_val.index = ["💵 TOTAL VALUE (USD)"]
+    # Create summary DataFrame
+    summary_data = {
+        "Metric": ["🔢 TOTAL QUANTITY", "💵 TOTAL VALUE (USD)"]
+    }
 
-    pivot_final = pd.concat([pivot_qty, pivot_val])
-    pivot_final = pivot_final.reset_index().rename(columns={"index": "Metric"})
+    # Add period columns with formatted values
+    for period in qty_by_period.index:
+        summary_data[period] = [
+            f"{qty_by_period[period]:,.0f}",
+            f"${val_by_period[period]:,.2f}"
+        ]
 
-    # Format the summary values
-    for col in pivot_final.columns[1:]:
-        if "🔢 TOTAL QUANTITY" in pivot_final["Metric"].values:
-            pivot_final.loc[pivot_final["Metric"] == "🔢 TOTAL QUANTITY", col] = (
-                pivot_final.loc[pivot_final["Metric"] == "🔢 TOTAL QUANTITY", col]
-                .astype(float)
-                .map("{:,.0f}".format)
-            )
-        if "💵 TOTAL VALUE (USD)" in pivot_final["Metric"].values:
-            pivot_final.loc[pivot_final["Metric"] == "💵 TOTAL VALUE (USD)", col] = (
-                pivot_final.loc[pivot_final["Metric"] == "💵 TOTAL VALUE (USD)", col]
-                .astype(float)
-                .map("${:,.2f}".format)
-            )
+    display_final = pd.DataFrame(summary_data)
 
-    pivot_final = sort_period_columns(pivot_final, period)
+    # Sort columns
+    display_final = sort_period_columns(display_final, period)
 
     st.markdown("🔢 Column Total (All Products)")
-    st.dataframe(pivot_final, use_container_width=True)
+    st.dataframe(display_final, use_container_width=True)
 
     # === Export Excel ===
-    excel_data = convert_df_to_excel(pivot_df)
+    excel_data = convert_df_to_excel(display_pivot)
     st.download_button(
         label="📤 Export to Excel",
         data=excel_data,
         file_name="grouped_outbound_demand.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
-
 
 # === Helper: Sort period columns chronologically ===
 def sort_period_columns(df, period_type):

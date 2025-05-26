@@ -29,6 +29,7 @@ def select_supply_source():
     return st.radio(
         "Select Supply Source:",
         ["Inventory Only", "Pending CAN Only", "Pending PO Only", "All"],
+        index=3,  # ✅ Set "All" as default
         horizontal=True,
         key="supply_source_radio"
     )
@@ -131,26 +132,58 @@ def show_supply_detail_table(df):
 
     total_unique_products = df["pt_code"].nunique()
     total_value_usd = df["value_in_usd"].sum()
+    
+    # Check for missing dates
+    missing_date_count = df["date_ref"].isna().sum()
 
-    st.markdown(f"🔢 Total Unique Products: **{int(total_unique_products):,}**  💵 Total Value (USD): **${total_value_usd:,.2f}**")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Total Unique Products", f"{int(total_unique_products):,}")
+    with col2:
+        st.metric("Total Value (USD)", f"${total_value_usd:,.2f}")
+    with col3:
+        if missing_date_count > 0:
+            st.metric("⚠️ Missing Dates", f"{missing_date_count} records", delta_color="inverse")
 
     df_disp = df.copy()
+    
+    # Sort to put missing dates first
+    df_disp["date_is_null"] = df_disp["date_ref"].isna()
+    df_disp = df_disp.sort_values(["date_is_null", "date_ref"], ascending=[False, True])
+    df_disp = df_disp.drop("date_is_null", axis=1)
+    
+    # Format columns
     df_disp["quantity"] = df_disp["quantity"].apply(lambda x: f"{x:,.0f}")
     df_disp["value_in_usd"] = df_disp["value_in_usd"].apply(lambda x: f"${x:,.2f}")
-    df_disp["date_ref"] = pd.to_datetime(df_disp["date_ref"], errors="coerce").dt.strftime("%Y-%m-%d")
+    df_disp["date_ref"] = df_disp["date_ref"].apply(
+        lambda x: "❌ Missing" if pd.isna(x) else x.strftime("%Y-%m-%d")
+    )
 
     df_disp.rename(columns={"quantity": "supply_quantity"}, inplace=True)
 
-    st.dataframe(df_disp[[
+    # Apply styling to highlight missing dates
+    def highlight_missing_dates(row):
+        if row["date_ref"] == "❌ Missing":
+            return ["background-color: #ffcccc"] * len(row)
+        return [""] * len(row)
+
+    styled_df = df_disp[[
         "pt_code", "product_name", "brand", "package_size", "standard_uom",
         "date_ref", "supply_quantity", "value_in_usd", "source_type", 
         "supply_number", "legal_entity"
-    ]], use_container_width=True)
+    ]].style.apply(highlight_missing_dates, axis=1)
+    
+    st.dataframe(styled_df, use_container_width=True)
 
 
 def show_grouped_supply_summary(df, start_date, end_date):
     st.markdown("### 📊 Grouped Supply by Period")
     st.markdown(f"📅 From **{start_date}** to **{end_date}**")
+
+    # Check for missing dates
+    missing_date_count = df["date_ref"].isna().sum()
+    if missing_date_count > 0:
+        st.warning(f"⚠️ Found {missing_date_count} records with missing reference dates")
 
     col1, col2 = st.columns(2)
     with col1:
@@ -159,6 +192,9 @@ def show_grouped_supply_summary(df, start_date, end_date):
         show_only_nonzero = st.checkbox("Show only products with quantity > 0", value=True, key="supply_show_nonzero")
 
     df_summary = df.copy()
+    
+    # Filter out records with missing dates for pivot view
+    df_summary = df_summary[df_summary["date_ref"].notna()]
 
     # Create period column
     if period == "Daily":
@@ -186,43 +222,43 @@ def show_grouped_supply_summary(df, start_date, end_date):
     if show_only_nonzero:
         pivot_df = pivot_df[pivot_df.iloc[:, 2:].sum(axis=1) > 0]
 
-    # Format quantities
-    pivot_df.iloc[:, 2:] = pivot_df.iloc[:, 2:].applymap(lambda x: f"{x:,.0f}")
-    st.dataframe(pivot_df, use_container_width=True)
+    # Create display version with formatted quantities
+    display_pivot = pivot_df.copy()
+    for col in display_pivot.columns[2:]:  # Skip product_name and pt_code columns
+        display_pivot[col] = display_pivot[col].apply(lambda x: f"{x:,.0f}")
+
+    st.dataframe(display_pivot, use_container_width=True)
 
     # === Totals ===
     df_grouped = df_summary.copy()
     df_grouped["quantity"] = pd.to_numeric(df_grouped["quantity"], errors="coerce").fillna(0)
     df_grouped["value_in_usd"] = pd.to_numeric(df_grouped["value_in_usd"], errors="coerce").fillna(0)
 
-    pivot_qty = df_grouped.groupby("period").agg(total_quantity=("quantity", "sum")).T
-    pivot_val = df_grouped.groupby("period").agg(total_value_usd=("value_in_usd", "sum")).T
+    # Calculate aggregates
+    qty_by_period = df_grouped.groupby("period")["quantity"].sum()
+    val_by_period = df_grouped.groupby("period")["value_in_usd"].sum()
 
-    pivot_qty.index = ["🔢 TOTAL QUANTITY"]
-    pivot_val.index = ["💰 TOTAL VALUE (USD)"]
+    # Create summary DataFrame
+    summary_data = {
+        "Metric": ["🔢 TOTAL QUANTITY", "💰 TOTAL VALUE (USD)"]
+    }
 
-    pivot_final = pd.concat([pivot_qty, pivot_val])
-    pivot_final = pivot_final.reset_index().rename(columns={"index": "Metric"})
+    # Add period columns with formatted values
+    for period in qty_by_period.index:
+        summary_data[period] = [
+            f"{qty_by_period[period]:,.0f}",
+            f"${val_by_period[period]:,.2f}"
+        ]
 
-    # Format totals
-    for col in pivot_final.columns[1:]:
-        if "🔢 TOTAL QUANTITY" in pivot_final["Metric"].values:
-            pivot_final.loc[pivot_final["Metric"] == "🔢 TOTAL QUANTITY", col] = (
-                pivot_final.loc[pivot_final["Metric"] == "🔢 TOTAL QUANTITY", col]
-                .astype(float).map("{:,.0f}".format)
-            )
-        if "💰 TOTAL VALUE (USD)" in pivot_final["Metric"].values:
-            pivot_final.loc[pivot_final["Metric"] == "💰 TOTAL VALUE (USD)", col] = (
-                pivot_final.loc[pivot_final["Metric"] == "💰 TOTAL VALUE (USD)", col]
-                .astype(float).map("${:,.2f}".format)
-            )
+    display_final = pd.DataFrame(summary_data)
 
-    pivot_final = sort_period_columns(pivot_final, period)
+    # Sort columns
+    display_final = sort_period_columns(display_final, period)
 
     st.markdown("🔢 Column Total (All Products)")
-    st.dataframe(pivot_final, use_container_width=True)
+    st.dataframe(display_final, use_container_width=True)
 
-    export_data = convert_df_to_excel(pivot_df)
+    export_data = convert_df_to_excel(display_pivot)
     st.download_button(
         label="📤 Export Grouped Supply to Excel",
         data=export_data,

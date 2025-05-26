@@ -117,6 +117,9 @@ def parse_month_period(period_str):
 # =========================
 # 🔎 Demand & Supply Filters
 # =========================
+# === Trong function apply_demand_filters() ===
+# Thêm filter cho conversion status
+
 def apply_demand_filters(df):
     with st.expander("📎 Demand Filters", expanded=False):
         col1, col2, col3 = st.columns(3)
@@ -130,6 +133,15 @@ def apply_demand_filters(df):
         start_date = col4.date_input("From Date (ETD)", default_start, key="gap_demand_start_date")
         end_date = col5.date_input("To Date (ETD)", default_end, key="gap_demand_end_date")
 
+        # Add conversion status filter
+        if 'is_converted_to_oc' in df.columns:
+            conversion_options = df["is_converted_to_oc"].dropna().unique().tolist()
+            selected_conversion = st.multiselect(
+                "Conversion Status", 
+                sorted(conversion_options), 
+                key="gap_demand_conversion"
+            )
+
     df = df.copy()
     if selected_entity:
         df = df[df["legal_entity"].isin(selected_entity)]
@@ -137,6 +149,10 @@ def apply_demand_filters(df):
         df = df[df["customer"].isin(selected_customer)]
     if selected_pt:
         df = df[df["pt_code"].isin(selected_pt)]
+    
+    # Apply conversion filter
+    if 'is_converted_to_oc' in df.columns and 'selected_conversion' in locals() and selected_conversion:
+        df = df[df["is_converted_to_oc"].isin(selected_conversion)]
 
     # Convert dates to pandas Timestamp for comparison
     start_ts = pd.to_datetime(start_date)
@@ -149,7 +165,6 @@ def apply_demand_filters(df):
     ]
 
     return df
-
 
 def apply_supply_filters(df):
     with st.expander("📎 Supply Filters", expanded=False):
@@ -199,35 +214,143 @@ def show_gap_analysis_tab(df_demand_all_sources, df_supply_all_sources):
         default=list(df_demand_all_sources["source_type"].unique()), 
         key="gap_demand_sources"
     )
-    selected_supply_sources = col2.multiselect(
+    
+    # Option to include/exclude converted forecasts
+    include_converted_forecasts = col2.checkbox(
+        "Include Converted Forecasts in GAP Analysis", 
+        value=False,
+        help="Uncheck to exclude forecasts that have already been converted to OC (avoid double counting)"
+    )
+    
+    selected_supply_sources = st.multiselect(
         "Select Supply Sources", 
         df_supply_all_sources["source_type"].unique(), 
         default=list(df_supply_all_sources["source_type"].unique()), 
         key="gap_supply_sources"
     )
 
+    # STEP 1: Filter by source type
     df_demand = df_demand_all_sources[df_demand_all_sources["source_type"].isin(selected_demand_sources)]
+    
+    # STEP 2: Filter out converted forecasts if needed
+    if not include_converted_forecasts and 'is_converted_to_oc' in df_demand.columns:
+        # Keep all OC records and only non-converted forecasts
+        df_demand = df_demand[
+            (df_demand["source_type"] != "Forecast") | 
+            (df_demand["is_converted_to_oc"] == "No")
+        ]
+    
     df_supply = df_supply_all_sources[df_supply_all_sources["source_type"].isin(selected_supply_sources)]
 
-    df_demand = apply_demand_filters(df_demand)
-    df_supply = apply_supply_filters(df_supply)
-
-    col1, col2 = st.columns(2)
-    period_type = col1.selectbox("Group By Period", ["Daily", "Weekly", "Monthly"], index=1, key="gap_period_type")
-    show_shortage_only = col2.checkbox("🔎 Show only shortages", value=True, key="gap_shortage_checkbox")
-
-    gap_df = calculate_gap_with_carry_forward(df_demand, df_supply, period_type)
+    # STEP 3: Apply additional filters (entity, customer, PT code, dates)
+    df_demand_filtered = apply_demand_filters(df_demand)
+    df_supply_filtered = apply_supply_filters(df_supply)
     
+    # Check for missing dates
+    demand_missing_dates = df_demand_filtered["etd"].isna().sum()
+    supply_missing_dates = df_supply_filtered["date_ref"].isna().sum()
+    
+    if demand_missing_dates > 0 or supply_missing_dates > 0:
+        col1, col2 = st.columns(2)
+        with col1:
+            if demand_missing_dates > 0:
+                st.warning(f"⚠️ Demand: {demand_missing_dates} records with missing ETD")
+        with col2:
+            if supply_missing_dates > 0:
+                st.warning(f"⚠️ Supply: {supply_missing_dates} records with missing dates")
+
+    # ✅ Show conversion statistics based on FILTERED data
+    if "Forecast" in selected_demand_sources and len(df_demand_filtered) > 0:
+        forecast_df_filtered = df_demand_filtered[df_demand_filtered["source_type"] == "Forecast"]
+        
+        if len(forecast_df_filtered) > 0 and 'is_converted_to_oc' in forecast_df_filtered.columns:
+            # Count from FILTERED data
+            converted = len(forecast_df_filtered[forecast_df_filtered["is_converted_to_oc"] == "Yes"])
+            not_converted = len(forecast_df_filtered[forecast_df_filtered["is_converted_to_oc"] == "No"])
+            
+            # Show warning only if relevant
+            if include_converted_forecasts and converted > 0 and "OC" in selected_demand_sources:
+                st.warning(
+                    f"⚠️ **Double-counting Risk**: You have included {converted} converted "
+                    f"forecast records along with OC records. This may result in double-counting "
+                    f"of demand. Consider unchecking 'Include Converted Forecasts'."
+                )
+            
+            # Show conversion statistics
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Total Forecasts", len(forecast_df_filtered))
+            with col2:
+                st.metric("Converted to OC", converted)
+            with col3:
+                st.metric("Not Converted", not_converted)
+
+    # Period selection and filter options
+    col1, col2, col3, col4 = st.columns(4)
+    period_type = col1.selectbox("Group By Period", ["Daily", "Weekly", "Monthly"], index=2, key="gap_period_type")
+    show_shortage_only = col2.checkbox("🔎 Show only shortages", value=True, key="gap_shortage_checkbox")
+    exclude_zero_demand = col3.checkbox(
+        "🚫 Exclude zero demand", 
+        value=True, 
+        key="gap_exclude_zero_demand",
+        help="Hide products that have supply but no demand"
+    )
+    # NEW: Add checkbox to exclude records with missing dates
+    exclude_missing_dates = col4.checkbox(
+        "📅 Exclude missing dates",
+        value=True,
+        key="gap_exclude_missing_dates",
+        help="Exclude records with missing ETD or reference dates from GAP calculation"
+    )
+    
+    # Filter out missing dates if requested
+    if exclude_missing_dates:
+        df_demand_filtered = df_demand_filtered[df_demand_filtered["etd"].notna()]
+        df_supply_filtered = df_supply_filtered[df_supply_filtered["date_ref"].notna()]
+
+    # Calculate GAP with filtered data
+    gap_df = calculate_gap_with_carry_forward(df_demand_filtered, df_supply_filtered, period_type)
+    
+    # Apply filters based on checkboxes
+    display_gap_df = gap_df.copy()
+    
+    # Filter 1: Show only shortages
     if show_shortage_only:
-        gap_df = gap_df[gap_df["gap_quantity"] < 0]
+        display_gap_df = display_gap_df[display_gap_df["gap_quantity"] < 0]
+    
+    # Filter 2: Exclude products with zero demand
+    if exclude_zero_demand:
+        # Group by product to check if ANY period has demand > 0
+        products_with_demand = (
+            gap_df[gap_df["total_demand_qty"] > 0][["pt_code", "product_name"]]
+            .drop_duplicates()
+        )
+        
+        # Keep only products that have demand in at least one period
+        if len(products_with_demand) > 0:
+            display_gap_df = display_gap_df.merge(
+                products_with_demand[["pt_code"]], 
+                on="pt_code", 
+                how="inner"
+            )
 
     st.markdown("### 📄 GAP Details by Product & Period")
-    total_unique_products = gap_df["pt_code"].nunique()
-    total_gap = gap_df["gap_quantity"].where(gap_df["gap_quantity"] < 0).abs().sum()
+    
+    # Calculate statistics from display_gap_df (after all filters)
+    total_unique_products = display_gap_df["pt_code"].nunique()
+    total_gap = display_gap_df["gap_quantity"].where(display_gap_df["gap_quantity"] < 0, 0).abs().sum()
+    
+    # Add info about filtered products
+    if exclude_zero_demand:
+        total_products_before = gap_df["pt_code"].nunique()
+        excluded_products = total_products_before - total_unique_products
+        if excluded_products > 0:
+            st.info(f"ℹ️ Excluded {excluded_products} products with zero demand across all periods")
+    
     st.markdown(f"🔢 Total Unique Products: **{int(total_unique_products):,}**  💵 Total Shortage Quantity: **{total_gap:,.0f}**")
 
     # Format display columns
-    display_df = gap_df.copy()
+    display_df = display_gap_df.copy()
     display_df["begin_inventory"] = display_df["begin_inventory"].apply(lambda x: f"{x:,.0f}")
     display_df["supply_in_period"] = display_df["supply_in_period"].apply(lambda x: f"{x:,.0f}")
     display_df["total_available"] = display_df["total_available"].apply(lambda x: f"{x:,.0f}")
@@ -246,8 +369,9 @@ def show_gap_analysis_tab(df_demand_all_sources, df_supply_all_sources):
         key="gap_style_mode"
     )
 
+    # Use display_gap_df for pivot (respects all filters)
     pivot_gap = (
-        gap_df.groupby(["product_name", "pt_code", "period"])
+        display_gap_df.groupby(["product_name", "pt_code", "period"])
         .agg(gap_quantity=("gap_quantity", "sum"))
         .reset_index()
         .pivot(index=["product_name", "pt_code"], columns="period", values="gap_quantity")
@@ -257,26 +381,22 @@ def show_gap_analysis_tab(df_demand_all_sources, df_supply_all_sources):
     
     pivot_gap = sort_period_columns(pivot_gap, period_type)
 
-    if show_shortage_only:
-        pivot_gap = pivot_gap[pivot_gap.iloc[:, 2:].apply(lambda row: any(row < 0), axis=1)]
-
     # Store numeric values for styling
     numeric_pivot = pivot_gap.copy()
     
-    # Format values for display
-    pivot_gap.iloc[:, 2:] = pivot_gap.iloc[:, 2:].applymap(lambda x: f"{x:,.0f}")
+    # Create display version with formatted values
+    display_pivot = pivot_gap.copy()
+    for col in display_pivot.columns[2:]:  # Skip product_name and pt_code columns
+        display_pivot[col] = display_pivot[col].apply(lambda x: f"{x:,.0f}")
 
     if style_mode == "🔴 Highlight Shortage":
-        def highlight_neg(val):
-            try:
-                # Remove formatting to check numeric value
-                num_val = float(str(val).replace(',', ''))
-                if num_val < 0:
-                    return "background-color: #fdd; color: red; font-weight: bold;"
-            except:
-                pass
-            return ""
-        st.dataframe(pivot_gap.style.applymap(highlight_neg, subset=pivot_gap.columns[2:]), use_container_width=True)
+        # Apply styling to numeric data, then format
+        styled_df = numeric_pivot.style.applymap(
+            lambda x: "background-color: #fdd; color: red; font-weight: bold;" if x < 0 else "",
+            subset=numeric_pivot.columns[2:]
+        ).format("{:,.0f}", subset=numeric_pivot.columns[2:])
+        
+        st.dataframe(styled_df, use_container_width=True)
 
     elif style_mode == "🌈 Heatmap":
         # Use numeric values for heatmap
@@ -293,26 +413,25 @@ def show_gap_analysis_tab(df_demand_all_sources, df_supply_all_sources):
         )
 
     else:
-        st.dataframe(pivot_gap, use_container_width=True)
+        # Display formatted version without styling
+        st.dataframe(display_pivot, use_container_width=True)
 
     # === Export buttons ===
     col1, col2 = st.columns(2)
     with col1:
         st.download_button(
             "📊 Export GAP Pivot to Excel", 
-            convert_df_to_excel(pivot_gap), 
+            convert_df_to_excel(display_pivot),
             "gap_analysis_pivot.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
     with col2:
         st.download_button(
             "📤 Export GAP Details to Excel", 
-            convert_df_to_excel(gap_df), 
+            convert_df_to_excel(display_gap_df),
             "gap_analysis_details.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
-
-
 # =========================
 # 🔧 Utility: Convert period format
 # =========================
