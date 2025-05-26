@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 from data_loader import load_outbound_demand_data
-from sdr_tabs.demand_tab import show_outbound_demand_tab, load_and_prepare_data
+from sdr_tabs.demand_tab import show_outbound_demand_tab, load_and_prepare_demand_data
 from sdr_tabs.supply_capability_tab import show_inbound_supply_tab, load_and_prepare_supply_data
 from sdr_tabs.gap_analysis import show_gap_analysis_tab
 
@@ -37,7 +37,7 @@ with tab2:
     show_inbound_supply_tab()
 
 with tab3:
-    df_demand_all_sources = load_and_prepare_data("Both")  # or always load both
+    df_demand_all_sources = load_and_prepare_demand_data("Both")  # or always load both
     df_supply_all_sources = load_and_prepare_supply_data("All")
     show_gap_analysis_tab(df_demand_all_sources, df_supply_all_sources)
 
