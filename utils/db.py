@@ -9,6 +9,7 @@ logger = logging.getLogger(__name__)
 
 
 def get_db_engine():
+    """Create and return SQLAlchemy database engine"""
     logger.info("🔌 Connecting to database...")
 
     user = DB_CONFIG["user"]
@@ -21,4 +22,3 @@ def get_db_engine():
     logger.info(f"🔐 Using SQLAlchemy URL: mysql+pymysql://{user}:***@{host}:{port}/{database}")
 
     return create_engine(url)
-

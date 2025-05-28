@@ -1,35 +1,40 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime
-from io import BytesIO
-from data_loader import load_outbound_demand_data, load_customer_forecast_data
+from utils.data_loader import load_outbound_demand_data, load_customer_forecast_data
+from utils.helpers import (
+    convert_df_to_excel, 
+    convert_to_period, 
+    sort_period_columns,
+    format_number,
+    format_currency,
+    check_missing_dates,
+    save_to_session_state
+)
+
+# === Page Config ===
+st.set_page_config(
+    page_title="Demand Analysis - SCM",
+    page_icon="📤",
+    layout="wide"
+)
 
 # === Constants ===
 DEMAND_SOURCES = ["OC Only", "Forecast Only", "Both"]
 PERIOD_TYPES = ["Daily", "Weekly", "Monthly"]
 
-# === Main Entry Point ===
-def show_outbound_demand_tab():
-    """Main entry point for Outbound Demand tab"""
-    st.subheader("📤 Outbound Demand by Period")
-    
-    # Source selection
-    source = select_demand_source()
-    
-    # Load and prepare data
-    df_all = load_and_prepare_demand_data(source)
-    
-    if df_all.empty:
-        st.info("No outbound demand data available.")
-        return
-    
-    # Apply filters
-    filtered_df, start_date, end_date = apply_demand_filters(df_all)
-    
-    # Display sections
-    show_demand_summary(filtered_df)
-    show_demand_detail_table(filtered_df)
-    show_demand_grouped_view(filtered_df, start_date, end_date)
+# === Header with Navigation ===
+col1, col2, col3 = st.columns([1, 4, 1])
+with col1:
+    if st.button("🏠 Dashboard"):
+        st.switch_page("main.py")
+with col2:
+    st.title("📤 Outbound Demand Analysis")
+with col3:
+    if st.button("Next: Supply →"):
+        st.switch_page("pages/2_📥_Supply_Analysis.py")
+
+st.markdown("---")
 
 # === Data Source Selection ===
 def select_demand_source():
@@ -41,7 +46,7 @@ def select_demand_source():
         horizontal=True
     )
 
-# === Data Loading ===
+# === Data Loading Functions ===
 def load_and_prepare_demand_data(source):
     """Load and standardize demand data based on source selection"""
     df_parts = []
@@ -90,7 +95,7 @@ def standardize_demand_df(df, is_forecast):
     
     return df
 
-# === Filtering ===
+# === Filtering Functions ===
 def apply_demand_filters(df):
     """Apply filters to demand dataframe"""
     with st.expander("📎 Filters", expanded=True):
@@ -176,7 +181,7 @@ def show_demand_summary(filtered_df):
     with col1:
         st.metric("Total Unique Products", f"{total_products:,}")
     with col2:
-        st.metric("Total Value (USD)", f"${total_value:,.2f}")
+        st.metric("Total Value (USD)", format_currency(total_value, "USD"))
     with col3:
         if missing_etd > 0:
             st.metric("⚠️ Missing ETD", f"{missing_etd} records", delta_color="inverse")
@@ -210,9 +215,7 @@ def show_demand_detail_table(filtered_df):
     st.markdown("### 🔍 Demand Details")
     
     # Warning for missing ETD
-    missing_etd_count = filtered_df["etd"].isna().sum()
-    if missing_etd_count > 0:
-        st.warning(f"⚠️ Found {missing_etd_count} records with missing ETD dates")
+    missing_etd_count = check_missing_dates(filtered_df, "etd")
     
     # Prepare display columns
     base_columns = [
@@ -240,6 +243,22 @@ def show_demand_detail_table(filtered_df):
     styled_df = display_df.style.apply(highlight_missing_dates, axis=1)
     st.dataframe(styled_df, use_container_width=True)
 
+def format_demand_display_df(df):
+    """Format dataframe columns for display"""
+    df = df.copy()
+    df["demand_quantity"] = df["demand_quantity"].apply(lambda x: format_number(x))
+    df["value_in_usd"] = df["value_in_usd"].apply(lambda x: format_currency(x, "USD"))
+    df["etd"] = df["etd"].apply(
+        lambda x: "❌ Missing" if pd.isna(x) else x.strftime("%Y-%m-%d")
+    )
+    return df
+
+def highlight_missing_dates(row):
+    """Highlight rows with missing dates"""
+    if row["etd"] == "❌ Missing":
+        return ["background-color: #ffcccc"] * len(row)
+    return [""] * len(row)
+
 def show_demand_grouped_view(filtered_df, start_date, end_date):
     """Show grouped demand by period"""
     st.markdown("### 📦 Grouped Demand by Product")
@@ -260,11 +279,11 @@ def show_demand_grouped_view(filtered_df, start_date, end_date):
         return
     
     # Create period column
-    df_summary["period"] = create_period_column(df_summary["etd"], period)
+    df_summary["period"] = convert_to_period(df_summary["etd"], period)
     
     # Create pivot table
     pivot_df = create_demand_pivot(df_summary, show_only_nonzero)
-    pivot_df = sort_period_columns(pivot_df, period)
+    pivot_df = sort_period_columns(pivot_df, period, ["product_name", "pt_code"])
     
     # Display pivot
     display_pivot = format_pivot_for_display(pivot_df)
@@ -274,41 +293,13 @@ def show_demand_grouped_view(filtered_df, start_date, end_date):
     show_demand_totals(df_summary, period)
     
     # Export button
-    excel_data = convert_df_to_excel(display_pivot)
+    excel_data = convert_df_to_excel(display_pivot, "Grouped Demand")
     st.download_button(
         label="📤 Export to Excel",
         data=excel_data,
-        file_name="grouped_outbound_demand.xlsx",
+        file_name=f"grouped_demand_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
-
-# === Helper Functions ===
-def format_demand_display_df(df):
-    """Format dataframe columns for display"""
-    df = df.copy()
-    df["demand_quantity"] = df["demand_quantity"].apply(lambda x: f"{x:,.0f}")
-    df["value_in_usd"] = df["value_in_usd"].apply(lambda x: f"${x:,.2f}")
-    df["etd"] = df["etd"].apply(
-        lambda x: "❌ Missing" if pd.isna(x) else x.strftime("%Y-%m-%d")
-    )
-    return df
-
-def highlight_missing_dates(row):
-    """Highlight rows with missing dates"""
-    if row["etd"] == "❌ Missing":
-        return ["background-color: #ffcccc"] * len(row)
-    return [""] * len(row)
-
-def create_period_column(date_series, period_type):
-    """Create period column based on period type"""
-    if period_type == "Daily":
-        return date_series.dt.strftime("%Y-%m-%d")
-    elif period_type == "Weekly":
-        year = date_series.dt.isocalendar().year
-        week = date_series.dt.isocalendar().week
-        return "Week " + week.astype(str).str.zfill(2) + " - " + year.astype(str)
-    else:  # Monthly
-        return date_series.dt.to_period("M").dt.strftime("%b %Y")
 
 def create_demand_pivot(df_summary, show_only_nonzero):
     """Create pivot table for demand"""
@@ -331,7 +322,7 @@ def format_pivot_for_display(pivot_df):
     """Format pivot table for display"""
     display_pivot = pivot_df.copy()
     for col in display_pivot.columns[2:]:  # Skip product_name and pt_code
-        display_pivot[col] = display_pivot[col].apply(lambda x: f"{x:,.0f}")
+        display_pivot[col] = display_pivot[col].apply(lambda x: format_number(x))
     return display_pivot
 
 def show_demand_totals(df_summary, period):
@@ -350,65 +341,92 @@ def show_demand_totals(df_summary, period):
     
     for period in qty_by_period.index:
         summary_data[period] = [
-            f"{qty_by_period[period]:,.0f}",
-            f"${val_by_period[period]:,.2f}"
+            format_number(qty_by_period[period]),
+            format_currency(val_by_period[period], "USD")
         ]
     
     display_final = pd.DataFrame(summary_data)
-    display_final = sort_period_columns(display_final, period)
+    display_final = sort_period_columns(display_final, period, ["Metric"])
     
     st.markdown("#### 🔢 Column Totals")
     st.dataframe(display_final, use_container_width=True)
 
-def sort_period_columns(df, period_type):
-    """Sort dataframe columns by period"""
-    # Identify info columns
-    info_cols = ["Metric"] if "Metric" in df.columns else ["product_name", "pt_code"]
-    
-    # Get period columns
-    period_cols = [col for col in df.columns if col not in info_cols]
-    period_cols = [p for p in period_cols if pd.notna(p) and str(p).strip() != "" and str(p) != "nan"]
-    
-    # Sort based on period type
-    if period_type == "Weekly":
-        def parse_week_key(x):
-            try:
-                parts = str(x).split(" - ")
-                if len(parts) == 2:
-                    week = int(parts[0].replace("Week", "").strip())
-                    year = int(parts[1].strip())
-                    return (year, week)
-            except:
-                pass
-            return (9999, 99)
-        sorted_periods = sorted(period_cols, key=parse_week_key)
-    
-    elif period_type == "Monthly":
-        def parse_month_key(x):
-            try:
-                return pd.to_datetime("01 " + str(x), format="%d %b %Y")
-            except:
-                return pd.Timestamp.max
-        sorted_periods = sorted(period_cols, key=parse_month_key)
-    
-    else:  # Daily
-        sorted_periods = sorted(period_cols)
-    
-    return df[info_cols + sorted_periods]
+# === Main Page Logic ===
+st.subheader("📤 Outbound Demand by Period")
 
-def convert_df_to_excel(df):
-    """Convert dataframe to Excel bytes"""
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-        df.to_excel(writer, index=False, sheet_name="Data")
-        
-        # Auto-adjust column widths
-        worksheet = writer.sheets["Data"]
-        for i, col in enumerate(df.columns):
-            max_len = max(
-                df[col].astype(str).map(len).max(),
-                len(str(col))
-            ) + 2
-            worksheet.set_column(i, i, max_len)
+# Source selection
+source = select_demand_source()
+
+# Load and prepare data
+with st.spinner("Loading demand data..."):
+    df_all = load_and_prepare_demand_data(source)
+
+if df_all.empty:
+    st.info("No outbound demand data available.")
+    st.stop()
+
+# Apply filters
+filtered_df, start_date, end_date = apply_demand_filters(df_all)
+
+# Save to session state for other pages
+save_to_session_state('demand_analysis_data', filtered_df)
+save_to_session_state('demand_analysis_filters', {
+    'source': source,
+    'start_date': start_date,
+    'end_date': end_date
+})
+
+# Display sections
+show_demand_summary(filtered_df)
+show_demand_detail_table(filtered_df)
+show_demand_grouped_view(filtered_df, start_date, end_date)
+
+# === Additional Page Features ===
+st.markdown("---")
+
+# Quick Actions
+col1, col2, col3 = st.columns(3)
+with col1:
+    if st.button("📊 Go to GAP Analysis", type="primary", use_container_width=True):
+        st.switch_page("pages/3_📊_GAP_Analysis.py")
+
+with col2:
+    if st.button("📥 View Supply", use_container_width=True):
+        st.switch_page("pages/2_📥_Supply_Analysis.py")
+
+with col3:
+    if st.button("🔄 Refresh Data", use_container_width=True):
+        st.cache_data.clear()
+        st.rerun()
+
+# Help section
+with st.expander("ℹ️ How to use Demand Analysis", expanded=False):
+    st.markdown("""
+    ### Understanding Demand Data
     
-    return output.getvalue()
+    **Data Sources:**
+    - **OC (Order Confirmation)**: Confirmed customer orders
+    - **Forecast**: Customer demand predictions
+    - **Both**: Combined view (watch for duplicates if forecast is converted to OC!)
+    
+    **Key Metrics:**
+    - **Pending Delivery**: Orders not yet shipped
+    - **ETD**: Estimated Time of Departure (when goods should leave warehouse)
+    - **Conversion Status**: Whether forecast has been converted to actual order
+    
+    **Tips:**
+    - Check for missing ETD dates - these need immediate attention
+    - Monitor forecast conversion rates to improve planning accuracy
+    - Group by period (Weekly/Monthly) for better demand planning
+    - Use filters to focus on specific customers or products
+    
+    **Common Actions:**
+    1. Review high-value pending orders
+    2. Identify products with consistent demand patterns
+    3. Check forecast accuracy by comparing converted vs non-converted
+    4. Export grouped data for demand planning meetings
+    """)
+
+# Footer
+st.markdown("---")
+st.caption(f"Last data refresh: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
