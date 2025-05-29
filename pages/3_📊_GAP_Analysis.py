@@ -355,12 +355,16 @@ def select_gap_sources():
         
         # Customer filter - only for demand
         st.markdown("##### Customer Filter")
+        
+        # Get customers from session state or empty list
         all_customers = st.session_state.get('filter_customers', [])
+        
         selected_customers = st.multiselect(
             "Select Customers", 
             options=all_customers,
             key="gap_customer",
-            help="Filter demand by specific customers"
+            help="Filter demand by specific customers",
+            placeholder="Choose an option" if all_customers else "No customers available"
         )
     
     with col2:
@@ -489,24 +493,44 @@ def update_filter_options(df_demand, df_supply):
     """Update filter options based on loaded data"""
     # Get unique values
     all_entities = sorted(set(
-        df_demand["legal_entity"].dropna().unique().tolist() + 
-        df_supply["legal_entity"].dropna().unique().tolist()
+        df_demand["legal_entity"].dropna().astype(str).unique().tolist() + 
+        df_supply["legal_entity"].dropna().astype(str).unique().tolist()
     ))
+    all_entities = [e for e in all_entities if e and e != 'nan']
+    
     all_products = sorted(set(
-        df_demand["pt_code"].dropna().unique().tolist() + 
-        df_supply["pt_code"].dropna().unique().tolist()
+        df_demand["pt_code"].dropna().astype(str).unique().tolist() + 
+        df_supply["pt_code"].dropna().astype(str).unique().tolist()
     ))
+    all_products = [p for p in all_products if p and p != 'nan']
+    
     all_brands = sorted(set(
-        df_demand["brand"].dropna().unique().tolist() + 
-        df_supply["brand"].dropna().unique().tolist()
+        df_demand["brand"].dropna().astype(str).unique().tolist() + 
+        df_supply["brand"].dropna().astype(str).unique().tolist()
     ))
-    all_customers = sorted(df_demand["customer"].dropna().unique().tolist())
+    all_brands = [b for b in all_brands if b and b != 'nan']
+    
+    # Get customers from demand only
+    all_customers = []
+    if 'customer' in df_demand.columns:
+        all_customers = sorted(df_demand["customer"].dropna().astype(str).unique().tolist())
+        all_customers = [c for c in all_customers if c and c != 'nan']
     
     # Store in session state
     st.session_state['filter_entities'] = all_entities
     st.session_state['filter_products'] = all_products
     st.session_state['filter_brands'] = all_brands
     st.session_state['filter_customers'] = all_customers
+    
+    # Debug info
+    if st.session_state.get('debug_mode', False):
+        st.write(f"Debug - Filter options updated:")
+        st.write(f"- Entities: {len(all_entities)}")
+        st.write(f"- Products: {len(all_products)}")
+        st.write(f"- Brands: {len(all_brands)}")
+        st.write(f"- Customers: {len(all_customers)}")
+        if len(all_customers) == 0:
+            st.warning("Debug - No customers found in demand data!")
 
 def apply_filters_to_data(df_demand, df_supply, filters, selected_customers=None):
     """Apply filters to demand and supply dataframes"""
@@ -568,14 +592,10 @@ def calculate_gap_with_carry_forward(df_demand, df_supply, period_type="Weekly")
     
     if debug_mode:
         st.write("Debug - Before grouping:")
-        problem_products = ['P023003894', 'P025000677', 'P025000783', 'P022001931']
-        for pt_code in problem_products:
-            product_rows = df_d[df_d['pt_code'] == pt_code]
-            if not product_rows.empty:
-                st.write(f"{pt_code}: {len(product_rows)} demand rows")
-                st.dataframe(product_rows[['pt_code', 'period', 'demand_quantity', 'unallocated_demand']])
+        st.write(f"Unique products in demand: {df_d['pt_code'].nunique()}")
+        st.write(f"Unique products in supply: {df_s['pt_code'].nunique()}")
     
-    # Group demand by product and period - CRITICAL FOR AVOIDING DUPLICATES
+    # Group demand by product and period
     demand_grouped = df_d.groupby(
         ["pt_code", "product_name", "package_size", "standard_uom", "period"],
         as_index=False,
@@ -600,15 +620,16 @@ def calculate_gap_with_carry_forward(df_demand, df_supply, period_type="Weekly")
     
     if debug_mode:
         st.write("Debug - After grouping:")
-        for pt_code in ['P023003894', 'P025000677']:
-            product_rows = demand_grouped[demand_grouped['pt_code'] == pt_code]
-            if not product_rows.empty:
-                st.write(f"{pt_code}: {len(product_rows)} grouped rows")
-                st.dataframe(product_rows)
+        st.write(f"Unique products in demand grouped: {demand_grouped['pt_code'].nunique()}")
+        st.write(f"Unique products in supply grouped: {supply_grouped['pt_code'].nunique()}")
     
     # Get all periods and products
     all_periods = get_all_periods(demand_grouped, supply_grouped, period_type)
     all_products = get_all_products(demand_grouped, supply_grouped)
+    
+    if debug_mode:
+        st.write(f"Debug - Total unique products for GAP: {len(all_products)}")
+        st.write(f"Debug - All products pt_codes: {all_products['pt_code'].nunique()}")
     
     # Calculate gap for each product
     results = []
@@ -623,16 +644,84 @@ def calculate_gap_with_carry_forward(df_demand, df_supply, period_type="Weekly")
     
     gap_df = pd.DataFrame(results)
     
-    # Final deduplication check
-    if not gap_df.empty:
-        before_dedup = len(gap_df)
-        gap_df = gap_df.drop_duplicates(subset=['pt_code', 'period'])
-        after_dedup = len(gap_df)
-        
-        if debug_mode and before_dedup != after_dedup:
-            st.warning(f"Debug - Removed {before_dedup - after_dedup} duplicate rows in final gap_df")
+    # Final count
+    if debug_mode and not gap_df.empty:
+        st.write(f"Debug - Final GAP analysis unique products: {gap_df['pt_code'].nunique()}")
+        st.write(f"Debug - Total GAP rows: {len(gap_df)}")
+        st.write(f"Debug - Rows with zero demand: {len(gap_df[gap_df['total_demand_qty'] == 0])}")
     
     return gap_df
+
+def calculate_product_gap_smart(product, all_periods, demand_grouped, supply_grouped):
+    """Calculate gap for a single product across all periods - smart version"""
+    pt_code = product["pt_code"]
+    product_name = product["product_name"]
+    package_size = product["package_size"]
+    uom = product["standard_uom"]
+    
+    carry_forward_qty = 0
+    results = []
+    
+    # Check if this product has any demand or supply across all periods
+    product_has_demand = not demand_grouped[demand_grouped["pt_code"] == pt_code].empty
+    product_has_supply = not supply_grouped[supply_grouped["pt_code"] == pt_code].empty
+    
+    for period in all_periods:
+        # Get demand for this period
+        demand_mask = (
+            (demand_grouped["pt_code"] == pt_code) & 
+            (demand_grouped["period"] == period)
+        )
+        demand = demand_grouped.loc[demand_mask, "total_demand_qty"].sum()
+        
+        # Get supply for this period
+        supply_mask = (
+            (supply_grouped["pt_code"] == pt_code) & 
+            (supply_grouped["period"] == period)
+        )
+        supply = supply_grouped.loc[supply_mask, "total_supply_qty"].sum()
+        
+        # Only create a row if:
+        # 1. There is demand in this period, OR
+        # 2. There is supply in this period, OR
+        # 3. There is carry forward inventory AND (product has future demand)
+        has_activity = demand > 0 or supply > 0 or (carry_forward_qty > 0 and product_has_demand)
+        
+        if has_activity:
+            # Calculate gap
+            total_available = carry_forward_qty + supply
+            gap = total_available - demand
+            
+            # Calculate fulfillment rate
+            if demand > 0:
+                fulfill_rate = min(100, (total_available / demand * 100))
+            else:
+                # If no demand, fulfillment is 100%
+                fulfill_rate = 100
+                
+            status = "✅ Fulfilled" if gap >= 0 else "❌ Shortage"
+            
+            results.append({
+                "pt_code": pt_code,
+                "product_name": product_name,
+                "package_size": package_size,
+                "standard_uom": uom,
+                "period": period,
+                "begin_inventory": carry_forward_qty,
+                "supply_in_period": supply,
+                "total_available": total_available,
+                "total_demand_qty": demand,
+                "gap_quantity": gap,
+                "fulfillment_rate_percent": fulfill_rate,
+                "fulfillment_status": status,
+            })
+        
+        # Update carry forward
+        if has_activity:
+            carry_forward_qty = max(0, total_available - demand)
+        # If no activity but has carry forward, keep it for next period
+    
+    return results
 
 def get_all_periods(demand_grouped, supply_grouped, period_type):
     """Get all unique periods sorted chronologically"""
@@ -655,20 +744,40 @@ def get_all_periods(demand_grouped, supply_grouped, period_type):
         return sorted(all_periods_raw)
 
 def get_all_products(demand_grouped, supply_grouped):
-    """Get all unique products"""
-    products_df = pd.concat([
-        demand_grouped[["pt_code", "product_name", "package_size", "standard_uom"]],
-        supply_grouped[["pt_code", "product_name", "package_size", "standard_uom"]]
-    ]).drop_duplicates()
+    """Get all unique products - only by pt_code"""
+    # Get unique products by pt_code only
+    demand_products = demand_grouped[["pt_code"]].drop_duplicates()
+    supply_products = supply_grouped[["pt_code"]].drop_duplicates()
     
-    # Clean product data
-    for col in ["pt_code", "product_name", "package_size", "standard_uom"]:
-        products_df[col] = products_df[col].astype(str).str.strip()
+    # Combine and get unique pt_codes
+    all_pt_codes = pd.concat([demand_products, supply_products]).drop_duplicates()
     
-    return products_df
+    # Now get full product info for each unique pt_code
+    # Prefer demand info, fallback to supply info
+    products_list = []
+    
+    for pt_code in all_pt_codes['pt_code'].unique():
+        # Try to get from demand first
+        demand_match = demand_grouped[demand_grouped['pt_code'] == pt_code].head(1)
+        if not demand_match.empty:
+            products_list.append(demand_match[["pt_code", "product_name", "package_size", "standard_uom"]])
+        else:
+            # Get from supply
+            supply_match = supply_grouped[supply_grouped['pt_code'] == pt_code].head(1)
+            if not supply_match.empty:
+                products_list.append(supply_match[["pt_code", "product_name", "package_size", "standard_uom"]])
+    
+    if products_list:
+        products_df = pd.concat(products_list, ignore_index=True)
+        # Clean product data
+        for col in ["pt_code", "product_name", "package_size", "standard_uom"]:
+            products_df[col] = products_df[col].astype(str).str.strip()
+        return products_df
+    else:
+        return pd.DataFrame(columns=["pt_code", "product_name", "package_size", "standard_uom"])
 
 def calculate_product_gap(product, all_periods, demand_grouped, supply_grouped):
-    """Calculate gap for a single product across all periods"""
+    """Calculate gap for a single product across all periods - only create rows when needed"""
     pt_code = product["pt_code"]
     product_name = product["product_name"]
     package_size = product["package_size"]
@@ -676,51 +785,82 @@ def calculate_product_gap(product, all_periods, demand_grouped, supply_grouped):
     
     carry_forward_qty = 0
     results = []
+    has_created_row = False
+    
+    # Get all demand data for this product
+    product_demand_data = demand_grouped[demand_grouped["pt_code"] == pt_code]
+    
+    # Get all supply data for this product  
+    product_supply_data = supply_grouped[supply_grouped["pt_code"] == pt_code]
     
     for period in all_periods:
         # Get demand for this period
-        demand_mask = (
-            (demand_grouped["pt_code"] == pt_code) & 
-            (demand_grouped["period"] == period)
-        )
-        demand = demand_grouped.loc[demand_mask, "total_demand_qty"].sum()
+        demand_in_period = product_demand_data[product_demand_data["period"] == period]
+        demand = demand_in_period["total_demand_qty"].sum() if not demand_in_period.empty else 0
         
         # Get supply for this period
-        supply_mask = (
-            (supply_grouped["pt_code"] == pt_code) & 
-            (supply_grouped["period"] == period)
-        )
-        supply = supply_grouped.loc[supply_mask, "total_supply_qty"].sum()
+        supply_in_period = product_supply_data[product_supply_data["period"] == period]
+        supply = supply_in_period["total_supply_qty"].sum() if not supply_in_period.empty else 0
         
-        # Calculate gap
+        # Calculate total available
         total_available = carry_forward_qty + supply
-        gap = total_available - demand
-        fulfill_rate = min(100, (total_available / demand * 100)) if demand > 0 else 100
-        status = "✅ Fulfilled" if gap >= 0 else "❌ Shortage"
         
-        results.append({
-            "pt_code": pt_code,
-            "product_name": product_name,
-            "package_size": package_size,
-            "standard_uom": uom,
-            "period": period,
-            "begin_inventory": carry_forward_qty,
-            "supply_in_period": supply,
-            "total_available": total_available,
-            "total_demand_qty": demand,
-            "gap_quantity": gap,
-            "fulfillment_rate_percent": fulfill_rate,
-            "fulfillment_status": status,
-        })
+        # Decision logic: Should we create a row?
+        should_create_row = False
         
-        # Carry forward only positive inventory
-        carry_forward_qty = max(0, gap)
+        if demand > 0:
+            # Always create row if there's demand
+            should_create_row = True
+        elif supply > 0 and has_created_row:
+            # Create row if there's supply AND we've already created at least one row for this product
+            should_create_row = True
+        elif carry_forward_qty > 0 and not product_demand_data.empty:
+            # Create row if there's carry forward AND product has demand in some period
+            should_create_row = True
+        
+        if should_create_row:
+            # Calculate gap
+            gap = total_available - demand
+            
+            # Calculate fulfillment rate
+            if demand > 0:
+                fulfill_rate = min(100, (total_available / demand * 100))
+            else:
+                fulfill_rate = 100
+                
+            status = "✅ Fulfilled" if gap >= 0 else "❌ Shortage"
+            
+            results.append({
+                "pt_code": pt_code,
+                "product_name": product_name,
+                "package_size": package_size,
+                "standard_uom": uom,
+                "period": period,
+                "begin_inventory": carry_forward_qty,
+                "supply_in_period": supply,
+                "total_available": total_available,
+                "total_demand_qty": demand,
+                "gap_quantity": gap,
+                "fulfillment_rate_percent": fulfill_rate,
+                "fulfillment_status": status,
+            })
+            
+            has_created_row = True
+            
+            # Update carry forward
+            carry_forward_qty = max(0, gap)
+        else:
+            # No row created, but still update carry forward if there was supply
+            if supply > 0:
+                carry_forward_qty += supply
     
     return results
 
 # === Display Options ===
 def get_gap_display_options():
     """Get display options for GAP analysis"""
+    st.markdown("### ⚙️ Display Options")
+    
     col1, col2, col3, col4 = st.columns(4)
     
     period_type = col1.selectbox(
@@ -738,7 +878,7 @@ def get_gap_display_options():
     
     exclude_zero_demand = col3.checkbox(
         "🚫 Exclude zero demand", 
-        value=False,
+        value=True,  # Default to True - more logical
         key="gap_exclude_zero_demand",
         help="Hide products that have supply but no demand"
     )
@@ -762,18 +902,7 @@ def show_gap_summary(gap_df, display_options):
     """Show GAP analysis summary"""
     st.markdown("### 📊 GAP Analysis Summary")
     
-    # Create display dataframe based on filters
-    display_df = gap_df.copy()
-    
-    # Apply display filters
-    if display_options["show_shortage_only"]:
-        display_df = display_df[display_df["gap_quantity"] < 0]
-    
-    if display_options["exclude_zero_demand"]:
-        products_with_demand = gap_df[gap_df["total_demand_qty"] > 0]["pt_code"].unique()
-        display_df = display_df[display_df["pt_code"].isin(products_with_demand)]
-    
-    # Calculate metrics on ORIGINAL gap_df, not filtered
+    # Calculate metrics on ORIGINAL gap_df (before display filters)
     total_products = gap_df["pt_code"].nunique()
     shortage_products = len(gap_df[gap_df["gap_quantity"] < 0]["pt_code"].unique())
     total_shortage = gap_df["gap_quantity"].where(gap_df["gap_quantity"] < 0, 0).abs().sum()
@@ -803,8 +932,23 @@ def show_gap_summary(gap_df, display_options):
         st.metric("Avg Fulfillment Rate", format_percentage(avg_fulfillment))
     
     # Show info about filtered view
-    if display_options["show_shortage_only"] and len(display_df) != len(gap_df):
-        st.info(f"🔍 Showing {len(display_df)} items with shortage out of {len(gap_df)} total items")
+    if display_options["show_shortage_only"] or display_options["exclude_zero_demand"]:
+        # Count items after applying filters
+        filtered_df = gap_df.copy()
+        
+        # Debug: Show counts before filtering
+        if st.session_state.get('debug_mode', False):
+            st.write(f"Debug - Total rows before filtering: {len(filtered_df)}")
+            st.write(f"Debug - Rows with zero demand: {len(filtered_df[filtered_df['total_demand_qty'] == 0])}")
+            st.write(f"Debug - Rows with positive demand: {len(filtered_df[filtered_df['total_demand_qty'] > 0])}")
+        
+        if display_options["show_shortage_only"]:
+            filtered_df = filtered_df[filtered_df["gap_quantity"] < 0]
+        if display_options["exclude_zero_demand"]:
+            filtered_df = filtered_df[filtered_df["total_demand_qty"] > 0]
+        
+        st.info(f"🔍 Showing {len(filtered_df)} items out of {len(gap_df)} total items (filters applied)")
+
 
 def show_allocation_impact_summary(df_demand_enhanced):
     """Show how allocation affects the GAP analysis"""
@@ -831,12 +975,26 @@ def show_allocation_impact_summary(df_demand_enhanced):
         with col4:
             st.metric("Net Unallocated", format_number(total_unallocated))
 
-def show_gap_detail_table(gap_df):
+def show_gap_detail_table(gap_df, display_options):
     """Show detailed GAP analysis table"""
     st.markdown("### 📄 GAP Details by Product & Period")
     
-    # Format display
+    # Apply display filters
     display_df = gap_df.copy()
+    
+    if display_options["show_shortage_only"]:
+        display_df = display_df[display_df["gap_quantity"] < 0]
+    
+    if display_options["exclude_zero_demand"]:
+        # Filter out rows where total_demand_qty is 0
+        display_df = display_df[display_df["total_demand_qty"] > 0]
+    
+    if display_df.empty:
+        st.info("No data to display with current filter settings.")
+        return
+    
+    # Format display - work on filtered data
+    display_df_formatted = display_df.copy()
     
     # Format numeric columns
     numeric_cols = [
@@ -845,16 +1003,16 @@ def show_gap_detail_table(gap_df):
     ]
     
     for col in numeric_cols:
-        display_df[col] = display_df[col].apply(lambda x: format_number(x))
+        display_df_formatted[col] = display_df_formatted[col].apply(lambda x: format_number(x))
     
-    display_df["fulfillment_rate_percent"] = display_df["fulfillment_rate_percent"].apply(
+    display_df_formatted["fulfillment_rate_percent"] = display_df_formatted["fulfillment_rate_percent"].apply(
         lambda x: format_percentage(x)
     )
     
     # Add a status column for color indication
-    display_df['Status'] = display_df['fulfillment_status']
+    display_df_formatted['Status'] = display_df_formatted['fulfillment_status']
     
-    st.dataframe(display_df, use_container_width=True, height=400)
+    st.dataframe(display_df_formatted, use_container_width=True, height=400)
 
 def show_gap_pivot_view(gap_df, display_options):
     """Show GAP pivot view with styling options"""
@@ -881,14 +1039,14 @@ def show_gap_pivot_view(gap_df, display_options):
         key="gap_style_mode"
     )
     
-    # Create pivot
-    pivot_gap = display_df.groupby(["product_name", "pt_code", "period"]).agg({
-        "gap_quantity": "sum"
-    }).reset_index().pivot(
+    # Create pivot - aggregate by product across all periods
+    pivot_gap = display_df.pivot_table(
         index=["product_name", "pt_code"], 
         columns="period", 
-        values="gap_quantity"
-    ).fillna(0).reset_index()
+        values="gap_quantity",
+        aggfunc="sum",
+        fill_value=0
+    ).reset_index()
     
     # Sort columns
     pivot_gap = sort_period_columns(pivot_gap, display_options["period_type"], ["product_name", "pt_code"])
@@ -1049,13 +1207,44 @@ if st.session_state.get('gap_analysis_result') is not None and not st.session_st
                 del st.session_state[key]
         st.rerun()
 
-# Always show source selection and filters
-# Source selection
+# Pre-load data on first run to populate filters
+if 'initial_data_loaded' not in st.session_state:
+    with st.spinner("Initializing data..."):
+        # Load with default sources
+        default_demand_sources = ["OC", "Forecast"]
+        default_supply_sources = ["Inventory", "Pending CAN", "Pending PO"]
+        
+        # Load demand data
+        df_demand_temp = load_and_prepare_demand_data(
+            default_demand_sources,
+            False  # include_converted = False
+        )
+        
+        # Load supply data
+        df_supply_temp = load_and_prepare_supply_data(
+            default_supply_sources, 
+            True  # exclude_expired = True
+        )
+        
+        if not df_demand_temp.empty and not df_supply_temp.empty:
+            # Store in session state
+            st.session_state['temp_demand_data'] = df_demand_temp
+            st.session_state['temp_supply_data'] = df_supply_temp
+            # Update filter options
+            update_filter_options(df_demand_temp, df_supply_temp)
+        
+        st.session_state['initial_data_loaded'] = True
+        st.session_state['last_source_key'] = "OC-Forecast_Inventory-Pending CAN-Pending PO"
+
+# Now show source selection with populated filters
 selected_sources = select_gap_sources()
 
-# Pre-load data to populate filters when sources change
-# Create a unique key based on selected sources
+# Display options
+display_options = get_gap_display_options()
+
+# Check if sources changed and reload if needed
 source_key = f"{'-'.join(selected_sources['demand'])}_{'-'.join(selected_sources['supply'])}"
+
 if st.session_state.get('last_source_key') != source_key:
     st.session_state['last_source_key'] = source_key
     # Clear cached data when sources change
@@ -1063,11 +1252,10 @@ if st.session_state.get('last_source_key') != source_key:
         del st.session_state['temp_demand_data']
     if 'temp_supply_data' in st.session_state:
         del st.session_state['temp_supply_data']
-
-# Load data for filters if not already loaded
-if 'temp_demand_data' not in st.session_state or 'temp_supply_data' not in st.session_state:
+    
+    # Reload data with new sources
     if selected_sources["demand"] and selected_sources["supply"]:
-        with st.spinner("Loading data..."):
+        with st.spinner("Reloading data..."):
             # Load demand data
             df_demand_temp = load_and_prepare_demand_data(
                 selected_sources["demand"],
@@ -1134,6 +1322,13 @@ if st.button("🚀 Run GAP Analysis", type="primary", use_container_width=True):
             'supply': df_supply_filtered
         }
         st.session_state['gap_analysis_ran'] = True
+        st.session_state['gap_display_options'] = display_options
+        
+        # Clear cached GAP results to force recalculation
+        if 'gap_df_cached' in st.session_state:
+            del st.session_state['gap_df_cached']
+        if 'gap_period_type' in st.session_state:
+            del st.session_state['gap_period_type']
         
         # Check data quality
         st.markdown("---")
@@ -1149,44 +1344,53 @@ if st.button("🚀 Run GAP Analysis", type="primary", use_container_width=True):
                 st.warning(f"⚠️ Supply: {supply_missing} records with missing dates")
 
 # Display results if analysis has been run
-if st.session_state['gap_analysis_ran'] and st.session_state['gap_analysis_data'] is not None:
+if st.session_state.get('gap_analysis_ran', False) and st.session_state.get('gap_analysis_data') is not None:
     
     # Get data from session state
     df_demand_filtered = st.session_state['gap_analysis_data']['demand']
     df_supply_filtered = st.session_state['gap_analysis_data']['supply']
     
-    # Display options
-    st.markdown("---")
-    display_options = get_gap_display_options()
+    # Get display options from session state
+    stored_display_options = st.session_state.get('gap_display_options', display_options)
     
     # Apply date exclusion if requested
-    if display_options["exclude_missing_dates"]:
-        df_demand_filtered = df_demand_filtered[df_demand_filtered["etd"].notna()]
-        df_supply_filtered = df_supply_filtered[df_supply_filtered["date_ref"].notna()]
+    if stored_display_options["exclude_missing_dates"]:
+        df_demand_filtered_display = df_demand_filtered[df_demand_filtered["etd"].notna()]
+        df_supply_filtered_display = df_supply_filtered[df_supply_filtered["date_ref"].notna()]
+    else:
+        df_demand_filtered_display = df_demand_filtered
+        df_supply_filtered_display = df_supply_filtered
     
     # Show allocation impact
-    df_demand_enhanced = enhance_demand_with_allocation_info(df_demand_filtered)
+    df_demand_enhanced = enhance_demand_with_allocation_info(df_demand_filtered_display)
     show_allocation_impact_summary(df_demand_enhanced)
     
-    # Calculate GAP
-    with st.spinner("Calculating supply-demand gaps..."):
-        gap_df = calculate_gap_with_carry_forward(
-            df_demand_filtered, 
-            df_supply_filtered, 
-            display_options["period_type"]
-        )
+    # Use stored GAP results if available, otherwise recalculate
+    if 'gap_df_cached' in st.session_state and st.session_state.get('gap_period_type') == stored_display_options["period_type"]:
+        gap_df = st.session_state['gap_df_cached']
+    else:
+        # Calculate GAP
+        with st.spinner("Calculating supply-demand gaps..."):
+            gap_df = calculate_gap_with_carry_forward(
+                df_demand_filtered_display, 
+                df_supply_filtered_display, 
+                stored_display_options["period_type"]
+            )
+            # Cache the results
+            st.session_state['gap_df_cached'] = gap_df
+            st.session_state['gap_period_type'] = stored_display_options["period_type"]
     
     # Save to session state for other pages
     save_to_session_state('gap_analysis_result', gap_df)
-    save_to_session_state('demand_filtered', df_demand_filtered)
-    save_to_session_state('supply_filtered', df_supply_filtered)
+    save_to_session_state('demand_filtered', df_demand_filtered_display)
+    save_to_session_state('supply_filtered', df_supply_filtered_display)
     save_to_session_state('last_gap_analysis', gap_df)
     save_to_session_state('last_analysis_time', datetime.now().strftime('%Y-%m-%d %H:%M'))
     
     if not gap_df.empty:
-        # Display results
+        # Display results with current display options (not stored ones)
         show_gap_summary(gap_df, display_options)
-        show_gap_detail_table(gap_df)
+        show_gap_detail_table(gap_df, display_options)
         show_gap_pivot_view(gap_df, display_options)
         
         # Export section
