@@ -114,15 +114,35 @@ def convert_to_period(date_series, period_type="Weekly"):
 def parse_week_period(period_str):
     """Parse week period string for sorting"""
     try:
-        parts = str(period_str).split(" - ")
+        # Handle None or NaN values
+        if pd.isna(period_str) or not period_str:
+            return (9999, 99)
+            
+        # Convert to string and strip whitespace
+        period_str = str(period_str).strip()
+        
+        # Split by " - " to get week part and year part
+        parts = period_str.split(" - ")
         if len(parts) == 2:
-            week = int(parts[0].replace("Week", "").strip())
-            year = int(parts[1].strip())
-            return (year, week)
-    except:
-        pass
-    return (9999, 99)
+            # Extract week number from "Week XX"
+            week_part = parts[0].strip()  # "Week 01"
+            year_part = parts[1].strip()  # "2025"
+            
+            # Remove "Week " prefix and get the number
+            if week_part.startswith("Week "):
+                week_str = week_part[5:].strip()  # Remove "Week " (5 characters)
+                week = int(week_str)
+                year = int(year_part)
+                
+                # Debug print
+                # print(f"Parsed '{period_str}' -> ({year}, {week})")
 
+                return (year, week)
+    except Exception:
+        pass
+    
+    # Return high values for invalid formats to sort them to the end
+    return (9999, 99)
 
 def parse_month_period(period_str):
     """Parse month period string for sorting"""
@@ -215,6 +235,28 @@ def check_missing_dates(df, date_column, show_warning=True):
     return missing_count
 
 
+# Add this function to helpers.py after check_missing_dates function
+
+def check_past_dates(df, date_column, show_warning=True):
+    """
+    Check for past dates in dataframe
+    
+    Args:
+        df: DataFrame to check
+        date_column: Name of date column
+        show_warning: Whether to show Streamlit warning
+    
+    Returns:
+        Number of past dates
+    """
+    today = pd.Timestamp.now().normalize()
+    past_count = df[df[date_column] < today].shape[0]
+    
+    if show_warning and past_count > 0:
+        st.warning(f"🔴 Found {past_count} records with past {date_column}")
+    
+    return past_count
+
 def validate_quantity_columns(df, quantity_columns):
     """Validate and clean quantity columns"""
     for col in quantity_columns:
@@ -222,6 +264,59 @@ def validate_quantity_columns(df, quantity_columns):
             df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
     return df
 
+
+# Replace the is_past_period function in helpers.py with this corrected version:
+
+def is_past_period(period_str, period_type):
+    """Check if a period string represents a past period"""
+    today = datetime.now()
+    
+    try:
+        if period_type == "Daily":
+            # Format: YYYY-MM-DD
+            period_date = pd.to_datetime(period_str)
+            return period_date.date() < today.date()
+            
+        elif period_type == "Weekly":
+            # Format: Week XX - YYYY
+            if "Week" in str(period_str):
+                parts = str(period_str).split(" - ")
+                if len(parts) == 2:
+                    week_num = int(parts[0].replace("Week ", "").strip())
+                    year = int(parts[1].strip())
+                    
+                    # Create date for the last day of that week (Sunday)
+                    # First, get January 1st of that year
+                    jan1 = datetime(year, 1, 1)
+                    
+                    # Find the first Sunday of the year
+                    days_to_sunday = (6 - jan1.weekday()) % 7
+                    first_sunday = jan1 + pd.Timedelta(days=days_to_sunday)
+                    
+                    # Calculate the target week's Sunday
+                    if jan1.weekday() <= 3:  # Thursday or earlier
+                        # Week 1 contains January 1st
+                        target_sunday = first_sunday + pd.Timedelta(weeks=week_num - 1)
+                    else:
+                        # Week 1 starts after January 1st
+                        target_sunday = first_sunday + pd.Timedelta(weeks=week_num - 2)
+                    
+                    return target_sunday.date() < today.date()
+                    
+        elif period_type == "Monthly":
+            # Format: Mon YYYY (e.g., "Jan 2025", "Feb 2025")
+            # Convert month name to datetime
+            period_date = pd.to_datetime(period_str, format='%b %Y')
+            # Check if the entire month has passed
+            next_month = period_date + pd.DateOffset(months=1)
+            return next_month.date() <= today.date()
+            
+    except Exception as e:
+        # If debug mode is available, log the error
+        print(f"Error parsing period '{period_str}': {e}")
+        pass
+    
+    return False
 
 # === STYLING FUNCTIONS ===
 

@@ -14,7 +14,10 @@ from utils.helpers import (
     format_number,
     format_currency,
     check_missing_dates,
-    save_to_session_state
+    save_to_session_state,
+    is_past_period,  # ADD THIS
+    parse_week_period,  # ADD THIS
+    parse_month_period  # ADD THIS
 )
 
 # === Page Config ===
@@ -167,7 +170,7 @@ def prepare_wh_transfer_data(wht_df, exclude_expired):
     
     wht_df["source_type"] = "Pending WH Transfer"
     wht_df["supply_number"] = wht_df["warehouse_transfer_line_id"].astype(str)
-    wht_df["date_ref"] = pd.to_datetime(wht_df["transfer_date"], errors="coerce")
+    wht_df["date_ref"] = pd.to_datetime(wht_df["transfer_date"], errors="coerce") + pd.Timedelta(days=5)  # Estimate 2 days for transfer
     wht_df["quantity"] = pd.to_numeric(wht_df["transfer_quantity"], errors="coerce").fillna(0)
     wht_df["value_in_usd"] = pd.to_numeric(wht_df["warehouse_transfer_value_usd"], errors="coerce").fillna(0)
     wht_df["legal_entity"] = wht_df["owning_company_name"]
@@ -215,9 +218,10 @@ def standardize_supply_df(df):
     
     return df[standard_cols]
 
-# === Filtering Functions ===
+
+# === Updated Filtering Functions for Supply Analysis ===
 def apply_supply_filters(df):
-    """Apply filters to supply dataframe"""
+    """Apply filters to supply dataframe with enhanced product search"""
     with st.expander("📎 Filters", expanded=True):
         # Row 1: Entity, Brand, Product
         col1, col2, col3 = st.columns(3)
@@ -234,11 +238,30 @@ def apply_supply_filters(df):
                 key="supply_brand"
             )
         with col3:
-            selected_pt = st.multiselect(
-                "PT Code", 
-                sorted(df["pt_code"].dropna().unique()), 
-                key="supply_pt_code"
+            # Enhanced product filter with both PT Code and Product Name
+            unique_products = df[['pt_code', 'product_name']].drop_duplicates()
+            unique_products = unique_products[
+                (unique_products['pt_code'].notna()) & 
+                (unique_products['pt_code'] != '') &
+                (unique_products['pt_code'] != 'nan')
+            ]
+            
+            product_options = []
+            for _, row in unique_products.iterrows():
+                pt_code = str(row['pt_code'])
+                product_name = str(row['product_name'])[:50] if pd.notna(row['product_name']) else ""
+                option = f"{pt_code} - {product_name}"
+                product_options.append(option)
+            
+            selected_products = st.multiselect(
+                "Product (PT Code - Name)", 
+                sorted(product_options),
+                key="supply_product_filter",
+                help="Search by PT Code or Product Name"
             )
+            
+            # Extract selected PT codes
+            selected_pt_codes = [p.split(' - ')[0] for p in selected_products]
         
         # Row 2: Source type, Date range
         col4, col5, col6 = st.columns(3)
@@ -275,8 +298,8 @@ def apply_supply_filters(df):
         filtered_df = filtered_df[filtered_df["legal_entity"].isin(selected_entity)]
     if selected_brand:
         filtered_df = filtered_df[filtered_df["brand"].isin(selected_brand)]
-    if selected_pt:
-        filtered_df = filtered_df[filtered_df["pt_code"].isin(selected_pt)]
+    if selected_products:
+        filtered_df = filtered_df[filtered_df["pt_code"].isin(selected_pt_codes)]
     if selected_source_type:
         filtered_df = filtered_df[filtered_df["source_type"].isin(selected_source_type)]
     
@@ -536,21 +559,47 @@ def show_supply_grouped_view(filtered_df, start_date, end_date):
         # Combined view
         display_supply_pivot(df_summary, period, show_only_nonzero, "All Sources")
 
+
+
 def display_supply_pivot(df_summary, period, show_only_nonzero, title):
-    """Display supply pivot table"""
+    """Display supply pivot table with past period indicators"""
     # Create pivot table
     pivot_df = create_supply_pivot(df_summary, show_only_nonzero)
     pivot_df = sort_period_columns(pivot_df, period, ["product_name", "pt_code"])
     
+    # Create display version with past period indicators
+    display_pivot = pivot_df.copy()
+    
+    # Format numeric columns first
+    for col in pivot_df.columns[2:]:  # Skip product_name and pt_code
+        display_pivot[col] = display_pivot[col].apply(lambda x: format_number(x))
+    
+    # Then rename columns with indicators for past periods
+    renamed_columns = {}
+    for col in pivot_df.columns:
+        if col not in ["product_name", "pt_code"]:
+            if is_past_period(str(col), period):
+                renamed_columns[col] = f"🔴 {col}"
+    
+    if renamed_columns:
+        display_pivot = display_pivot.rename(columns=renamed_columns)
+    
+    # Show legend if there are past periods
+    if renamed_columns:
+        st.info("🔴 = Past period (already occurred)")
+    
     # Display pivot
-    display_pivot = format_pivot_for_display(pivot_df)
     st.dataframe(display_pivot, use_container_width=True)
     
-    # Show totals
-    show_supply_totals(df_summary, period)
+    # Show totals with indicators
+    show_supply_totals_with_indicators(df_summary, period)
     
-    # Export button
-    excel_data = convert_df_to_excel(display_pivot, f"Supply_{title}")
+    # Export button (use original pivot without indicators)
+    export_pivot = pivot_df.copy()
+    for col in pivot_df.columns[2:]:
+        export_pivot[col] = export_pivot[col].apply(lambda x: format_number(x))
+    
+    excel_data = convert_df_to_excel(export_pivot, f"Supply_{title}")
     st.download_button(
         label=f"📤 Export {title} to Excel",
         data=excel_data,
@@ -558,6 +607,9 @@ def display_supply_pivot(df_summary, period, show_only_nonzero, title):
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         key=f"export_{title}"
     )
+
+
+
 
 def create_supply_pivot(df_summary, show_only_nonzero):
     """Create pivot table for supply"""
@@ -583,8 +635,10 @@ def format_pivot_for_display(pivot_df):
         display_pivot[col] = display_pivot[col].apply(lambda x: format_number(x))
     return display_pivot
 
-def show_supply_totals(df_summary, period):
-    """Show period totals for supply"""
+
+# Replace show_supply_totals function with this new version:
+def show_supply_totals_with_indicators(df_summary, period):
+    """Show period totals for supply with past period indicators"""
     # Calculate aggregates
     qty_by_period = df_summary.groupby("period")["quantity"].sum()
     val_by_period = df_summary.groupby("period")["value_in_usd"].sum()
@@ -592,17 +646,48 @@ def show_supply_totals(df_summary, period):
     # Create summary DataFrame
     summary_data = {"Metric": ["🔢 TOTAL QUANTITY", "💰 TOTAL VALUE (USD)"]}
     
+    # Keep track of original period names for sorting
+    period_mapping = {}  # renamed -> original
+    
+    # Add all periods to summary_data with indicators
     for period_val in qty_by_period.index:
-        summary_data[period_val] = [
+        if is_past_period(str(period_val), period):
+            col_name = f"🔴 {period_val}"
+            period_mapping[col_name] = period_val
+        else:
+            col_name = str(period_val)
+            period_mapping[col_name] = period_val
+            
+        summary_data[col_name] = [
             format_number(qty_by_period[period_val]),
             format_currency(val_by_period[period_val], "USD")
         ]
     
     display_final = pd.DataFrame(summary_data)
-    display_final = sort_period_columns(display_final, period, ["Metric"])
+    
+    # Sort columns properly
+    metric_cols = ["Metric"]
+    period_cols = [col for col in display_final.columns if col not in metric_cols]
+    
+    # Sort using original period names
+    def get_sort_key(col_name):
+        original_period = period_mapping.get(col_name, col_name)
+        if period == "Weekly":
+            return parse_week_period(original_period)
+        elif period == "Monthly":
+            return parse_month_period(original_period)
+        else:
+            try:
+                return pd.to_datetime(original_period)
+            except:
+                return pd.Timestamp.max
+    
+    sorted_period_cols = sorted(period_cols, key=get_sort_key)
+    display_final = display_final[metric_cols + sorted_period_cols]
     
     st.markdown("#### 🔢 Column Totals")
     st.dataframe(display_final, use_container_width=True)
+
 
 # === Main Page Logic ===
 st.subheader("📥 Inbound Supply Capability")
