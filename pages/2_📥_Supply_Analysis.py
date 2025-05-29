@@ -4,7 +4,8 @@ from datetime import datetime
 from utils.data_loader import (
     load_inventory_data,
     load_pending_can_data,
-    load_pending_po_data
+    load_pending_po_data,
+    load_pending_wh_transfer_data  # New import
 )
 from utils.helpers import (
     convert_df_to_excel,
@@ -24,7 +25,7 @@ st.set_page_config(
 )
 
 # === Constants ===
-SUPPLY_SOURCES = ["Inventory Only", "Pending CAN Only", "Pending PO Only", "All"]
+SUPPLY_SOURCES = ["Inventory Only", "Pending CAN Only", "Pending PO Only", "Pending WH Transfer Only", "All"]
 PERIOD_TYPES = ["Daily", "Weekly", "Monthly"]
 
 # === Header with Navigation ===
@@ -52,7 +53,7 @@ def select_supply_source():
         source = st.radio(
             "Select Supply Source:",
             SUPPLY_SOURCES,
-            index=3,  # Default to "All"
+            index=4,  # Default to "All" (now index 4)
             horizontal=True,
             key="supply_source_radio"
         )
@@ -94,6 +95,14 @@ def load_and_prepare_supply_data(supply_source, exclude_expired=True):
             if not po_df.empty:
                 po_df = prepare_po_data(po_df)
                 df_parts.append(po_df)
+    
+    # Load Pending WH Transfer
+    if supply_source in ["Pending WH Transfer Only", "All"]:
+        with st.spinner("Loading pending warehouse transfer data..."):
+            wht_df = load_pending_wh_transfer_data()
+            if not wht_df.empty:
+                wht_df = prepare_wh_transfer_data(wht_df, exclude_expired)
+                df_parts.append(wht_df)
     
     if not df_parts:
         return pd.DataFrame()
@@ -151,6 +160,33 @@ def prepare_po_data(po_df):
     
     return po_df
 
+def prepare_wh_transfer_data(wht_df, exclude_expired):
+    """Prepare warehouse transfer data"""
+    today = pd.to_datetime("today").normalize()
+    wht_df = wht_df.copy()
+    
+    wht_df["source_type"] = "Pending WH Transfer"
+    wht_df["supply_number"] = wht_df["warehouse_transfer_line_id"].astype(str)
+    wht_df["date_ref"] = pd.to_datetime(wht_df["transfer_date"], errors="coerce")
+    wht_df["quantity"] = pd.to_numeric(wht_df["transfer_quantity"], errors="coerce").fillna(0)
+    wht_df["value_in_usd"] = pd.to_numeric(wht_df["warehouse_transfer_value_usd"], errors="coerce").fillna(0)
+    wht_df["legal_entity"] = wht_df["owning_company_name"]
+    wht_df["expiry_date"] = pd.to_datetime(wht_df["expiry_date"], errors="coerce")
+    
+    # Add transfer route info
+    wht_df["transfer_route"] = wht_df["from_warehouse"] + " → " + wht_df["to_warehouse"]
+    
+    # Add days since transfer started
+    wht_df["days_in_transfer"] = (today - wht_df["date_ref"]).dt.days
+    
+    # Add days until expiry
+    wht_df["days_until_expiry"] = (wht_df["expiry_date"] - today).dt.days
+    
+    if exclude_expired:
+        wht_df = wht_df[(wht_df["expiry_date"].isna()) | (wht_df["expiry_date"] >= today)]
+    
+    return wht_df
+
 def standardize_supply_df(df):
     """Standardize supply dataframe columns"""
     df = df.copy()
@@ -171,7 +207,8 @@ def standardize_supply_df(df):
     ]
     
     # Add optional columns if they exist
-    optional_cols = ["expiry_date", "days_until_expiry", "days_since_arrival", "vendor"]
+    optional_cols = ["expiry_date", "days_until_expiry", "days_since_arrival", 
+                     "vendor", "transfer_route", "days_in_transfer"]
     for col in optional_cols:
         if col in df.columns:
             standard_cols.append(col)
@@ -305,17 +342,17 @@ def show_supply_warnings(filtered_df, filter_params):
     """Show supply-specific warnings"""
     warning_shown = False
     
-    # Expiry warning for inventory
+    # Expiry warning for inventory and WH transfer
     if "days_until_expiry" in filtered_df.columns and filter_params.get('expiry_warning_days'):
         expiry_warning_days = filter_params['expiry_warning_days']
         expiring_soon = filtered_df[
-            (filtered_df["source_type"] == "Inventory") & 
+            (filtered_df["source_type"].isin(["Inventory", "Pending WH Transfer"])) & 
             (filtered_df["days_until_expiry"] <= expiry_warning_days) &
             (filtered_df["days_until_expiry"] >= 0)
         ]
         
         if not expiring_soon.empty:
-            st.warning(f"⚠️ {len(expiring_soon)} inventory items expiring within {expiry_warning_days} days!")
+            st.warning(f"⚠️ {len(expiring_soon)} items expiring within {expiry_warning_days} days!")
             warning_shown = True
     
     # Delayed CAN warning
@@ -327,6 +364,17 @@ def show_supply_warnings(filtered_df, filter_params):
         
         if not delayed_cans.empty:
             st.warning(f"⚠️ {len(delayed_cans)} CAN items pending stock-in for more than 7 days!")
+            warning_shown = True
+    
+    # Long transfer warning
+    if "days_in_transfer" in filtered_df.columns:
+        long_transfers = filtered_df[
+            (filtered_df["source_type"] == "Pending WH Transfer") & 
+            (filtered_df["days_in_transfer"] > 3)
+        ]
+        
+        if not long_transfers.empty:
+            st.warning(f"⚠️ {len(long_transfers)} warehouse transfers taking more than 3 days!")
             warning_shown = True
     
     if not warning_shown:
@@ -371,10 +419,15 @@ def display_source_table(df, source_type):
         display_columns = base_columns + ["days_since_arrival"]
     elif source_type == "Pending PO" and "vendor" in df.columns:
         display_columns = base_columns + ["vendor"]
+    elif source_type == "Pending WH Transfer":
+        display_columns = base_columns + ["transfer_route", "days_in_transfer"]
+        if "expiry_date" in df.columns:
+            display_columns += ["expiry_date", "days_until_expiry"]
     elif source_type == "All":
         display_columns = base_columns + ["source_type"]
         # Add all optional columns if they exist
-        for col in ["expiry_date", "days_until_expiry", "days_since_arrival", "vendor"]:
+        for col in ["expiry_date", "days_until_expiry", "days_since_arrival", 
+                   "vendor", "transfer_route", "days_in_transfer"]:
             if col in df.columns and col not in display_columns:
                 display_columns.append(col)
     else:
@@ -424,6 +477,11 @@ def format_supply_display_df(df):
     
     if "days_since_arrival" in df.columns:
         df["days_since_arrival"] = df["days_since_arrival"].apply(
+            lambda x: f"{int(x)} days" if pd.notna(x) else ""
+        )
+        
+    if "days_in_transfer" in df.columns:
+        df["days_in_transfer"] = df["days_in_transfer"].apply(
             lambda x: f"{int(x)} days" if pd.notna(x) else ""
         )
     
@@ -607,6 +665,7 @@ with st.expander("ℹ️ How to use Supply Analysis", expanded=False):
     - **Inventory**: Current stock on hand with expiry tracking
     - **Pending CAN**: Goods arrived but not yet stocked in
     - **Pending PO**: Purchase orders in transit
+    - **Pending WH Transfer**: Goods being transferred between warehouses
     - **All**: Combined view of total supply pipeline
     
     **Key Metrics:**
@@ -614,8 +673,10 @@ with st.expander("ℹ️ How to use Supply Analysis", expanded=False):
       - Inventory: Today's date
       - CAN: Arrival date
       - PO: Cargo ready date
-    - **Days Until Expiry**: For inventory items (red < 7 days, orange < 30 days)
+      - WH Transfer: Transfer start date
+    - **Days Until Expiry**: For inventory and transfer items (red < 7 days, orange < 30 days)
     - **Days Since Arrival**: For CAN items pending stock-in
+    - **Days in Transfer**: For warehouse transfers in progress
     
     **Important Features:**
     - **Exclude Expired**: Toggle to hide/show expired inventory
@@ -626,12 +687,14 @@ with st.expander("ℹ️ How to use Supply Analysis", expanded=False):
     1. Check inventory items nearing expiry
     2. Follow up on delayed CAN stock-ins
     3. Monitor incoming PO pipeline
-    4. Compare supply timing with demand (go to GAP Analysis)
+    4. Track warehouse transfers in progress
+    5. Compare supply timing with demand (go to GAP Analysis)
     
     **Tips:**
     - Use "Separate by source type" in grouped view for detailed analysis
     - Export period data for supply planning meetings
     - Set expiry warning days based on your product shelf life
+    - Monitor long warehouse transfers (>3 days) for potential delays
     """)
 
 # Footer

@@ -54,6 +54,19 @@ def load_pending_po_data():
     return pd.read_sql(text(query), engine)
 
 
+@st.cache_data(ttl=1800)
+def load_pending_wh_transfer_data():
+    """Load pending Warehouse Transfer data"""
+    engine = get_db_engine()
+    query = """
+    SELECT 
+    *
+    FROM prostechvn.warehouse_transfer_details_view wtdv
+    WHERE wtdv.is_completed = 0  -- Only pending transfers
+    """
+    return pd.read_sql(text(query), engine)
+
+
 # === MASTER DATA LOADERS ===
 
 @st.cache_data(ttl=3600)
