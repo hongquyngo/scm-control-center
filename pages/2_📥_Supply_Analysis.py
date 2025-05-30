@@ -403,25 +403,51 @@ def show_supply_warnings(filtered_df, filter_params):
     if not warning_shown:
         st.success("✅ No critical supply issues detected")
 
+# def show_supply_detail_table(filtered_df):
+#     """Show detailed supply table"""
+#     st.markdown("### 🔍 Supply Details")
+    
+#     # Tab view for different source types
+#     source_types = filtered_df["source_type"].unique()
+#     if len(source_types) > 1:
+#         tabs = st.tabs(list(source_types) + ["All"])
+        
+#         for idx, source in enumerate(source_types):
+#             with tabs[idx]:
+#                 source_df = filtered_df[filtered_df["source_type"] == source]
+#                 display_source_table(source_df, source)
+        
+#         # All tab
+#         with tabs[-1]:
+#             display_source_table(filtered_df, "All")
+#     else:
+#         display_source_table(filtered_df, source_types[0] if len(source_types) > 0 else "All")
+
+# 1. Update show_supply_detail_table function to show "All" tab first and as default
+
 def show_supply_detail_table(filtered_df):
-    """Show detailed supply table"""
+    """Show detailed supply table with All tab as default"""
     st.markdown("### 🔍 Supply Details")
     
     # Tab view for different source types
     source_types = filtered_df["source_type"].unique()
     if len(source_types) > 1:
-        tabs = st.tabs(list(source_types) + ["All"])
+        # Create tabs with "All" first
+        tabs = st.tabs(["All"] + list(source_types))
         
+        # All tab (now first)
+        with tabs[0]:
+            display_source_table(filtered_df, "All")
+        
+        # Individual source tabs
         for idx, source in enumerate(source_types):
-            with tabs[idx]:
+            with tabs[idx + 1]:
                 source_df = filtered_df[filtered_df["source_type"] == source]
                 display_source_table(source_df, source)
-        
-        # All tab
-        with tabs[-1]:
-            display_source_table(filtered_df, "All")
     else:
         display_source_table(filtered_df, source_types[0] if len(source_types) > 0 else "All")
+
+
 
 def display_source_table(df, source_type):
     """Display table for specific source type"""
@@ -522,19 +548,56 @@ def highlight_expiry_rows(row):
                 return ["background-color: #ffe6cc"] * len(row)  # Orange for urgent
     return [""] * len(row)
 
+# def show_supply_grouped_view(filtered_df, start_date, end_date):
+#     """Show grouped supply by period"""
+#     st.markdown("### 📊 Grouped Supply by Product")
+#     st.markdown(f"📅 Period: **{start_date}** to **{end_date}**")
+    
+#     # Controls
+#     col1, col2, col3 = st.columns(3)
+#     with col1:
+#         period = st.selectbox("Group by Period", PERIOD_TYPES, index=1)
+#     with col2:
+#         show_only_nonzero = st.checkbox("Show only products with quantity > 0", value=True, key="supply_show_nonzero")
+#     with col3:
+#         group_by_source = st.checkbox("Separate by source type", value=False, key="supply_group_by_source")
+    
+#     # Filter out missing dates for grouping
+#     df_summary = filtered_df[filtered_df["date_ref"].notna()].copy()
+    
+#     if df_summary.empty:
+#         st.info("No data with valid dates for grouping")
+#         return
+    
+#     # Create period column
+#     df_summary["period"] = convert_to_period(df_summary["date_ref"], period)
+    
+#     if group_by_source:
+#         # Create tabs for each source
+#         source_types = df_summary["source_type"].unique()
+#         tabs = st.tabs(list(source_types))
+        
+#         for idx, source in enumerate(source_types):
+#             with tabs[idx]:
+#                 source_df = df_summary[df_summary["source_type"] == source]
+#                 display_supply_pivot(source_df, period, show_only_nonzero, source)
+#     else:
+#         # Combined view
+#         display_supply_pivot(df_summary, period, show_only_nonzero, "All Sources")
+
+# 2. Update show_supply_grouped_view to always show tabs instead of checkbox
+
 def show_supply_grouped_view(filtered_df, start_date, end_date):
-    """Show grouped supply by period"""
+    """Show grouped supply by period with tabs for each source"""
     st.markdown("### 📊 Grouped Supply by Product")
     st.markdown(f"📅 Period: **{start_date}** to **{end_date}**")
     
-    # Controls
-    col1, col2, col3 = st.columns(3)
+    # Controls (remove the checkbox for group_by_source)
+    col1, col2 = st.columns(2)
     with col1:
         period = st.selectbox("Group by Period", PERIOD_TYPES, index=1)
     with col2:
         show_only_nonzero = st.checkbox("Show only products with quantity > 0", value=True, key="supply_show_nonzero")
-    with col3:
-        group_by_source = st.checkbox("Separate by source type", value=False, key="supply_group_by_source")
     
     # Filter out missing dates for grouping
     df_summary = filtered_df[filtered_df["date_ref"].notna()].copy()
@@ -546,20 +609,26 @@ def show_supply_grouped_view(filtered_df, start_date, end_date):
     # Create period column
     df_summary["period"] = convert_to_period(df_summary["date_ref"], period)
     
-    if group_by_source:
-        # Create tabs for each source
-        source_types = df_summary["source_type"].unique()
-        tabs = st.tabs(list(source_types))
+    # Get unique source types
+    source_types = df_summary["source_type"].unique()
+    
+    # Always show tabs (remove the checkbox condition)
+    if len(source_types) > 1:
+        # Create tabs with "All" first
+        tabs = st.tabs(["All"] + list(source_types))
         
+        # All tab (first)
+        with tabs[0]:
+            display_supply_pivot(df_summary, period, show_only_nonzero, "All Sources")
+        
+        # Individual source tabs
         for idx, source in enumerate(source_types):
-            with tabs[idx]:
+            with tabs[idx + 1]:
                 source_df = df_summary[df_summary["source_type"] == source]
                 display_supply_pivot(source_df, period, show_only_nonzero, source)
     else:
-        # Combined view
+        # Only one source type, just display it
         display_supply_pivot(df_summary, period, show_only_nonzero, "All Sources")
-
-
 
 def display_supply_pivot(df_summary, period, show_only_nonzero, title):
     """Display supply pivot table with past period indicators"""

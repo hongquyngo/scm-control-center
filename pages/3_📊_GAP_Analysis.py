@@ -988,56 +988,6 @@ def get_gap_display_options():
 
 
 # === Display Functions ===
-# def show_gap_summary(gap_df, display_options):
-#     """Show GAP analysis summary"""
-#     st.markdown("### 📊 GAP Analysis Summary")
-    
-#     # Calculate metrics on ORIGINAL gap_df (before display filters)
-#     total_products = gap_df["pt_code"].nunique()
-#     shortage_products = len(gap_df[gap_df["gap_quantity"] < 0]["pt_code"].unique())
-#     total_shortage = gap_df["gap_quantity"].where(gap_df["gap_quantity"] < 0, 0).abs().sum()
-    
-#     # Calculate average fulfillment rate correctly
-#     fulfillment_rates = gap_df[gap_df["total_demand_qty"] > 0]["fulfillment_rate_percent"].copy()
-#     fulfillment_rates = fulfillment_rates.clip(upper=100)
-#     avg_fulfillment = fulfillment_rates.mean() if len(fulfillment_rates) > 0 else 0
-    
-#     # Display metrics
-#     col1, col2, col3, col4 = st.columns(4)
-    
-#     with col1:
-#         st.metric("Total Products", f"{total_products:,}")
-    
-#     with col2:
-#         st.metric(
-#             "Products with Shortage", 
-#             f"{shortage_products:,}",
-#             delta=f"{shortage_products/total_products*100:.1f}%" if total_products > 0 else "0%"
-#         )
-    
-#     with col3:
-#         st.metric("Total Shortage Qty", format_number(total_shortage))
-    
-#     with col4:
-#         st.metric("Avg Fulfillment Rate", format_percentage(avg_fulfillment))
-    
-#     # Show info about filtered view
-#     if display_options["show_shortage_only"] or display_options["exclude_zero_demand"]:
-#         # Count items after applying filters
-#         filtered_df = gap_df.copy()
-        
-#         # Debug: Show counts before filtering
-#         if st.session_state.get('debug_mode', False):
-#             st.write(f"Debug - Total rows before filtering: {len(filtered_df)}")
-#             st.write(f"Debug - Rows with zero demand: {len(filtered_df[filtered_df['total_demand_qty'] == 0])}")
-#             st.write(f"Debug - Rows with positive demand: {len(filtered_df[filtered_df['total_demand_qty'] > 0])}")
-        
-#         if display_options["show_shortage_only"]:
-#             filtered_df = filtered_df[filtered_df["gap_quantity"] < 0]
-#         if display_options["exclude_zero_demand"]:
-#             filtered_df = filtered_df[filtered_df["total_demand_qty"] > 0]
-        
-#         st.info(f"🔍 Showing {len(filtered_df)} items out of {len(gap_df)} total items (filters applied)")
 
 def show_gap_summary(gap_df, display_options):
     """Show GAP analysis summary with past period warning"""
