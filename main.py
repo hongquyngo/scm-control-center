@@ -3,563 +3,953 @@ import pandas as pd
 from datetime import datetime, timedelta
 import plotly.express as px
 import plotly.graph_objects as go
+import numpy as np
+
+# Import existing modules
 from utils.helpers import (
-   get_from_session_state,
-   format_number,
-   format_currency,
-   format_percentage
+    get_from_session_state,
+    save_to_session_state,
+    format_number,
+    format_currency,
+    format_percentage,
+    create_download_button
 )
 from utils.data_loader import load_allocation_history
 from utils.db import get_db_engine
 from sqlalchemy import text
+from config import IS_RUNNING_ON_CLOUD
+
+# Import new modules with error handling
+try:
+    from utils.settings_manager import SettingsManager
+    from utils.data_preloader import DataPreloader
+except ImportError as e:
+    st.error(f"Error importing modules: {str(e)}")
+    st.error("Please ensure settings_manager.py and data_preloader.py are in the utils folder")
+    st.stop()
 
 # === Page Config ===
 st.set_page_config(
-   page_title="SCM Control Center",
-   page_icon="🏭",
-   layout="wide",
-   initial_sidebar_state="expanded"
+    page_title="SCM Control Center",
+    page_icon="🏭",
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
 # === Custom CSS ===
 st.markdown("""
-   <style>
-   .main-header {
-       font-size: 3rem;
-       font-weight: 700;
-       margin-bottom: 0.5rem;
-       background: linear-gradient(90deg, #1e3c72 0%, #2a5298 100%);
-       -webkit-background-clip: text;
-       -webkit-text-fill-color: transparent;
-   }
-   .metric-card {
-       background-color: #f0f2f6;
-       padding: 1.5rem;
-       border-radius: 10px;
-       box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-   }
-   .status-critical {
-       color: #ff4444;
-       font-weight: bold;
-   }
-   .status-warning {
-       color: #ff8800;
-       font-weight: bold;
-   }
-   .status-ok {
-       color: #00cc44;
-       font-weight: bold;
-   }
-   .allocation-pending {
-       background-color: #fff3cd;
-       padding: 0.5rem;
-       border-radius: 5px;
-   }
-   .allocation-approved {
-       background-color: #d4edda;
-       padding: 0.5rem;
-       border-radius: 5px;
-   }
-   </style>
-   """, unsafe_allow_html=True)
+<style>
+.main-header {
+    font-size: 3rem;
+    font-weight: 700;
+    margin-bottom: 0.5rem;
+    background: linear-gradient(90deg, #1e3c72 0%, #2a5298 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+}
+.metric-card {
+    background-color: #f0f2f6;
+    padding: 1.5rem;
+    border-radius: 10px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+.status-critical {
+    color: #ff4444;
+    font-weight: bold;
+}
+.status-warning {
+    color: #ff8800;
+    font-weight: bold;
+}
+.status-ok {
+    color: #00cc44;
+    font-weight: bold;
+}
+.alert-box {
+    padding: 1rem;
+    border-radius: 8px;
+    margin-bottom: 0.5rem;
+    border-left: 4px solid;
+}
+.alert-critical {
+    background-color: #ffebee;
+    border-left-color: #f44336;
+}
+.alert-warning {
+    background-color: #fff8e1;
+    border-left-color: #ff9800;
+}
+.alert-info {
+    background-color: #e3f2fd;
+    border-left-color: #2196f3;
+}
+.section-header {
+    font-size: 1.5rem;
+    font-weight: 600;
+    margin: 1rem 0;
+    color: #1e3c72;
+}
+</style>
+""", unsafe_allow_html=True)
 
-# === Header ===
-st.markdown('<h1 class="main-header">🏭 Supply Chain Management Control Center</h1>', unsafe_allow_html=True)
-st.markdown("**Real-time visibility and control over your supply chain operations**")
-st.markdown("---")
+# === Initialize Systems ===
+@st.cache_resource
+def init_systems():
+    """Initialize singleton instances"""
+    try:
+        data_preloader = DataPreloader()
+        settings_manager = SettingsManager()
+        return data_preloader, settings_manager
+    except Exception as e:
+        st.error(f"Failed to initialize systems: {str(e)}")
+        return None, None
 
-# === Sidebar Configuration ===
-with st.sidebar:
-   st.markdown("### ⚙️ Settings")
-   
-   # Refresh Data button in sidebar
-   if st.button("🔄 Refresh All Data", use_container_width=True):
-       st.cache_data.clear()
-       st.success("✅ All data caches cleared!")
-       st.rerun()
-   
-   st.markdown("---")
-   st.caption("💡 Tip: Refresh data clears all cached queries and reloads from database")
+# === Header Section ===
+def render_header(data_preloader):
+    """Render header with refresh controls"""
+    col1, col2, col3 = st.columns([6, 2, 1])
+    
+    with col1:
+        st.markdown('<h1 class="main-header">🏭 Supply Chain Control Center</h1>', unsafe_allow_html=True)
+        env_indicator = "☁️ Cloud" if IS_RUNNING_ON_CLOUD else "💻 Local"
+        st.caption(f"Real-time visibility and control | Environment: {env_indicator}")
+    
+    with col2:
+        last_refresh = st.session_state.get('last_data_refresh', 'Never')
+        st.caption(f"Last refresh: {last_refresh}")
+    
+    with col3:
+        if st.button("🔄 Refresh", use_container_width=True):
+            st.cache_data.clear()
+            st.cache_resource.clear()
+            # Force data reload
+            data_preloader.preload_all_data(force_refresh=True)
+            st.rerun()
 
-# === Quick Actions Bar ===
-col1, col2, col3 = st.columns(3)
-with col1:
-   if st.button("📊 Run GAP Analysis", type="primary", use_container_width=True):
-       st.switch_page("pages/3_📊_GAP_Analysis.py")
-with col2:
-   if st.button("📤 View Demand", use_container_width=True):
-       st.switch_page("pages/1_📤_Demand_Analysis.py")
-with col3:
-   if st.button("📥 View Supply", use_container_width=True):
-       st.switch_page("pages/2_📥_Supply_Analysis.py")
+# === Combined Dashboard Tab ===
+def render_dashboard_tab(data_preloader):
+    """Combined insights and overview dashboard"""
+    
+    try:
+        # Get all data and insights
+        insights = data_preloader.get_insights()
+        critical_alerts = data_preloader.get_critical_alerts()
+        warnings = data_preloader.get_warnings()
+        info_metrics = data_preloader.get_info_metrics()
+        
+        # === Section 1: Critical Alerts ===
+        st.markdown('<h2 class="section-header">🚨 Critical Alerts & Actions</h2>', unsafe_allow_html=True)
+        
+        # Display alerts in a grid
+        alert_cols = st.columns(3)
+        
+        with alert_cols[0]:
+            st.markdown("### 🔴 Immediate Action")
+            if critical_alerts:
+                for alert in critical_alerts:
+                    alert_html = f"""
+                    <div class="alert-box alert-critical">
+                        <strong>{alert['icon']} {alert['message']}</strong><br>
+                        {f"Value: {alert['value']}" if alert.get('value') else ""}
+                        {f"({alert['action']})" if alert.get('action') else ""}
+                    </div>
+                    """
+                    st.markdown(alert_html, unsafe_allow_html=True)
+            else:
+                st.success("✅ No critical issues")
+        
+        with alert_cols[1]:
+            st.markdown("### 🟡 Warnings")
+            if warnings:
+                for warning in warnings[:5]:  # Show top 5
+                    warning_html = f"""
+                    <div class="alert-box alert-warning">
+                        <strong>{warning['icon']} {warning['message']}</strong><br>
+                        {f"{warning['value']}" if warning.get('value') else ""}
+                    </div>
+                    """
+                    st.markdown(warning_html, unsafe_allow_html=True)
+                if len(warnings) > 5:
+                    st.caption(f"... and {len(warnings)-5} more warnings")
+            else:
+                st.info("ℹ️ No warnings")
+        
+        with alert_cols[2]:
+            st.markdown("### 🔵 Key Insights")
+            if info_metrics:
+                for metric in info_metrics[:5]:  # Show top 5
+                    info_html = f"""
+                    <div class="alert-box alert-info">
+                        <strong>{metric['icon']} {metric['message']}</strong><br>
+                        {metric['value']}
+                    </div>
+                    """
+                    st.markdown(info_html, unsafe_allow_html=True)
+            else:
+                st.info("📊 Run GAP Analysis for insights")
+        
+        # === Section 2: Key Performance Metrics ===
+        st.markdown("---")
+        st.markdown('<h2 class="section-header">📊 Key Performance Metrics</h2>', unsafe_allow_html=True)
+        
+        # Main metrics
+        metrics_row1 = st.columns(5)
+        
+        with metrics_row1[0]:
+            demand_count = insights.get('demand_oc_pending_count', 0)
+            demand_value = insights.get('demand_oc_pending_value', 0)
+            st.metric(
+                "📤 Pending Orders",
+                f"{demand_count:,}",
+                delta=format_currency(demand_value, 'USD', 0),
+                help="Total pending customer orders"
+            )
+        
+        with metrics_row1[1]:
+            inventory_value = insights.get('inventory_total_value', 0)
+            st.metric(
+                "📦 Inventory Value",
+                format_currency(inventory_value, 'USD', 0),
+                help="Current inventory value"
+            )
+        
+        with metrics_row1[2]:
+            # Product matching metrics
+            matched = len(insights.get('matched_products', set()))
+            total = len(set().union(
+                insights.get('demand_only_products', set()),
+                insights.get('supply_only_products', set()),
+                insights.get('matched_products', set())
+            ))
+            coverage = (matched / total * 100) if total > 0 else 0
+            st.metric(
+                "🔗 Product Coverage",
+                f"{coverage:.1f}%",
+                delta=f"{matched}/{total} products",
+                help="Products with both supply and demand"
+            )
+        
+        with metrics_row1[3]:
+            avg_fulfillment = insights.get('avg_fulfillment_rate', 0)
+            st.metric(
+                "📊 Fulfillment Rate",
+                format_percentage(avg_fulfillment),
+                help="Average fulfillment rate"
+            )
+        
+        with metrics_row1[4]:
+            # Risk value calculation
+            risk_value = (
+                insights.get('expired_items_value', 0) +
+                insights.get('near_expiry_7d_value', 0) +
+                insights.get('excess_inventory_value', 0)
+            )
+            st.metric(
+                "⚠️ At-Risk Value",
+                format_currency(risk_value, 'USD', 0),
+                help="Value of expired + near expiry + excess inventory"
+            )
+        
+        # === Section 3: Supply & Demand Analysis ===
+        st.markdown("---")
+        st.markdown('<h2 class="section-header">📈 Supply & Demand Quick Analysis</h2>', unsafe_allow_html=True)
+        
+        analysis_cols = st.columns(2)
+        
+        with analysis_cols[0]:
+            # Demand analysis
+            st.markdown("#### 📤 Demand Analysis")
+            
+            # Create demand summary
+            demand_data = data_preloader.get_data('demand_oc')
+            if not demand_data.empty:
+                # Group by customer - top 5
+                customer_demand = demand_data.groupby('customer')['outstanding_amount_usd'].sum().nlargest(5)
+                
+                fig = px.bar(
+                    x=customer_demand.values,
+                    y=customer_demand.index,
+                    orientation='h',
+                    title="Top 5 Customers by Pending Value",
+                    labels={'x': 'Value (USD)', 'y': 'Customer'}
+                )
+                fig.update_layout(height=300, showlegend=False)
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("No demand data available")
+        
+        with analysis_cols[1]:
+            # Supply analysis
+            st.markdown("#### 📥 Supply Analysis")
+            
+            # Supply breakdown by source
+            supply_breakdown = {
+                'Inventory': insights.get('inventory_total_value', 0),
+                'Pending CAN': data_preloader.get_data('supply_can')['pending_value_usd'].sum() if not data_preloader.get_data('supply_can').empty else 0,
+                'Pending PO': data_preloader.get_data('supply_po')['outstanding_arrival_amount_usd'].sum() if not data_preloader.get_data('supply_po').empty else 0,
+            }
+            
+            if sum(supply_breakdown.values()) > 0:
+                fig = px.pie(
+                    values=list(supply_breakdown.values()),
+                    names=list(supply_breakdown.keys()),
+                    title="Supply Value by Source",
+                    hole=0.3
+                )
+                fig.update_layout(height=300)
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("No supply data available")
+        
+        # === Section 4: Critical Products Analysis ===
+        st.markdown("---")
+        st.markdown('<h2 class="section-header">🎯 Critical Products Analysis</h2>', unsafe_allow_html=True)
+        
+        product_cols = st.columns(3)
+        
+        with product_cols[0]:
+            # Products with no supply
+            st.markdown("#### 📤 Demand-Only Products")
+            demand_only = list(insights.get('demand_only_products', set()))[:5]
+            if demand_only:
+                for product in demand_only:
+                    st.write(f"• {product}")
+                if len(insights.get('demand_only_products', set())) > 5:
+                    st.caption(f"... and {len(insights.get('demand_only_products', set()))-5} more")
+            else:
+                st.success("All demand products have supply")
+        
+        with product_cols[1]:
+            # Expired/Near expiry
+            st.markdown("#### 💀 Expiry Concerns")
+            expired_count = insights.get('expired_items_count', 0)
+            near_expiry_7d = insights.get('near_expiry_7d_count', 0)
+            near_expiry_30d = insights.get('near_expiry_30d_count', 0)
+            
+            if expired_count > 0:
+                st.error(f"🔴 {expired_count} expired items")
+            if near_expiry_7d > 0:
+                st.warning(f"🟡 {near_expiry_7d} items expiring in 7 days")
+            if near_expiry_30d > 0:
+                st.info(f"🔵 {near_expiry_30d} items expiring in 30 days")
+            
+            if expired_count == 0 and near_expiry_7d == 0 and near_expiry_30d == 0:
+                st.success("No expiry concerns")
+        
+        with product_cols[2]:
+            # Overdue deliveries
+            st.markdown("#### 🕐 Delivery Status")
+            overdue_count = insights.get('demand_overdue_count', 0)
+            overdue_value = insights.get('demand_overdue_value', 0)
+            
+            if overdue_count > 0:
+                st.error(f"🔴 {overdue_count} overdue orders")
+                st.caption(f"Value: {format_currency(overdue_value, 'USD', 0)}")
+            else:
+                st.success("All deliveries on schedule")
+        
+        # === Section 5: Data Quality ===
+        st.markdown("---")
+        render_data_quality_section(insights)
+        
+        # === Section 6: Quick Actions ===
+        st.markdown("---")
+        st.markdown('<h2 class="section-header">⚡ Quick Actions</h2>', unsafe_allow_html=True)
+        
+        action_cols = st.columns(3)
+        
+        with action_cols[0]:
+            if st.button("📊 Run GAP Analysis", type="primary", use_container_width=True):
+                st.switch_page("pages/3_📊_GAP_Analysis.py")
+        
+        with action_cols[1]:
+            if st.button("📤 View Demand Details", use_container_width=True):
+                st.switch_page("pages/1_📤_Demand_Analysis.py")
+        
+        with action_cols[2]:
+            if st.button("📥 View Supply Details", use_container_width=True):
+                st.switch_page("pages/2_📥_Supply_Analysis.py")
+        
+        
+    except Exception as e:
+        st.error(f"Error rendering dashboard: {str(e)}")
+        if st.checkbox("Show error details"):
+            st.exception(e)
 
-# === Load Allocation Data ===
-@st.cache_data(ttl=300)  # Cache for 5 minutes
-def load_allocation_summary():
-   """Load allocation summary data"""
-   engine = get_db_engine()
-   
-   query = """
-   SELECT 
-       ap.id as plan_id,
-       ap.allocation_number,
-       ap.allocation_date,
-       ap.allocation_method,
-       ap.status as plan_status,
-       COUNT(DISTINCT ad.id) as line_count,
-       COUNT(DISTINCT ad.pt_code) as product_count,
-       COUNT(DISTINCT ad.customer_id) as customer_count,
-       SUM(ad.allocated_qty) as total_allocated_qty,
-       SUM(ad.delivered_qty) as total_delivered_qty,
-       SUM(ad.allocated_qty - ad.delivered_qty) as total_remaining_qty,
-       AVG(CASE WHEN ad.allocated_qty > 0 
-           THEN ad.delivered_qty / ad.allocated_qty * 100 
-           ELSE 0 END) as avg_fulfillment_rate
-   FROM allocation_plans ap
-   JOIN allocation_details ad ON ap.id = ad.allocation_plan_id
-   WHERE ap.created_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
-   GROUP BY ap.id
-   ORDER BY ap.allocation_date DESC
-   """
-   
-   return pd.read_sql(text(query), engine)
+# === Data Quality Section ===
+def render_data_quality_section(insights):
+    """Render data quality indicators"""
+    st.markdown('<h2 class="section-header">🔍 Data Quality Check</h2>', unsafe_allow_html=True)
+    
+    quality_cols = st.columns(4)
+    
+    # Missing dates
+    with quality_cols[0]:
+        missing_dates = insights.get('demand_missing_etd', 0) + insights.get('supply_missing_dates', 0)
+        if missing_dates > 0:
+            st.error(f"⚠️ {missing_dates} records with missing dates")
+        else:
+            st.success("✅ All dates complete")
+    
+    # Product matching
+    with quality_cols[1]:
+        total_products = len(set().union(
+            insights.get('demand_only_products', set()),
+            insights.get('supply_only_products', set()),
+            insights.get('matched_products', set())
+        ))
+        matched = len(insights.get('matched_products', set()))
+        match_rate = (matched / total_products * 100) if total_products > 0 else 0
+        
+        if match_rate >= 80:
+            st.success(f"✅ {match_rate:.1f}% match rate")
+        elif match_rate >= 60:
+            st.warning(f"⚠️ {match_rate:.1f}% match rate")
+        else:
+            st.error(f"❌ {match_rate:.1f}% match rate")
+    
+    # Unmatched counts
+    with quality_cols[2]:
+        demand_only_count = len(insights.get('demand_only_products', set()))
+        supply_only_count = len(insights.get('supply_only_products', set()))
+        
+        if demand_only_count > 0 or supply_only_count > 0:
+            st.warning(f"📋 {demand_only_count + supply_only_count} unmatched products")
+        else:
+            st.success("✅ All products matched")
+    
+    # Overall score
+    with quality_cols[3]:
+        # Calculate overall data quality score
+        score = 100
+        if missing_dates > 0:
+            score -= 20
+        if match_rate < 80:
+            score -= (80 - match_rate) * 0.5
+        
+        if score >= 90:
+            st.success(f"✅ Quality Score: {score:.0f}%")
+        elif score >= 70:
+            st.warning(f"⚠️ Quality Score: {score:.0f}%")
+        else:
+            st.error(f"❌ Quality Score: {score:.0f}%")
 
-# === Check for Recent Analysis ===
-last_gap_analysis = get_from_session_state('last_gap_analysis')
-last_analysis_time = get_from_session_state('last_analysis_time', 'Never')
+# === Configuration Tab ===
+def render_configuration_tab(settings_manager):
+    """Render comprehensive configuration interface"""
+    st.header("⚙️ Business Configuration Center")
+    
+    # Show current environment
+    env_indicator = "☁️ Cloud" if IS_RUNNING_ON_CLOUD else "💻 Local"
+    st.caption(f"Environment: {env_indicator}")
+    
+    # Import/Export functionality
+    with st.expander("📤 Import/Export Settings"):
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.download_button(
+                label="📥 Download Current Settings",
+                data=settings_manager.export_settings(),
+                file_name=f"scm_settings_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                mime="application/json"
+            )
+        
+        with col2:
+            uploaded_file = st.file_uploader("📤 Upload Settings", type=['json'])
+            if uploaded_file is not None:
+                settings_json = uploaded_file.read().decode('utf-8')
+                if settings_manager.import_settings(settings_json):
+                    st.success("✅ Settings imported successfully!")
+                    st.rerun()
+    
+    # Show active adjustments
+    adjustments = settings_manager.get_applied_adjustments()
+    if adjustments:
+        with st.expander("🔧 Active Adjustments", expanded=True):
+            adj_df = pd.DataFrame(adjustments)
+            st.dataframe(adj_df, use_container_width=True, hide_index=True)
+    
+    # Configuration tabs
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "⏰ Time Settings",
+        "📊 Planning Parameters",
+        "📦 Order Constraints",
+        "🏢 Business Rules",
+        "🚨 Alert Thresholds"
+    ])
+    
+    with tab1:
+        render_time_settings(settings_manager)
+    
+    with tab2:
+        render_planning_parameters(settings_manager)
+    
+    with tab3:
+        render_order_constraints(settings_manager)
+    
+    with tab4:
+        render_business_rules(settings_manager)
+    
+    with tab5:
+        render_alert_thresholds(settings_manager)
+    
+    # Save/Reset buttons
+    st.markdown("---")
+    col1, col2, col3 = st.columns([1, 1, 2])
+    
+    with col1:
+        if st.button("💾 Save All Settings", type="primary", use_container_width=True):
+            st.success("✅ Settings saved successfully!")
+            # Clear data cache to apply new settings
+            st.cache_data.clear()
+            st.rerun()
+    
+    with col2:
+        if st.button("🔄 Reset to Defaults", use_container_width=True):
+            if st.checkbox("Confirm reset all settings to defaults"):
+                settings_manager.reset_to_defaults()
+                st.rerun()
 
-if last_gap_analysis is not None:
-   # === Executive Summary with Analysis Data ===
-   st.header("📈 Executive Summary")
-   st.info(f"📅 Based on GAP Analysis from: {last_analysis_time}")
-   
-   # Calculate key metrics
-   gap_df = last_gap_analysis
-   shortage_products = gap_df[gap_df['gap_quantity'] < 0]['pt_code'].unique()
-   surplus_products = gap_df[gap_df['gap_quantity'] > 0]['pt_code'].unique()
-   balanced_products = gap_df[gap_df['gap_quantity'] == 0]['pt_code'].unique()
-   
-   total_shortage = gap_df[gap_df['gap_quantity'] < 0]['gap_quantity'].abs().sum()
-   total_surplus = gap_df[gap_df['gap_quantity'] > 0]['gap_quantity'].sum()
-   avg_fulfillment = gap_df[gap_df['total_demand_qty'] > 0]['fulfillment_rate_percent'].mean()
-   critical_items = len(gap_df[(gap_df['gap_quantity'] < 0) & (gap_df['fulfillment_rate_percent'] < 50)])
-   
-   # Display metrics
-   metrics_col1, metrics_col2, metrics_col3, metrics_col4 = st.columns(4)
-   
-   with metrics_col1:
-       st.metric(
-           "⚠️ Products with Shortage",
-           f"{len(shortage_products)}",
-           delta=f"-{format_number(total_shortage)} units",
-           delta_color="inverse"
-       )
-   
-   with metrics_col2:
-       st.metric(
-           "📦 Products with Surplus",
-           f"{len(surplus_products)}",
-           delta=f"+{format_number(total_surplus)} units",
-           delta_color="normal"
-       )
-   
-   with metrics_col3:
-       st.metric(
-           "📊 Avg Fulfillment Rate",
-           format_percentage(avg_fulfillment),
-           delta=f"{100 - avg_fulfillment:.1f}% gap",
-           delta_color="inverse" if avg_fulfillment < 90 else "normal"
-       )
-   
-   with metrics_col4:
-       st.metric(
-           "🚨 Critical Items",
-           f"{critical_items}",
-           delta="<50% fulfillment",
-           delta_color="inverse"
-       )
-   
-   # === Visual Analytics ===
-   st.markdown("---")
-   
-   col1, col2 = st.columns(2)
-   
-   with col1:
-       st.subheader("🚨 Top 10 Critical Shortages")
-       
-       # Get shortage data
-       shortage_detail = gap_df[gap_df['gap_quantity'] < 0].groupby(['pt_code', 'product_name']).agg({
-           'gap_quantity': 'sum',
-           'fulfillment_rate_percent': 'mean'
-       }).reset_index()
-       shortage_detail['shortage_qty'] = shortage_detail['gap_quantity'].abs()
-       shortage_detail = shortage_detail.sort_values('shortage_qty', ascending=False).head(10)
-       
-       if not shortage_detail.empty:
-           # Create horizontal bar chart
-           fig_shortage = px.bar(
-               shortage_detail, 
-               x='shortage_qty', 
-               y='product_name',
-               orientation='h',
-               text='shortage_qty',
-               title='Shortage Quantity by Product',
-               color='fulfillment_rate_percent',
-               color_continuous_scale='Reds_r',
-               labels={
-                   'shortage_qty': 'Shortage Qty',
-                   'product_name': 'Product',
-                   'fulfillment_rate_percent': 'Fill Rate %'
-               }
-           )
-           fig_shortage.update_traces(texttemplate='%{text:,.0f}', textposition='outside')
-           fig_shortage.update_layout(height=400, showlegend=False)
-           st.plotly_chart(fig_shortage, use_container_width=True)
-           
-           # Action button
-           if st.button("🧩 Create Allocation Plan", type="primary", key="shortage_action"):
-               st.switch_page("pages/4_🧩_Allocation_Plan.py")
-       else:
-           st.success("✅ No critical shortages detected!")
-   
-   with col2:
-       st.subheader("📈 Top 10 Surplus Items")
-       
-       # Get surplus data
-       surplus_detail = gap_df[gap_df['gap_quantity'] > 0].groupby(['pt_code', 'product_name']).agg({
-           'gap_quantity': 'sum'
-       }).reset_index()
-       surplus_detail = surplus_detail.sort_values('gap_quantity', ascending=False).head(10)
-       
-       if not surplus_detail.empty:
-           # Create horizontal bar chart
-           fig_surplus = px.bar(
-               surplus_detail, 
-               x='gap_quantity', 
-               y='product_name',
-               orientation='h',
-               text='gap_quantity',
-               title='Surplus Quantity by Product',
-               color_discrete_sequence=['#4ECDC4'],
-               labels={
-                   'gap_quantity': 'Surplus Qty',
-                   'product_name': 'Product'
-               }
-           )
-           fig_surplus.update_traces(texttemplate='%{text:,.0f}', textposition='outside')
-           fig_surplus.update_layout(height=400, showlegend=False)
-           st.plotly_chart(fig_surplus, use_container_width=True)
-           
-           # Action button
-           if st.button("🔄 View Reallocation Options", key="surplus_action"):
-               st.session_state['show_reallocation'] = True
-               st.switch_page("pages/5_📌_PO_Suggestions.py")
-       else:
-           st.info("📊 No significant surplus inventory")
-   
-   # === Period Analysis ===
-   st.markdown("---")
-   st.subheader("📅 Supply-Demand Balance by Period")
-   
-   # Group by period for trend analysis
-   period_summary = gap_df.groupby('period').agg({
-       'total_demand_qty': 'sum',
-       'total_available': 'sum',
-       'gap_quantity': 'sum'
-   }).reset_index()
-   
-   # Create line chart
-   fig_trend = go.Figure()
-   
-   fig_trend.add_trace(go.Scatter(
-       x=period_summary['period'],
-       y=period_summary['total_demand_qty'],
-       mode='lines+markers',
-       name='Demand',
-       line=dict(color='#FF6B6B', width=3),
-       marker=dict(size=8)
-   ))
-   
-   fig_trend.add_trace(go.Scatter(
-       x=period_summary['period'],
-       y=period_summary['total_available'],
-       mode='lines+markers',
-       name='Supply',
-       line=dict(color='#4ECDC4', width=3),
-       marker=dict(size=8)
-   ))
-   
-   fig_trend.add_trace(go.Bar(
-       x=period_summary['period'],
-       y=period_summary['gap_quantity'],
-       name='GAP',
-       marker_color=period_summary['gap_quantity'].apply(
-           lambda x: '#FF6B6B' if x < 0 else '#4ECDC4'
-       ),
-       opacity=0.6
-   ))
-   
-   fig_trend.update_layout(
-       title='Supply vs Demand Trend',
-       xaxis_title='Period',
-       yaxis_title='Quantity',
-       hovermode='x unified',
-       height=400,
-       showlegend=True,
-       legend=dict(
-           yanchor="top",
-           y=0.99,
-           xanchor="left",
-           x=0.01
-       )
-   )
-   
-   st.plotly_chart(fig_trend, use_container_width=True)
+# === Settings Sub-sections (same as before) ===
+def render_time_settings(settings_manager):
+    """Render time adjustment settings"""
+    st.subheader("⏰ Time & Date Adjustments")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        etd_offset = st.number_input(
+            "ETD Offset (days)",
+            min_value=-30,
+            max_value=30,
+            value=settings_manager.get_setting('time_adjustments.etd_offset_days', 0),
+            help="Adjust ETD dates for demand analysis. Positive = delay, Negative = advance"
+        )
+        settings_manager.set_setting('time_adjustments.etd_offset_days', etd_offset)
+        
+        wh_transfer_time = st.number_input(
+            "WH Transfer Lead Time (days)",
+            min_value=0,
+            max_value=30,
+            value=settings_manager.get_setting('time_adjustments.wh_transfer_lead_time', 2),
+            help="Expected time for warehouse transfers"
+        )
+        settings_manager.set_setting('time_adjustments.wh_transfer_lead_time', wh_transfer_time)
+        
+        buffer_days = st.number_input(
+            "Planning Buffer (days)",
+            min_value=0,
+            max_value=30,
+            value=settings_manager.get_setting('time_adjustments.buffer_days', 7),
+            help="Safety buffer for planning"
+        )
+        settings_manager.set_setting('time_adjustments.buffer_days', buffer_days)
+    
+    with col2:
+        supply_arrival_offset = st.number_input(
+            "Supply Arrival Offset (days)",
+            min_value=-30,
+            max_value=30,
+            value=settings_manager.get_setting('time_adjustments.supply_arrival_offset', 0),
+            help="Adjust supply arrival dates"
+        )
+        settings_manager.set_setting('time_adjustments.supply_arrival_offset', supply_arrival_offset)
+        
+        transportation_time = st.number_input(
+            "Transportation Time (days)",
+            min_value=0,
+            max_value=30,
+            value=settings_manager.get_setting('time_adjustments.transportation_time', 3),
+            help="Default transportation time"
+        )
+        settings_manager.set_setting('time_adjustments.transportation_time', transportation_time)
+        
+        working_days = st.number_input(
+            "Working Days per Week",
+            min_value=5,
+            max_value=7,
+            value=settings_manager.get_setting('time_adjustments.working_days_per_week', 5),
+            help="For calculating lead times"
+        )
+        settings_manager.set_setting('time_adjustments.working_days_per_week', working_days)
 
-# === Allocation Status Section ===
-st.markdown("---")
-st.header("🧩 Allocation Management")
+def render_planning_parameters(settings_manager):
+    """Render planning parameter settings"""
+    st.subheader("📊 Planning Parameters")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        safety_stock = st.number_input(
+            "Safety Stock Days",
+            min_value=0,
+            max_value=90,
+            value=settings_manager.get_setting('planning_parameters.safety_stock_days', 14),
+            help="Minimum stock to maintain"
+        )
+        settings_manager.set_setting('planning_parameters.safety_stock_days', safety_stock)
+        
+        reorder_point = st.number_input(
+            "Reorder Point Days",
+            min_value=0,
+            max_value=90,
+            value=settings_manager.get_setting('planning_parameters.reorder_point_days', 21),
+            help="Trigger point for new orders"
+        )
+        settings_manager.set_setting('planning_parameters.reorder_point_days', reorder_point)
+        
+        min_coverage = st.number_input(
+            "Min Order Coverage (days)",
+            min_value=7,
+            max_value=180,
+            value=settings_manager.get_setting('planning_parameters.min_order_coverage_days', 30),
+            help="Minimum days of coverage per order"
+        )
+        settings_manager.set_setting('planning_parameters.min_order_coverage_days', min_coverage)
+    
+    with col2:
+        planning_horizon = st.number_input(
+            "Planning Horizon (days)",
+            min_value=30,
+            max_value=365,
+            value=settings_manager.get_setting('planning_parameters.planning_horizon_days', 90),
+            help="How far ahead to plan"
+        )
+        settings_manager.set_setting('planning_parameters.planning_horizon_days', planning_horizon)
+        
+        forecast_confidence = st.slider(
+            "Forecast Confidence Level",
+            min_value=0.5,
+            max_value=1.0,
+            value=settings_manager.get_setting('planning_parameters.forecast_confidence', 0.8),
+            step=0.05,
+            help="Probability threshold for including forecasts"
+        )
+        settings_manager.set_setting('planning_parameters.forecast_confidence', forecast_confidence)
+        
+        max_coverage = st.number_input(
+            "Max Order Coverage (days)",
+            min_value=30,
+            max_value=365,
+            value=settings_manager.get_setting('planning_parameters.max_order_coverage_days', 180),
+            help="Maximum days of coverage per order"
+        )
+        settings_manager.set_setting('planning_parameters.max_order_coverage_days', max_coverage)
 
-# Load allocation data
-allocation_summary = load_allocation_summary()
+def render_order_constraints(settings_manager):
+    """Render order constraint settings"""
+    st.subheader("📦 Order Constraints")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        default_moq = st.number_input(
+            "Default MOQ",
+            min_value=1,
+            max_value=10000,
+            value=settings_manager.get_setting('order_constraints.default_moq', 100),
+            help="Default Minimum Order Quantity"
+        )
+        settings_manager.set_setting('order_constraints.default_moq', default_moq)
+        
+        default_spq = st.number_input(
+            "Default SPQ",
+            min_value=1,
+            max_value=10000,
+            value=settings_manager.get_setting('order_constraints.default_spq', 50),
+            help="Default Standard Pack Quantity"
+        )
+        settings_manager.set_setting('order_constraints.default_spq', default_spq)
+        
+        enforce_spq = st.checkbox(
+            "Enforce SPQ rounding",
+            value=settings_manager.get_setting('order_constraints.enforce_spq', True),
+            help="Always round to SPQ multiples"
+        )
+        settings_manager.set_setting('order_constraints.enforce_spq', enforce_spq)
+    
+    with col2:
+        max_order_limit = st.number_input(
+            "Max Order Limit",
+            min_value=100,
+            max_value=1000000,
+            value=settings_manager.get_setting('order_constraints.max_order_limit', 10000),
+            help="Maximum quantity per order"
+        )
+        settings_manager.set_setting('order_constraints.max_order_limit', max_order_limit)
+        
+        order_rounding = st.selectbox(
+            "Order Rounding Method",
+            options=['up', 'down', 'nearest'],
+            index=['up', 'down', 'nearest'].index(
+                settings_manager.get_setting('order_constraints.order_rounding', 'up')
+            ),
+            help="How to round order quantities"
+        )
+        settings_manager.set_setting('order_constraints.order_rounding', order_rounding)
 
-if not allocation_summary.empty:
-   # Allocation metrics
-   alloc_col1, alloc_col2, alloc_col3, alloc_col4 = st.columns(4)
-   
-   with alloc_col1:
-       total_plans = len(allocation_summary)
-       draft_plans = len(allocation_summary[allocation_summary['plan_status'] == 'DRAFT'])
-       st.metric(
-           "Total Allocation Plans", 
-           f"{total_plans}",
-           delta=f"{draft_plans} pending" if draft_plans > 0 else None
-       )
-   
-   with alloc_col2:
-       active_plans = allocation_summary[allocation_summary['plan_status'].isin(['APPROVED', 'EXECUTED'])]
-       total_allocated = active_plans['total_allocated_qty'].sum()
-       st.metric("Total Allocated Qty", format_number(total_allocated))
-   
-   with alloc_col3:
-       total_delivered = allocation_summary['total_delivered_qty'].sum()
-       delivery_rate = (total_delivered / total_allocated * 100) if total_allocated > 0 else 0
-       st.metric("Delivered", f"{format_number(total_delivered)} ({delivery_rate:.1f}%)")
-   
-   with alloc_col4:
-       avg_fulfillment = allocation_summary['avg_fulfillment_rate'].mean()
-       st.metric("Avg Fulfillment Rate", format_percentage(avg_fulfillment))
-   
-   # Recent allocations table
-   st.markdown("#### 📋 Recent Allocation Plans")
-   
-   # Filter options
-   col1, col2 = st.columns([3, 1])
-   with col1:
-       status_filter = st.multiselect(
-           "Filter by Status",
-           allocation_summary['plan_status'].unique(),
-           default=allocation_summary['plan_status'].unique()
-       )
-   with col2:
-       if st.button("🧩 View All Allocations"):
-           st.switch_page("pages/4_🧩_Allocation_Plan.py")
-   
-   # Display filtered allocations
-   filtered_allocations = allocation_summary[allocation_summary['plan_status'].isin(status_filter)]
-   
-   if not filtered_allocations.empty:
-       display_allocations = filtered_allocations[[
-           'allocation_number', 'allocation_date', 'allocation_method', 
-           'plan_status', 'product_count', 'customer_count',
-           'total_allocated_qty', 'avg_fulfillment_rate'
-       ]].copy()
-       
-       # Format columns
-       display_allocations['allocation_date'] = pd.to_datetime(display_allocations['allocation_date']).dt.strftime('%Y-%m-%d')
-       display_allocations['total_allocated_qty'] = display_allocations['total_allocated_qty'].apply(format_number)
-       display_allocations['avg_fulfillment_rate'] = display_allocations['avg_fulfillment_rate'].apply(lambda x: f"{x:.1f}%")
-       
-       # Apply status coloring
-       def color_status(val):
-           colors = {
-               'DRAFT': 'background-color: #fff3cd',
-               'APPROVED': 'background-color: #d4edda',
-               'EXECUTED': 'background-color: #cce5ff',
-               'CANCELLED': 'background-color: #f8d7da'
-           }
-           return colors.get(val, '')
-       
-       styled_df = display_allocations.style.applymap(color_status, subset=['plan_status'])
-       st.dataframe(styled_df, use_container_width=True, height=300)
-   else:
-       st.info("No allocation plans found for selected filters")
-else:
-   st.info("No allocation plans created yet. Run GAP Analysis to identify shortages and create allocation plans.")
-   
-# === Recent Activities ===
-st.markdown("---")
-st.subheader("🕐 Recent Activities")
+def render_business_rules(settings_manager):
+    """Render business rule settings"""
+    st.subheader("🏢 Business Rules")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        allocation_method = st.selectbox(
+            "Default Allocation Method",
+            options=['FIFO', 'Pro-rata', 'Priority', 'Fair Share'],
+            index=['FIFO', 'Pro-rata', 'Priority', 'Fair Share'].index(
+                settings_manager.get_setting('business_rules.allocation_method', 'FIFO')
+            ),
+            help="Default method for allocating scarce inventory"
+        )
+        settings_manager.set_setting('business_rules.allocation_method', allocation_method)
+        
+        customer_priority = st.checkbox(
+            "Enable Customer Priority",
+            value=settings_manager.get_setting('business_rules.customer_priority_enabled', True),
+            help="Consider customer priority in allocation"
+        )
+        settings_manager.set_setting('business_rules.customer_priority_enabled', customer_priority)
+        
+        product_priority = st.checkbox(
+            "Enable Product Priority",
+            value=settings_manager.get_setting('business_rules.product_priority_enabled', False),
+            help="Consider product priority in allocation"
+        )
+        settings_manager.set_setting('business_rules.product_priority_enabled', product_priority)
+        
+        auto_approve = st.checkbox(
+            "Auto-approve Allocations",
+            value=settings_manager.get_setting('business_rules.auto_approve_allocation', False),
+            help="Automatically approve allocation plans"
+        )
+        settings_manager.set_setting('business_rules.auto_approve_allocation', auto_approve)
+    
+    with col2:
+        shelf_life_threshold = st.number_input(
+            "Shelf Life Threshold (days)",
+            min_value=7,
+            max_value=180,
+            value=settings_manager.get_setting('business_rules.shelf_life_threshold_days', 30),
+            help="Minimum acceptable shelf life"
+        )
+        settings_manager.set_setting('business_rules.shelf_life_threshold_days', shelf_life_threshold)
+        
+        shelf_life_percent = st.slider(
+            "Max Shelf Life % for Allocation",
+            min_value=0.5,
+            max_value=1.0,
+            value=settings_manager.get_setting('business_rules.shelf_life_allocation_percent', 0.75),
+            step=0.05,
+            help="Maximum % of shelf life consumed at delivery"
+        )
+        settings_manager.set_setting('business_rules.shelf_life_allocation_percent', shelf_life_percent)
+        
+        seasonality = st.checkbox(
+            "Enable Seasonality Adjustments",
+            value=settings_manager.get_setting('business_rules.seasonality_enabled', True),
+            help="Consider seasonal patterns in planning"
+        )
+        settings_manager.set_setting('business_rules.seasonality_enabled', seasonality)
 
-activities = []
+def render_alert_thresholds(settings_manager):
+    """Render alert threshold settings"""
+    st.subheader("🚨 Alert Thresholds")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        critical_days = st.number_input(
+            "Critical Shortage Days",
+            min_value=1,
+            max_value=14,
+            value=settings_manager.get_setting('alert_thresholds.critical_shortage_days', 3),
+            help="Days to consider shortage as critical"
+        )
+        settings_manager.set_setting('alert_thresholds.critical_shortage_days', critical_days)
+        
+        warning_days = st.number_input(
+            "Warning Shortage Days",
+            min_value=3,
+            max_value=30,
+            value=settings_manager.get_setting('alert_thresholds.warning_shortage_days', 7),
+            help="Days to trigger shortage warning"
+        )
+        settings_manager.set_setting('alert_thresholds.warning_shortage_days', warning_days)
+        
+        slow_moving_months = st.number_input(
+            "Slow Moving Threshold (months)",
+            min_value=1,
+            max_value=12,
+            value=settings_manager.get_setting('alert_thresholds.slow_moving_months', 3),
+            help="Months without movement to flag as slow"
+        )
+        settings_manager.set_setting('alert_thresholds.slow_moving_months', slow_moving_months)
+    
+    with col2:
+        excess_months = st.number_input(
+            "Excess Inventory Months",
+            min_value=3,
+            max_value=24,
+            value=settings_manager.get_setting('alert_thresholds.excess_inventory_months', 6),
+            help="Months of coverage to consider excess"
+        )
+        settings_manager.set_setting('alert_thresholds.excess_inventory_months', excess_months)
+        
+        min_fulfillment = st.slider(
+            "Min Acceptable Fulfillment Rate",
+            min_value=0.5,
+            max_value=1.0,
+            value=settings_manager.get_setting('alert_thresholds.min_fulfillment_rate', 0.85),
+            step=0.05,
+            help="Threshold for fulfillment alerts"
+        )
+        settings_manager.set_setting('alert_thresholds.min_fulfillment_rate', min_fulfillment)
+        
+        max_variance = st.slider(
+            "Max Allocation Variance",
+            min_value=0.05,
+            max_value=0.5,
+            value=settings_manager.get_setting('alert_thresholds.max_allocation_variance', 0.15),
+            step=0.05,
+            help="Maximum acceptable variance in allocation"
+        )
+        settings_manager.set_setting('alert_thresholds.max_allocation_variance', max_variance)
 
-# Check various timestamps
-if get_from_session_state('demand_analysis_timestamp'):
-   activities.append({
-       'time': get_from_session_state('demand_analysis_timestamp'),
-       'action': '📤 Demand Analysis',
-       'status': 'Completed'
-   })
+# === Recent Activities Section ===
+def render_recent_activities():
+    """Render recent system activities"""
+    st.subheader("🕐 Recent Activities")
+    
+    activities = []
+    
+    # Collect activities from session state
+    activity_keys = {
+        'demand_analysis_timestamp': ('📤 Demand Analysis', 'Completed'),
+        'supply_analysis_timestamp': ('📥 Supply Analysis', 'Completed'),
+        'gap_analysis_result_timestamp': ('📊 GAP Analysis', 'Completed'),
+        'final_allocation_plan_timestamp': ('🧩 Allocation Plan', 'Saved')
+    }
+    
+    for key, (action, status) in activity_keys.items():
+        timestamp = get_from_session_state(key)
+        if timestamp:
+            activities.append({
+                'time': timestamp,
+                'action': action,
+                'status': status
+            })
+    
+    if activities:
+        # Sort by time descending
+        activities_df = pd.DataFrame(activities)
+        activities_df = activities_df.sort_values('time', ascending=False).head(5)
+        activities_df['time'] = activities_df['time'].dt.strftime('%Y-%m-%d %H:%M:%S')
+        
+        st.dataframe(
+            activities_df,
+            column_config={
+                'time': 'Timestamp',
+                'action': 'Activity',
+                'status': 'Status'
+            },
+            hide_index=True,
+            use_container_width=True
+        )
+    else:
+        st.info("No recent activities recorded")
 
-if get_from_session_state('supply_analysis_timestamp'):
-   activities.append({
-       'time': get_from_session_state('supply_analysis_timestamp'),
-       'action': '📥 Supply Analysis',
-       'status': 'Completed'
-   })
+# === System Status Section ===
+def render_system_status():
+    """Render system health status"""
+    st.subheader("🔧 System Status")
+    
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.markdown("**Database**")
+        try:
+            engine = get_db_engine()
+            with engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
+            st.markdown('<span class="status-ok">● Connected</span>', unsafe_allow_html=True)
+        except Exception as e:
+            st.markdown('<span class="status-critical">● Error</span>', unsafe_allow_html=True)
+            st.caption(str(e)[:50])
+    
+    with col2:
+        st.markdown("**Data Freshness**")
+        last_refresh = st.session_state.get('last_data_refresh', None)
+        if last_refresh:
+            st.markdown('<span class="status-ok">● Up to date</span>', unsafe_allow_html=True)
+        else:
+            st.markdown('<span class="status-warning">● Needs refresh</span>', unsafe_allow_html=True)
+    
+    with col3:
+        st.markdown("**Cache Status**")
+        cache_size = len(st.session_state.keys())
+        st.markdown(f'<span class="status-ok">● Active ({cache_size})</span>', unsafe_allow_html=True)
+    
+    with col4:
+        st.markdown("**Server Time**")
+        st.markdown(f"{datetime.now().strftime('%H:%M:%S')}")
 
-if get_from_session_state('gap_analysis_result_timestamp'):
-   activities.append({
-       'time': get_from_session_state('gap_analysis_result_timestamp'),
-       'action': '📊 GAP Analysis',
-       'status': 'Completed'
-   })
+# === Main Function ===
+def main():
+    # Initialize systems
+    data_preloader, settings_manager = init_systems()
+    
+    if data_preloader is None or settings_manager is None:
+        st.error("Failed to initialize application. Please check system configuration.")
+        return
+    
+    # Render header
+    render_header(data_preloader)
+    
+    # Load data
+    try:
+        with st.spinner("Loading data..."):
+            data_preloader.preload_all_data()
+            st.session_state['last_data_refresh'] = datetime.now().strftime("%H:%M:%S")
+    except Exception as e:
+        st.error(f"Error loading data: {str(e)}")
+        st.info("Some features may be limited.")
+    
+    # Main content - Only 2 tabs now
+    tab1, tab2 = st.tabs([
+        "📊 Dashboard",
+        "⚙️ Configuration"
+    ])
+    
+    with tab1:
+        render_dashboard_tab(data_preloader)
+    
+    with tab2:
+        render_configuration_tab(settings_manager)
+    
+    # Bottom sections
+    st.markdown("---")
+    
+    # Recent activities and system status
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        render_recent_activities()
+    
+    with col2:
+        render_system_status()
+    
+    # Footer
+    st.markdown("---")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.caption("© 2024 Supply Chain Management System")
+    with col2:
+        st.caption("Version 2.0.0")
+    with col3:
+        st.caption(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-if get_from_session_state('final_allocation_plan_timestamp'):
-   activities.append({
-       'time': get_from_session_state('final_allocation_plan_timestamp'),
-       'action': '🧩 Allocation Plan',
-       'status': 'Saved'
-   })
-
-if activities:
-   # Sort by time
-   activities_df = pd.DataFrame(activities)
-   activities_df = activities_df.sort_values('time', ascending=False).head(5)
-   activities_df['time'] = activities_df['time'].dt.strftime('%Y-%m-%d %H:%M:%S')
-   
-   st.dataframe(
-       activities_df,
-       column_config={
-           'time': 'Timestamp',
-           'action': 'Activity',
-           'status': 'Status'
-       },
-       hide_index=True,
-       use_container_width=True
-   )
-else:
-   st.info("No recent activities recorded")
-
-# === Welcome Section (if no analysis) ===
-if last_gap_analysis is None:
-   st.markdown("---")
-   
-   # Welcome message
-   col1, col2, col3 = st.columns([1, 2, 1])
-   
-   with col2:
-       st.markdown("## 👋 Welcome to SCM Control Center!")
-       st.markdown("""
-       This dashboard provides real-time visibility into your supply chain operations,
-       helping you make data-driven decisions to optimize inventory and meet customer demand.
-       
-       ### 🚀 Getting Started
-       
-       1. **📤 Analyze Demand**: Review customer orders and forecasts
-       2. **📥 Check Supply**: Monitor inventory and incoming shipments
-       3. **📊 Run GAP Analysis**: Identify supply-demand mismatches
-       4. **🧩 Create Allocation Plans**: Distribute limited supply fairly
-       5. **📌 Generate PO Suggestions**: Replenish shortage items
-       
-       ### 📊 Key Features
-       
-       - **Real-time Analytics**: Up-to-date supply and demand visibility
-       - **Smart Allocation**: Multiple methods to distribute scarce inventory
-       - **Proactive Alerts**: Early warning for shortages and excess
-       - **Export Reports**: Share insights with stakeholders
-       - **Allocation Tracking**: Monitor allocation plan execution
-       """)
-       
-       st.markdown("---")
-       
-       if st.button("🚀 Start with GAP Analysis", type="primary", use_container_width=True, key="start_gap"):
-           st.switch_page("pages/3_📊_GAP_Analysis.py")
-   
-   # Feature cards
-   st.markdown("---")
-   st.markdown("### 🎯 Module Overview")
-   
-   col1, col2, col3 = st.columns(3)
-   
-   with col1:
-       st.markdown("""
-       #### 📤 Demand Analysis
-       - View pending orders (OC)
-       - Track customer forecasts
-       - Monitor conversion rates
-       - Identify demand patterns
-       """)
-       if st.button("Open Demand Analysis", use_container_width=True):
-           st.switch_page("pages/1_📤_Demand_Analysis.py")
-   
-   with col2:
-       st.markdown("""
-       #### 📥 Supply Analysis
-       - Current inventory levels
-       - Pending arrivals (CAN)
-       - Outstanding POs
-       - Expiry tracking
-       """)
-       if st.button("Open Supply Analysis", use_container_width=True):
-           st.switch_page("pages/2_📥_Supply_Analysis.py")
-   
-   with col3:
-       st.markdown("""
-       #### 📊 GAP Analysis
-       - Compare supply vs demand
-       - Period-wise analysis
-       - Carry-forward logic
-       - Shortage identification
-       """)
-       if st.button("Open GAP Analysis", use_container_width=True):
-           st.switch_page("pages/3_📊_GAP_Analysis.py")
-
-# === System Status ===
-st.markdown("---")
-st.subheader("🔧 System Status")
-
-status_col1, status_col2, status_col3, status_col4 = st.columns(4)
-
-with status_col1:
-   st.markdown("**Database Connection**")
-   try:
-       engine = get_db_engine()
-       with engine.connect() as conn:
-           conn.execute(text("SELECT 1"))
-       st.markdown('<span class="status-ok">● Connected</span>', unsafe_allow_html=True)
-   except:
-       st.markdown('<span class="status-critical">● Disconnected</span>', unsafe_allow_html=True)
-
-with status_col2:
-   st.markdown("**Data Freshness**")
-   st.markdown('<span class="status-ok">● Real-time</span>', unsafe_allow_html=True)
-
-with status_col3:
-   st.markdown("**Cache Status**")
-   cache_size = len(st.session_state.keys())
-   st.markdown(f'<span class="status-ok">● Active ({cache_size} items)</span>', unsafe_allow_html=True)
-
-with status_col4:
-   st.markdown("**Last Refresh**")
-   st.markdown(f"{datetime.now().strftime('%H:%M:%S')}")
-
-# === Footer ===
-st.markdown("---")
-col1, col2, col3 = st.columns(3)
-with col1:
-   st.caption("© 2024 Supply Chain Management System")
-with col2:
-   st.caption("Version 1.1.0 (with Allocation)")
-with col3:
-   st.caption(f"Server Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+if __name__ == "__main__":
+    main()

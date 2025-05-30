@@ -1,7 +1,7 @@
 import pandas as pd
 import streamlit as st
 from io import BytesIO
-from datetime import datetime
+from datetime import datetime, timedelta
 import numpy as np
 
 # === EXCEL EXPORT FUNCTIONS ===
@@ -134,9 +134,6 @@ def parse_week_period(period_str):
                 week = int(week_str)
                 year = int(year_part)
                 
-                # Debug print
-                # print(f"Parsed '{period_str}' -> ({year}, {week})")
-
                 return (year, week)
     except Exception:
         pass
@@ -235,8 +232,6 @@ def check_missing_dates(df, date_column, show_warning=True):
     return missing_count
 
 
-# Add this function to helpers.py after check_missing_dates function
-
 def check_past_dates(df, date_column, show_warning=True):
     """
     Check for past dates in dataframe
@@ -265,8 +260,6 @@ def validate_quantity_columns(df, quantity_columns):
     return df
 
 
-# Replace the is_past_period function in helpers.py with this corrected version:
-
 def is_past_period(period_str, period_type):
     """Check if a period string represents a past period"""
     today = datetime.now()
@@ -291,15 +284,15 @@ def is_past_period(period_str, period_type):
                     
                     # Find the first Sunday of the year
                     days_to_sunday = (6 - jan1.weekday()) % 7
-                    first_sunday = jan1 + pd.Timedelta(days=days_to_sunday)
+                    first_sunday = jan1 + timedelta(days=days_to_sunday)
                     
                     # Calculate the target week's Sunday
                     if jan1.weekday() <= 3:  # Thursday or earlier
                         # Week 1 contains January 1st
-                        target_sunday = first_sunday + pd.Timedelta(weeks=week_num - 1)
+                        target_sunday = first_sunday + timedelta(weeks=week_num - 1)
                     else:
                         # Week 1 starts after January 1st
-                        target_sunday = first_sunday + pd.Timedelta(weeks=week_num - 2)
+                        target_sunday = first_sunday + timedelta(weeks=week_num - 2)
                     
                     return target_sunday.date() < today.date()
                     
@@ -435,3 +428,228 @@ def show_data_quality_score(df, required_columns):
         st.error(f"❌ Data Quality Score: {quality_score:.1f}%")
     
     return quality_score
+
+
+# === NEW FUNCTIONS FOR ENHANCED FEATURES ===
+
+def format_alert_message(icon, message, value=None, action=None):
+    """Format alert message for display"""
+    parts = [f"{icon} {message}"]
+    if value:
+        parts.append(f": {value}")
+    if action:
+        parts.append(f" ({action})")
+    return " ".join(parts)
+
+
+def calculate_working_days(start_date, end_date, working_days_per_week=5):
+    """Calculate number of working days between two dates"""
+    if pd.isna(start_date) or pd.isna(end_date):
+        return 0
+        
+    days = (end_date - start_date).days
+    if working_days_per_week == 7:
+        return days
+    
+    # Simple calculation (can be enhanced)
+    weeks = days // 7
+    remaining_days = days % 7
+    
+    working_days = weeks * working_days_per_week
+    for i in range(remaining_days):
+        day = start_date + timedelta(days=i)
+        if day.weekday() < working_days_per_week:
+            working_days += 1
+    
+    return max(0, working_days)
+
+
+def format_metric_card(title, value, subtitle=None, delta=None, delta_color="normal"):
+    """Format a metric card with HTML"""
+    html = f"""
+    <div style="
+        background-color: #f0f2f6;
+        padding: 20px;
+        border-radius: 10px;
+        text-align: center;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    ">
+        <h4 style="margin: 0; color: #666;">{title}</h4>
+        <h2 style="margin: 10px 0; color: #333;">{value}</h2>
+    """
+    
+    if subtitle:
+        html += f'<p style="margin: 0; color: #888; font-size: 0.9em;">{subtitle}</p>'
+    
+    if delta:
+        color = "#28a745" if delta_color == "normal" else "#dc3545"
+        html += f'<p style="margin: 5px 0; color: {color}; font-weight: bold;">{delta}</p>'
+    
+    html += "</div>"
+    return html
+
+
+def create_download_button(df, filename, button_label="📥 Download Excel"):
+    """Create a download button for dataframe"""
+    excel_data = convert_df_to_excel(df)
+    
+    return st.download_button(
+        label=button_label,
+        data=excel_data,
+        file_name=f"{filename}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
+
+def aggregate_by_period(df, date_column, value_columns, period_type="Weekly", agg_func="sum"):
+    """Aggregate dataframe by period"""
+    df = df.copy()
+    df[date_column] = pd.to_datetime(df[date_column])
+    
+    # Convert to period
+    df['period'] = convert_to_period(df[date_column], period_type)
+    
+    # Group and aggregate
+    if isinstance(value_columns, str):
+        value_columns = [value_columns]
+    
+    agg_dict = {col: agg_func for col in value_columns}
+    result = df.groupby('period').agg(agg_dict).reset_index()
+    
+    return result
+
+
+def calculate_safety_metrics(inventory_df, demand_df, product_col='pt_code', 
+                           inventory_col='remaining_quantity', 
+                           demand_col='pending_standard_delivery_quantity'):
+    """Calculate safety stock metrics"""
+    # Merge inventory and demand
+    merged = pd.merge(
+        inventory_df.groupby(product_col)[inventory_col].sum().reset_index(),
+        demand_df.groupby(product_col)[demand_col].sum().reset_index(),
+        on=product_col,
+        how='outer'
+    ).fillna(0)
+    
+    # Calculate metrics
+    merged['coverage_days'] = merged.apply(
+        lambda x: x[inventory_col] / x[demand_col] * 30 if x[demand_col] > 0 else float('inf'),
+        axis=1
+    )
+    
+    merged['stock_status'] = merged['coverage_days'].apply(
+        lambda x: 'Critical' if x < 7 else 'Low' if x < 14 else 'Normal' if x < 90 else 'Excess'
+    )
+    
+    return merged
+
+
+def create_period_comparison(current_period_df, previous_period_df, metric_columns):
+    """Create period-over-period comparison"""
+    comparison = {}
+    
+    for col in metric_columns:
+        current_val = current_period_df[col].sum() if col in current_period_df else 0
+        previous_val = previous_period_df[col].sum() if col in previous_period_df else 0
+        
+        if previous_val > 0:
+            change_pct = ((current_val - previous_val) / previous_val) * 100
+        else:
+            change_pct = 100 if current_val > 0 else 0
+        
+        comparison[col] = {
+            'current': current_val,
+            'previous': previous_val,
+            'change': current_val - previous_val,
+            'change_pct': change_pct
+        }
+    
+    return comparison
+
+
+def validate_settings_import(settings_dict, required_keys):
+    """Validate imported settings structure"""
+    def check_keys(d, keys, parent=''):
+        missing = []
+        for key in keys:
+            if isinstance(key, dict):
+                for k, sub_keys in key.items():
+                    if k not in d:
+                        missing.append(f"{parent}.{k}" if parent else k)
+                    else:
+                        missing.extend(check_keys(d[k], sub_keys, f"{parent}.{k}" if parent else k))
+            else:
+                if key not in d:
+                    missing.append(f"{parent}.{key}" if parent else key)
+        return missing
+    
+    missing_keys = check_keys(settings_dict, required_keys)
+    return len(missing_keys) == 0, missing_keys
+
+
+def format_timestamp(timestamp, format_str="%Y-%m-%d %H:%M:%S"):
+    """Format timestamp for display"""
+    if isinstance(timestamp, str):
+        return timestamp
+    elif isinstance(timestamp, datetime):
+        return timestamp.strftime(format_str)
+    elif pd.notna(timestamp):
+        return pd.to_datetime(timestamp).strftime(format_str)
+    else:
+        return "N/A"
+
+
+def get_color_scale(value, thresholds, colors):
+    """Get color based on value and thresholds"""
+    for i, threshold in enumerate(thresholds):
+        if value <= threshold:
+            return colors[i]
+    return colors[-1]
+
+
+def create_summary_stats(df, numeric_columns):
+    """Create summary statistics for numeric columns"""
+    stats = {}
+    
+    for col in numeric_columns:
+        if col in df.columns:
+            stats[col] = {
+                'count': df[col].count(),
+                'mean': df[col].mean(),
+                'std': df[col].std(),
+                'min': df[col].min(),
+                '25%': df[col].quantile(0.25),
+                '50%': df[col].quantile(0.50),
+                '75%': df[col].quantile(0.75),
+                'max': df[col].max(),
+                'sum': df[col].sum()
+            }
+    
+    return pd.DataFrame(stats).T
+
+
+def detect_anomalies(df, value_column, method='iqr', threshold=1.5):
+    """Detect anomalies in data using IQR method"""
+    if method == 'iqr':
+        Q1 = df[value_column].quantile(0.25)
+        Q3 = df[value_column].quantile(0.75)
+        IQR = Q3 - Q1
+        
+        lower_bound = Q1 - threshold * IQR
+        upper_bound = Q3 + threshold * IQR
+        
+        df['is_anomaly'] = (df[value_column] < lower_bound) | (df[value_column] > upper_bound)
+    
+    return df
+
+
+def create_alert_summary(alerts_list):
+    """Create a summary of alerts by category"""
+    summary = {
+        'critical': len([a for a in alerts_list if a.get('level') == 'critical']),
+        'warning': len([a for a in alerts_list if a.get('level') == 'warning']),
+        'info': len([a for a in alerts_list if a.get('level') == 'info'])
+    }
+    
+    summary['total'] = sum(summary.values())
+    return summary
