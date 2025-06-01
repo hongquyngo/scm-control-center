@@ -2,8 +2,7 @@ import pandas as pd
 from sqlalchemy import create_engine
 from urllib.parse import quote_plus
 import logging
-
-from config import DB_CONFIG
+from .config import DB_CONFIG
 
 logger = logging.getLogger(__name__)
 

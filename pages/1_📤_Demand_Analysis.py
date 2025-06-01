@@ -1,20 +1,22 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime, date
-from utils.data_loader import load_outbound_demand_data, load_customer_forecast_data
+
+# Import refactored modules
+from utils.data_manager import DataManager
+from utils.filters import FilterManager
+from utils.display_components import DisplayComponents
+from utils.formatters import format_number, format_currency, format_percentage
 from utils.helpers import (
     convert_df_to_excel, 
     convert_to_period, 
     sort_period_columns,
-    format_number,
-    format_currency,
-    check_missing_dates,
-    check_past_dates,
-    is_past_period,
     save_to_session_state,
+    is_past_period,
     parse_week_period,
     parse_month_period
 )
+from utils.session_state import initialize_session_state
 
 # === Page Config ===
 st.set_page_config(
@@ -23,9 +25,19 @@ st.set_page_config(
     layout="wide"
 )
 
+# === Initialize Session State ===
+initialize_session_state()
+
 # === Constants ===
 DEMAND_SOURCES = ["OC Only", "Forecast Only", "Both"]
 PERIOD_TYPES = ["Daily", "Weekly", "Monthly"]
+
+# === Initialize Components ===
+@st.cache_resource
+def get_data_manager():
+    return DataManager()
+
+data_manager = get_data_manager()
 
 # === Debug Mode Toggle ===
 col_debug1, col_debug2 = st.columns([6, 1])
@@ -36,17 +48,12 @@ if debug_mode:
     st.info("🐛 Debug Mode is ON - Additional information will be displayed")
 
 # === Header with Navigation ===
-col1, col2, col3 = st.columns([1, 4, 1])
-with col1:
-    if st.button("🏠 Dashboard"):
-        st.switch_page("main.py")
-with col2:
-    st.title("📤 Outbound Demand Analysis")
-with col3:
-    if st.button("Next: Supply →"):
-        st.switch_page("pages/2_📥_Supply_Analysis.py")
-
-st.markdown("---")
+DisplayComponents.show_page_header(
+    title="Outbound Demand Analysis",
+    icon="📤",
+    prev_page=None,
+    next_page="pages/2_📥_Supply_Analysis.py"
+)
 
 # === Data Source Selection ===
 def select_demand_source():
@@ -66,63 +73,20 @@ def select_demand_source():
 # === Data Loading Functions ===
 def load_and_prepare_demand_data(source):
     """Load and standardize demand data based on source selection"""
-    df_parts = []
-    
+    # Convert source selection to list format for data_manager
+    sources = []
     if source in ["OC Only", "Both"]:
-        df_oc = load_outbound_demand_data()
-        if not df_oc.empty:
-            df_oc["source_type"] = "OC"
-            df_parts.append(standardize_demand_df(df_oc, is_forecast=False))
-            
-            if debug_mode:
-                st.write(f"🐛 OC data loaded: {len(df_oc)} rows")
-    
+        sources.append("OC")
     if source in ["Forecast Only", "Both"]:
-        df_fc = load_customer_forecast_data()
-        if not df_fc.empty:
-            df_fc["source_type"] = "Forecast"
-            df_parts.append(standardize_demand_df(df_fc, is_forecast=True))
-            
-            if debug_mode:
-                st.write(f"🐛 Forecast data loaded: {len(df_fc)} rows")
+        sources.append("Forecast")
     
-    result_df = pd.concat(df_parts, ignore_index=True) if df_parts else pd.DataFrame()
+    # Use data_manager to get demand data
+    df = data_manager.get_demand_data(sources=sources, include_converted=True) # đefault to include converted forecasts
     
-    if debug_mode and not result_df.empty:
-        st.write(f"🐛 Combined data: {len(result_df)} rows, {result_df['pt_code'].nunique()} unique products")
-    
-    return result_df
-
-def standardize_demand_df(df, is_forecast):
-    """Standardize column names and data types for demand dataframes"""
-    df = df.copy()
-    
-    # Date columns
-    df["etd"] = pd.to_datetime(df["etd"], errors="coerce")
-    df["oc_date"] = pd.to_datetime(df.get("oc_date", pd.NaT), errors="coerce")
-    
-    # Quantity and value columns
-    if is_forecast:
-        df['demand_quantity'] = pd.to_numeric(df['standard_quantity'], errors='coerce').fillna(0)
-        df['value_in_usd'] = pd.to_numeric(df.get('total_amount_usd', 0), errors='coerce').fillna(0)
-        df['demand_number'] = df.get('forecast_number', '')
-        df['is_converted_to_oc'] = df.get('is_converted_to_oc', 'No')
-    else:
-        df['demand_quantity'] = pd.to_numeric(df['pending_standard_delivery_quantity'], errors='coerce').fillna(0)
-        df['value_in_usd'] = pd.to_numeric(df.get('outstanding_amount_usd', 0), errors='coerce').fillna(0)
-        df['demand_number'] = df.get('oc_number', '')
-        df['is_converted_to_oc'] = 'N/A'
-    
-    # String columns
-    string_cols = ['product_name', 'pt_code', 'brand', 'legal_entity', 'customer']
-    for col in string_cols:
-        if col in df.columns:
-            df[col] = df[col].astype(str)
-        else:
-            df[col] = ""
-    
-    df['standard_uom'] = df.get('standard_uom', '')
-    df['package_size'] = df.get('package_size', '')
+    if debug_mode and not df.empty:
+        st.write(f"🐛 Loaded data: {len(df)} rows, {df['pt_code'].nunique()} unique products")
+        if 'source_type' in df.columns:
+            st.write(f"🐛 Data sources: {df['source_type'].value_counts().to_dict()}")
     
     return df
 
@@ -132,48 +96,61 @@ def apply_demand_filters(df):
     with st.expander("📎 Filters", expanded=True):
         # Row 1: Entity, Customer, Product
         col1, col2, col3 = st.columns(3)
+        
+        # Get filter values
+        filters = {}
+        
         with col1:
-            selected_entity = st.multiselect(
-                "Legal Entity", 
-                sorted(df["legal_entity"].dropna().unique()),
-                key="demand_entity_filter"
-            )
+            if 'legal_entity' in df.columns:
+                entities = df["legal_entity"].dropna().unique().tolist()
+                filters['entity'] = st.multiselect(
+                    "Legal Entity", 
+                    sorted(entities),
+                    key="demand_entity_filter"
+                )
+        
         with col2:
-            selected_customer = st.multiselect(
-                "Customer", 
-                sorted(df["customer"].dropna().unique()),
-                key="demand_customer_filter"
-            )
+            if 'customer' in df.columns:
+                customers = df["customer"].dropna().unique().tolist()
+                filters['customer'] = st.multiselect(
+                    "Customer", 
+                    sorted(customers),
+                    key="demand_customer_filter"
+                )
+        
         with col3:
-            # Enhanced product filter with both PT Code and Product Name
-            unique_products = df[['pt_code', 'product_name']].drop_duplicates()
-            product_options = [f"{row['pt_code']} - {row['product_name'][:50]}" 
-                             for _, row in unique_products.iterrows()]
-            
-            selected_products = st.multiselect(
-                "Product (PT Code - Name)", 
-                sorted(product_options),
-                key="demand_product_filter",
-                help="Search by PT Code or Product Name"
-            )
-            
-            # Extract selected PT codes
-            selected_pt_codes = [p.split(' - ')[0] for p in selected_products]
+            # Use FilterManager for product filter
+            filters['product'] = FilterManager.create_product_filter(df, "demand_")
         
         # Row 2: Brand, Date range
         col4, col5, col6 = st.columns(3)
+        
         with col4:
-            selected_brand = st.multiselect(
-                "Brand", 
-                sorted(df["brand"].dropna().unique()),
-                key="demand_brand_filter"
-            )
+            if 'brand' in df.columns:
+                brands = df["brand"].dropna().unique().tolist()
+                filters['brand'] = st.multiselect(
+                    "Brand", 
+                    sorted(brands),
+                    key="demand_brand_filter"
+                )
+        
+        # Date range
         with col5:
-            default_start = df["etd"].min().date() if pd.notnull(df["etd"].min()) else datetime.today().date()
+            if 'etd' in df.columns and df['etd'].notna().any():
+                default_start = df["etd"].min().date()
+            else:
+                default_start = datetime.today().date()
             start_date = st.date_input("From Date (ETD)", default_start, key="demand_start_date")
+        
         with col6:
-            default_end = df["etd"].max().date() if pd.notnull(df["etd"].max()) else datetime.today().date()
+            if 'etd' in df.columns and df['etd'].notna().any():
+                default_end = df["etd"].max().date()
+            else:
+                default_end = datetime.today().date()
             end_date = st.date_input("To Date (ETD)", default_end, key="demand_end_date")
+        
+        filters['start_date'] = start_date
+        filters['end_date'] = end_date
         
         # Row 3: Conversion status (if applicable)
         if 'is_converted_to_oc' in df.columns:
@@ -185,33 +162,17 @@ def apply_demand_filters(df):
                     sorted(conversion_options),
                     key="demand_conversion_filter"
                 )
+                filters['conversion_status'] = selected_conversion
     
-    # Apply filters
-    filtered_df = df.copy()
-    original_count = len(filtered_df)
+    # Apply filters using FilterManager
+    filtered_df = FilterManager.apply_filters(df, filters, date_column="etd")
     
-    if selected_entity:
-        filtered_df = filtered_df[filtered_df["legal_entity"].isin(selected_entity)]
-    if selected_customer:
-        filtered_df = filtered_df[filtered_df["customer"].isin(selected_customer)]
-    if selected_products:
-        filtered_df = filtered_df[filtered_df["pt_code"].isin(selected_pt_codes)]
-    if selected_brand:
-        filtered_df = filtered_df[filtered_df["brand"].isin(selected_brand)]
-    
-    if 'is_converted_to_oc' in df.columns and 'selected_conversion' in locals() and selected_conversion:
-        filtered_df = filtered_df[filtered_df["is_converted_to_oc"].isin(selected_conversion)]
-    
-    # Date filter (include null ETD)
-    start_ts = pd.to_datetime(start_date)
-    end_ts = pd.to_datetime(end_date)
-    filtered_df = filtered_df[
-        filtered_df["etd"].isna() |
-        ((filtered_df["etd"] >= start_ts) & (filtered_df["etd"] <= end_ts))
-    ]
+    # Apply additional conversion status filter if needed
+    if 'conversion_status' in filters and filters['conversion_status']:
+        filtered_df = filtered_df[filtered_df["is_converted_to_oc"].isin(filters['conversion_status'])]
     
     if debug_mode:
-        st.write(f"🐛 Filtered: {original_count} → {len(filtered_df)} rows")
+        st.write(f"🐛 Filtered: {len(df)} → {len(filtered_df)} rows")
     
     return filtered_df, start_date, end_date
 
@@ -227,22 +188,39 @@ def show_demand_summary(filtered_df):
     total_value = filtered_df["value_in_usd"].sum()
     missing_etd = filtered_df["etd"].isna().sum()
     
-    # NEW: Calculate past ETD
+    # Calculate past ETD
     past_etd = filtered_df[filtered_df["etd"] < today].shape[0]
     
     # Display metrics
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("Total Unique Products", f"{total_products:,}")
-    with col2:
-        st.metric("Total Value (USD)", format_currency(total_value, "USD"))
-    with col3:
-        if missing_etd > 0:
-            st.metric("⚠️ Missing ETD", f"{missing_etd} records", delta_color="inverse")
-    with col4:
-        if past_etd > 0:
-            st.metric("🔴 Past ETD", f"{past_etd} records", delta_color="inverse", 
-                     help="Orders with ETD before today")
+    metrics = [
+        {
+            "title": "Total Unique Products",
+            "value": total_products,
+            "format_type": "number"
+        },
+        {
+            "title": "Total Value (USD)",
+            "value": total_value,
+            "format_type": "currency"
+        },
+        {
+            "title": "⚠️ Missing ETD",
+            "value": missing_etd,
+            "format_type": "number",
+            "delta": "records" if missing_etd > 0 else None,
+            "delta_color": "inverse"
+        },
+        {
+            "title": "🔴 Past ETD",
+            "value": past_etd,
+            "format_type": "number",
+            "delta": "records" if past_etd > 0 else None,
+            "delta_color": "inverse",
+            "help_text": "Orders with ETD before today"
+        }
+    ]
+    
+    DisplayComponents.show_summary_metrics(metrics)
     
     # Conversion status for forecasts
     if filtered_df["source_type"].str.contains("Forecast").any():
@@ -268,8 +246,6 @@ def show_forecast_conversion_summary(filtered_df):
         with col3:
             st.metric("Not Converted", f"{not_converted:,}")
 
-
-
 def show_demand_detail_table(filtered_df):
     """Show detailed demand table with enhanced filtering and highlighting"""
     st.markdown("### 🔍 Demand Details")
@@ -282,19 +258,15 @@ def show_demand_detail_table(filtered_df):
         show_past_only = st.checkbox("Show Past ETD Only", key="show_past_etd")
     with col3:
         # Display warnings for both missing and past ETD
-        missing_etd_count = check_missing_dates(filtered_df, "etd", show_warning=False)
-        past_etd_count = check_past_dates(filtered_df, "etd", show_warning=False)
-        
-        if missing_etd_count > 0:
-            st.warning(f"⚠️ Found {missing_etd_count} records with missing ETD")
-        if past_etd_count > 0:
-            st.error(f"🔴 Found {past_etd_count} records with past ETD")
+        missing_etd_count, past_etd_count = DisplayComponents.show_data_quality_warnings(
+            filtered_df, "etd", "Demand"
+        )
     
     # Apply display filters
     display_df = filtered_df.copy()
     today = pd.Timestamp.now().normalize()
     
-    # FIXED LOGIC: Handle both checkboxes properly
+    # Handle both checkboxes properly
     if show_missing_only and show_past_only:
         # Show both missing AND past ETD
         display_df = display_df[
@@ -320,6 +292,8 @@ def show_demand_detail_table(filtered_df):
     else:
         display_columns = base_columns
     
+    # Filter to only existing columns
+    display_columns = [col for col in display_columns if col in display_df.columns]
     display_df = display_df[display_columns].copy()
     
     # Create sort key for proper ordering
@@ -340,16 +314,16 @@ def show_demand_detail_table(filtered_df):
     styled_df = display_df.style.apply(highlight_etd_issues, axis=1)
     st.dataframe(styled_df, use_container_width=True, height=600)
 
-
-
 def format_demand_display_df(df):
     """Format dataframe columns for display"""
     df = df.copy()
     today = pd.Timestamp.now().normalize()
     
     # Format numeric columns
-    df["demand_quantity"] = df["demand_quantity"].apply(lambda x: format_number(x))
-    df["value_in_usd"] = df["value_in_usd"].apply(lambda x: format_currency(x, "USD"))
+    if "demand_quantity" in df.columns:
+        df["demand_quantity"] = df["demand_quantity"].apply(lambda x: format_number(x))
+    if "value_in_usd" in df.columns:
+        df["value_in_usd"] = df["value_in_usd"].apply(lambda x: format_currency(x, "USD"))
     
     # Enhanced ETD formatting
     def format_etd(x):
@@ -360,7 +334,8 @@ def format_demand_display_df(df):
         else:
             return x.strftime("%Y-%m-%d")
     
-    df["etd"] = df["etd"].apply(format_etd)
+    if "etd" in df.columns:
+        df["etd"] = df["etd"].apply(format_etd)
     
     return df
 
@@ -368,17 +343,16 @@ def highlight_etd_issues(row):
     """Highlight rows based on ETD issues"""
     styles = [""] * len(row)
     
-    if "❌ Missing" in str(row.get("etd", "")):
-        # Light orange/yellow background for missing ETD (matches warning color)
-        styles = ["background-color: #fff3cd"] * len(row)
-    elif "🔴" in str(row.get("etd", "")):
-        # Light red background for past ETD (matches error color)
-        styles = ["background-color: #f8d7da"] * len(row)
+    if "etd" in row:
+        if "❌ Missing" in str(row["etd"]):
+            # Light orange/yellow background for missing ETD
+            styles = ["background-color: #fff3cd"] * len(row)
+        elif "🔴" in str(row["etd"]):
+            # Light red background for past ETD
+            styles = ["background-color: #f8d7da"] * len(row)
     
     return styles
 
-
-# Replace the show_demand_grouped_view function with this updated version
 def show_demand_grouped_view(filtered_df, start_date, end_date):
     """Show grouped demand by period with past period indicators"""
     st.markdown("### 📦 Grouped Demand by Product")
@@ -412,14 +386,14 @@ def show_demand_grouped_view(filtered_df, start_date, end_date):
         st.write("🐛 Pivot columns BEFORE sorting:")
         st.write(list(pivot_df.columns))
     
-  # Sort columns
+    # Sort columns
     pivot_df = sort_period_columns(pivot_df, period, ["product_name", "pt_code"])
     
     if debug_mode:
         st.write("🐛 Pivot columns AFTER sorting:")
         st.write(list(pivot_df.columns))
         
-        # ADD THIS DEBUG SECTION
+        # Check past periods
         st.write("🐛 Checking past periods:")
         for col in pivot_df.columns:
             if col not in ["product_name", "pt_code"]:
@@ -465,14 +439,7 @@ def show_demand_grouped_view(filtered_df, start_date, end_date):
     
     # Export button (without indicators)
     excel_pivot = format_pivot_for_display(pivot_df)
-    excel_data = convert_df_to_excel(excel_pivot, "Grouped Demand")
-    st.download_button(
-        label="📤 Export to Excel",
-        data=excel_data,
-        file_name=f"grouped_demand_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
-
+    DisplayComponents.show_export_button(excel_pivot, "grouped_demand", "📤 Export to Excel")
 
 def create_demand_pivot(df_summary, show_only_nonzero):
     """Create pivot table for demand"""
@@ -509,9 +476,6 @@ def format_pivot_for_display(pivot_df):
     # IMPORTANT: Return with original column order preserved
     return display_pivot[original_columns]
 
-
-
-# Add this new function for totals with indicators
 def show_demand_totals_with_indicators(df_summary, period):
     """Show period totals for demand with past period indicators"""
     # Prepare data
@@ -561,9 +525,6 @@ def show_demand_totals_with_indicators(df_summary, period):
     st.markdown("#### 🔢 Column Totals")
     st.dataframe(display_final, use_container_width=True)
 
-
-
-
 # === Main Page Logic ===
 st.subheader("📤 Outbound Demand by Period")
 
@@ -598,19 +559,23 @@ show_demand_grouped_view(filtered_df, start_date, end_date)
 st.markdown("---")
 
 # Quick Actions
-col1, col2, col3 = st.columns(3)
-with col1:
-    if st.button("📊 Go to GAP Analysis", type="primary", use_container_width=True):
-        st.switch_page("pages/3_📊_GAP_Analysis.py")
+actions = [
+    {
+        "label": "📊 Go to GAP Analysis",
+        "type": "primary",
+        "page": "pages/3_📊_GAP_Analysis.py"
+    },
+    {
+        "label": "📥 View Supply",
+        "page": "pages/2_📥_Supply_Analysis.py"
+    },
+    {
+        "label": "🔄 Refresh Data",
+        "callback": lambda: (data_manager.clear_cache(), st.rerun())
+    }
+]
 
-with col2:
-    if st.button("📥 View Supply", use_container_width=True):
-        st.switch_page("pages/2_📥_Supply_Analysis.py")
-
-with col3:
-    if st.button("🔄 Refresh Data", use_container_width=True):
-        st.cache_data.clear()
-        st.rerun()
+DisplayComponents.show_action_buttons(actions)
 
 # Debug info panel
 if debug_mode:
@@ -623,15 +588,20 @@ if debug_mode:
             st.write(f"- Total rows: {len(df_all)}")
             st.write(f"- Filtered rows: {len(filtered_df)}")
             st.write(f"- Unique products: {filtered_df['pt_code'].nunique()}")
-            st.write(f"- Date range: {filtered_df['etd'].min()} to {filtered_df['etd'].max()}")
+            if 'etd' in filtered_df.columns:
+                st.write(f"- Date range: {filtered_df['etd'].min()} to {filtered_df['etd'].max()}")
         
         with col2:
             st.write("**Sample Data:**")
-            st.write(filtered_df[['pt_code', 'etd', 'demand_quantity']].head())
+            display_cols = ['pt_code', 'etd', 'demand_quantity']
+            display_cols = [col for col in display_cols if col in filtered_df.columns]
+            if display_cols:
+                st.write(filtered_df[display_cols].head())
 
 # Help section
-with st.expander("ℹ️ How to use Demand Analysis", expanded=False):
-    st.markdown("""
+DisplayComponents.show_help_section(
+    "How to use Demand Analysis",
+    """
     ### Understanding Demand Data
     
     **Data Sources:**
@@ -668,7 +638,8 @@ with st.expander("ℹ️ How to use Demand Analysis", expanded=False):
     2. Follow up on past ETD orders
     3. Check forecast accuracy by comparing converted vs non-converted
     4. Identify products with consistent demand patterns
-    """)
+    """
+)
 
 # Footer
 st.markdown("---")

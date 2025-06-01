@@ -1,24 +1,22 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime
-from utils.data_loader import (
-    load_inventory_data,
-    load_pending_can_data,
-    load_pending_po_data,
-    load_pending_wh_transfer_data  # New import
-)
+
+# Import refactored modules
+from utils.data_manager import DataManager
+from utils.filters import FilterManager
+from utils.display_components import DisplayComponents
+from utils.formatters import format_number, format_currency, check_missing_dates
 from utils.helpers import (
     convert_df_to_excel,
     convert_to_period,
     sort_period_columns,
-    format_number,
-    format_currency,
-    check_missing_dates,
     save_to_session_state,
-    is_past_period,  # ADD THIS
-    parse_week_period,  # ADD THIS
-    parse_month_period  # ADD THIS
+    is_past_period,
+    parse_week_period,
+    parse_month_period
 )
+from utils.session_state import initialize_session_state
 
 # === Page Config ===
 st.set_page_config(
@@ -27,26 +25,27 @@ st.set_page_config(
     layout="wide"
 )
 
+# === Initialize Session State ===
+initialize_session_state()
+
 # === Constants ===
 SUPPLY_SOURCES = ["Inventory Only", "Pending CAN Only", "Pending PO Only", "Pending WH Transfer Only", "All"]
 PERIOD_TYPES = ["Daily", "Weekly", "Monthly"]
 
+# === Initialize Components ===
+@st.cache_resource
+def get_data_manager():
+    return DataManager()
+
+data_manager = get_data_manager()
+
 # === Header with Navigation ===
-col1, col2, col3 = st.columns([1, 4, 1])
-with col1:
-    if st.button("← Demand"):
-        st.switch_page("pages/1_📤_Demand_Analysis.py")
-with col2:
-    st.title("📥 Inbound Supply Analysis")
-with col3:
-    if st.button("GAP Analysis →"):
-        st.switch_page("pages/3_📊_GAP_Analysis.py")
-
-# Dashboard button
-if st.button("🏠 Dashboard", use_container_width=False):
-    st.switch_page("main.py")
-
-st.markdown("---")
+DisplayComponents.show_page_header(
+    title="Inbound Supply Analysis",
+    icon="📥",
+    prev_page="pages/1_📤_Demand_Analysis.py",
+    next_page="pages/3_📊_GAP_Analysis.py"
+)
 
 # === Data Source Selection ===
 def select_supply_source():
@@ -72,214 +71,88 @@ def select_supply_source():
 # === Data Loading Functions ===
 def load_and_prepare_supply_data(supply_source, exclude_expired=True):
     """Load and standardize supply data based on source selection"""
-    today = pd.to_datetime("today").normalize()
-    df_parts = []
+    # Convert source selection to list format for data_manager
+    sources = []
+    if supply_source == "All":
+        sources = ["Inventory", "Pending CAN", "Pending PO", "Pending WH Transfer"]
+    elif supply_source == "Inventory Only":
+        sources = ["Inventory"]
+    elif supply_source == "Pending CAN Only":
+        sources = ["Pending CAN"]
+    elif supply_source == "Pending PO Only":
+        sources = ["Pending PO"]
+    elif supply_source == "Pending WH Transfer Only":
+        sources = ["Pending WH Transfer"]
     
-    # Load Inventory
-    if supply_source in ["Inventory Only", "All"]:
-        with st.spinner("Loading inventory data..."):
-            inv_df = load_inventory_data()
-            if not inv_df.empty:
-                inv_df = prepare_inventory_data(inv_df, today, exclude_expired)
-                df_parts.append(inv_df)
+    # Use data_manager to get supply data
+    df = data_manager.get_supply_data(sources=sources, exclude_expired=exclude_expired)
     
-    # Load Pending CAN
-    if supply_source in ["Pending CAN Only", "All"]:
-        with st.spinner("Loading pending CAN data..."):
-            can_df = load_pending_can_data()
-            if not can_df.empty:
-                can_df = prepare_can_data(can_df)
-                df_parts.append(can_df)
-    
-    # Load Pending PO
-    if supply_source in ["Pending PO Only", "All"]:
-        with st.spinner("Loading pending PO data..."):
-            po_df = load_pending_po_data()
-            if not po_df.empty:
-                po_df = prepare_po_data(po_df)
-                df_parts.append(po_df)
-    
-    # Load Pending WH Transfer
-    if supply_source in ["Pending WH Transfer Only", "All"]:
-        with st.spinner("Loading pending warehouse transfer data..."):
-            wht_df = load_pending_wh_transfer_data()
-            if not wht_df.empty:
-                wht_df = prepare_wh_transfer_data(wht_df, exclude_expired)
-                df_parts.append(wht_df)
-    
-    if not df_parts:
-        return pd.DataFrame()
-    
-    # Standardize all parts
-    standardized_parts = [standardize_supply_df(df) for df in df_parts]
-    return pd.concat(standardized_parts, ignore_index=True)
+    return df
 
-def prepare_inventory_data(inv_df, today, exclude_expired):
-    """Prepare inventory data"""
-    inv_df = inv_df.copy()
-    inv_df["source_type"] = "Inventory"
-    inv_df["supply_number"] = inv_df["inventory_history_id"].astype(str)
-    inv_df["date_ref"] = today
-    inv_df["quantity"] = pd.to_numeric(inv_df["remaining_quantity"], errors="coerce").fillna(0)
-    inv_df["value_in_usd"] = pd.to_numeric(inv_df["inventory_value_usd"], errors="coerce").fillna(0)
-    inv_df["legal_entity"] = inv_df["owning_company_name"]
-    inv_df["expiry_date"] = pd.to_datetime(inv_df["expiry_date"], errors="coerce")
-    
-    # Add days until expiry
-    inv_df["days_until_expiry"] = (inv_df["expiry_date"] - today).dt.days
-    
-    if exclude_expired:
-        inv_df = inv_df[(inv_df["expiry_date"].isna()) | (inv_df["expiry_date"] >= today)]
-    
-    return inv_df
-
-def prepare_can_data(can_df):
-    """Prepare CAN data"""
-    can_df = can_df.copy()
-    can_df["source_type"] = "Pending CAN"
-    can_df["supply_number"] = can_df["arrival_note_number"].astype(str)
-    can_df["date_ref"] = pd.to_datetime(can_df["arrival_date"], errors="coerce")
-    can_df["quantity"] = pd.to_numeric(can_df["pending_quantity"], errors="coerce").fillna(0)
-    can_df["value_in_usd"] = pd.to_numeric(can_df["pending_value_usd"], errors="coerce").fillna(0)
-    can_df["legal_entity"] = can_df["consignee"]
-    
-    # Add days since arrival
-    can_df["days_since_arrival"] = can_df.get("days_since_arrival", 0)
-    
-    return can_df
-
-def prepare_po_data(po_df):
-    """Prepare PO data"""
-    po_df = po_df.copy()
-    po_df["source_type"] = "Pending PO"
-    po_df["supply_number"] = po_df["po_number"].astype(str)
-    po_df["date_ref"] = pd.to_datetime(po_df["cargo_ready_date"], errors="coerce")
-    po_df["quantity"] = pd.to_numeric(po_df["pending_standard_arrival_quantity"], errors="coerce").fillna(0)
-    po_df["value_in_usd"] = pd.to_numeric(po_df["outstanding_arrival_amount_usd"], errors="coerce").fillna(0)
-    po_df["legal_entity"] = po_df["legal_entity"]
-    
-    # Add vendor info
-    po_df["vendor"] = po_df.get("vendor_name", "")
-    
-    return po_df
-
-def prepare_wh_transfer_data(wht_df, exclude_expired):
-    """Prepare warehouse transfer data"""
-    today = pd.to_datetime("today").normalize()
-    wht_df = wht_df.copy()
-    
-    wht_df["source_type"] = "Pending WH Transfer"
-    wht_df["supply_number"] = wht_df["warehouse_transfer_line_id"].astype(str)
-    wht_df["date_ref"] = pd.to_datetime(wht_df["transfer_date"], errors="coerce") + pd.Timedelta(days=5)  # Estimate 2 days for transfer
-    wht_df["quantity"] = pd.to_numeric(wht_df["transfer_quantity"], errors="coerce").fillna(0)
-    wht_df["value_in_usd"] = pd.to_numeric(wht_df["warehouse_transfer_value_usd"], errors="coerce").fillna(0)
-    wht_df["legal_entity"] = wht_df["owning_company_name"]
-    wht_df["expiry_date"] = pd.to_datetime(wht_df["expiry_date"], errors="coerce")
-    
-    # Add transfer route info
-    wht_df["transfer_route"] = wht_df["from_warehouse"] + " → " + wht_df["to_warehouse"]
-    
-    # Add days since transfer started
-    wht_df["days_in_transfer"] = (today - wht_df["date_ref"]).dt.days
-    
-    # Add days until expiry
-    wht_df["days_until_expiry"] = (wht_df["expiry_date"] - today).dt.days
-    
-    if exclude_expired:
-        wht_df = wht_df[(wht_df["expiry_date"].isna()) | (wht_df["expiry_date"] >= today)]
-    
-    return wht_df
-
-def standardize_supply_df(df):
-    """Standardize supply dataframe columns"""
-    df = df.copy()
-    
-    # String columns
-    string_cols = ["pt_code", "product_name", "brand"]
-    for col in string_cols:
-        df[col] = df.get(col, "").astype(str)
-    
-    df["standard_uom"] = df.get("standard_uom", "")
-    df["package_size"] = df.get("package_size", "")
-    
-    # Select standard columns
-    standard_cols = [
-        "source_type", "supply_number", "pt_code", "product_name", "brand", 
-        "package_size", "standard_uom", "legal_entity", "date_ref", 
-        "quantity", "value_in_usd"
-    ]
-    
-    # Add optional columns if they exist
-    optional_cols = ["expiry_date", "days_until_expiry", "days_since_arrival", 
-                     "vendor", "transfer_route", "days_in_transfer"]
-    for col in optional_cols:
-        if col in df.columns:
-            standard_cols.append(col)
-    
-    return df[standard_cols]
-
-
-# === Updated Filtering Functions for Supply Analysis ===
+# === Filtering Functions ===
 def apply_supply_filters(df):
     """Apply filters to supply dataframe with enhanced product search"""
     with st.expander("📎 Filters", expanded=True):
         # Row 1: Entity, Brand, Product
         col1, col2, col3 = st.columns(3)
+        
+        filters = {}
+        
         with col1:
-            selected_entity = st.multiselect(
-                "Legal Entity", 
-                sorted(df["legal_entity"].dropna().unique()), 
-                key="supply_legal_entity"
-            )
+            if 'legal_entity' in df.columns:
+                entities = df["legal_entity"].dropna().unique().tolist()
+                filters['entity'] = st.multiselect(
+                    "Legal Entity", 
+                    sorted(entities), 
+                    key="supply_legal_entity"
+                )
+        
         with col2:
-            selected_brand = st.multiselect(
-                "Brand", 
-                sorted(df["brand"].dropna().unique()), 
-                key="supply_brand"
-            )
+            if 'brand' in df.columns:
+                brands = df["brand"].dropna().unique().tolist()
+                filters['brand'] = st.multiselect(
+                    "Brand", 
+                    sorted(brands), 
+                    key="supply_brand"
+                )
+        
         with col3:
-            # Enhanced product filter with both PT Code and Product Name
-            unique_products = df[['pt_code', 'product_name']].drop_duplicates()
-            unique_products = unique_products[
-                (unique_products['pt_code'].notna()) & 
-                (unique_products['pt_code'] != '') &
-                (unique_products['pt_code'] != 'nan')
-            ]
-            
-            product_options = []
-            for _, row in unique_products.iterrows():
-                pt_code = str(row['pt_code'])
-                product_name = str(row['product_name'])[:50] if pd.notna(row['product_name']) else ""
-                option = f"{pt_code} - {product_name}"
-                product_options.append(option)
-            
-            selected_products = st.multiselect(
-                "Product (PT Code - Name)", 
-                sorted(product_options),
-                key="supply_product_filter",
-                help="Search by PT Code or Product Name"
-            )
-            
-            # Extract selected PT codes
-            selected_pt_codes = [p.split(' - ')[0] for p in selected_products]
+            # Use FilterManager for product filter
+            filters['product'] = FilterManager.create_product_filter(df, "supply_")
         
         # Row 2: Source type, Date range
         col4, col5, col6 = st.columns(3)
+        
         with col4:
-            selected_source_type = st.multiselect(
-                "Source Type",
-                df["source_type"].unique(),
-                default=list(df["source_type"].unique()),
-                key="supply_source_type_filter"
-            )
+            if 'source_type' in df.columns:
+                source_types = df["source_type"].unique().tolist()
+                filters['source_type'] = st.multiselect(
+                    "Source Type",
+                    source_types,
+                    default=source_types,
+                    key="supply_source_type_filter"
+                )
+        
+        # Date range
         with col5:
-            default_start = df["date_ref"].min().date() if pd.notnull(df["date_ref"].min()) else datetime.today().date()
+            if 'date_ref' in df.columns and df['date_ref'].notna().any():
+                default_start = df["date_ref"].min().date()
+            else:
+                default_start = datetime.today().date()
             start_date = st.date_input("From Date (Reference)", default_start, key="supply_start_date")
+        
         with col6:
-            default_end = df["date_ref"].max().date() if pd.notnull(df["date_ref"].max()) else datetime.today().date()
+            if 'date_ref' in df.columns and df['date_ref'].notna().any():
+                default_end = df["date_ref"].max().date()
+            else:
+                default_end = datetime.today().date()
             end_date = st.date_input("To Date (Reference)", default_end, key="supply_end_date")
         
+        filters['start_date'] = start_date
+        filters['end_date'] = end_date
+        
         # Row 3: Additional filters based on source
+        filter_params = {}
         if "days_until_expiry" in df.columns:
             col7, col8, col9 = st.columns(3)
             with col7:
@@ -290,31 +163,14 @@ def apply_supply_filters(df):
                     value=30,
                     key="expiry_warning_days"
                 )
+                filter_params['expiry_warning_days'] = expiry_warning_days
     
-    # Apply filters
-    filtered_df = df.copy()
+    # Apply filters using FilterManager
+    filtered_df = FilterManager.apply_filters(df, filters, date_column="date_ref")
     
-    if selected_entity:
-        filtered_df = filtered_df[filtered_df["legal_entity"].isin(selected_entity)]
-    if selected_brand:
-        filtered_df = filtered_df[filtered_df["brand"].isin(selected_brand)]
-    if selected_products:
-        filtered_df = filtered_df[filtered_df["pt_code"].isin(selected_pt_codes)]
-    if selected_source_type:
-        filtered_df = filtered_df[filtered_df["source_type"].isin(selected_source_type)]
-    
-    # Date filter
-    start_ts = pd.to_datetime(start_date)
-    end_ts = pd.to_datetime(end_date)
-    filtered_df = filtered_df[
-        (filtered_df["date_ref"] >= start_ts) & 
-        (filtered_df["date_ref"] <= end_ts)
-    ]
-    
-    # Return additional filter values if needed
-    filter_params = {
-        'expiry_warning_days': expiry_warning_days if 'expiry_warning_days' in locals() else None
-    }
+    # Apply source type filter if different from default
+    if 'source_type' in filters and filters['source_type'] and len(filters['source_type']) < len(df["source_type"].unique()):
+        filtered_df = filtered_df[filtered_df["source_type"].isin(filters['source_type'])]
     
     return filtered_df, start_date, end_date, filter_params
 
@@ -331,32 +187,45 @@ def show_supply_summary(filtered_df, filter_params):
     }).reset_index()
     
     # Display overall metrics
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        total_products = filtered_df["pt_code"].nunique()
-        st.metric("Total Unique Products", f"{total_products:,}")
-    with col2:
-        total_quantity = filtered_df["quantity"].sum()
-        st.metric("Total Quantity", format_number(total_quantity))
-    with col3:
-        total_value = filtered_df["value_in_usd"].sum()
-        st.metric("Total Value", format_currency(total_value, "USD"))
-    with col4:
-        missing_dates = filtered_df["date_ref"].isna().sum()
-        if missing_dates > 0:
-            st.metric("⚠️ Missing Dates", f"{missing_dates} records", delta_color="inverse")
+    metrics = [
+        {
+            "title": "Total Unique Products",
+            "value": filtered_df["pt_code"].nunique(),
+            "format_type": "number"
+        },
+        {
+            "title": "Total Quantity",
+            "value": filtered_df["quantity"].sum(),
+            "format_type": "number"
+        },
+        {
+            "title": "Total Value",
+            "value": filtered_df["value_in_usd"].sum(),
+            "format_type": "currency"
+        },
+        {
+            "title": "⚠️ Missing Dates",
+            "value": filtered_df["date_ref"].isna().sum(),
+            "format_type": "number",
+            "delta": "records" if filtered_df["date_ref"].isna().sum() > 0 else None,
+            "delta_color": "inverse"
+        }
+    ]
+    
+    DisplayComponents.show_summary_metrics(metrics)
     
     # Source breakdown
     st.markdown("#### 📦 Supply by Source")
     
     # Create columns for each source type
-    source_cols = st.columns(len(source_summary))
-    for idx, (col, row) in enumerate(zip(source_cols, source_summary.itertuples())):
-        with col:
-            st.markdown(f"**{row.source_type}**")
-            st.metric("Products", f"{row.pt_code:,}", label_visibility="collapsed")
-            st.metric("Quantity", format_number(row.quantity), label_visibility="collapsed")
-            st.metric("Value", format_currency(row.value_in_usd, "USD", 0), label_visibility="collapsed")
+    if not source_summary.empty:
+        source_cols = st.columns(len(source_summary))
+        for idx, (col, row) in enumerate(zip(source_cols, source_summary.itertuples())):
+            with col:
+                st.markdown(f"**{row.source_type}**")
+                st.metric("Products", f"{row.pt_code:,}", label_visibility="collapsed")
+                st.metric("Quantity", format_number(row.quantity), label_visibility="collapsed")
+                st.metric("Value", format_currency(row.value_in_usd, "USD", 0), label_visibility="collapsed")
     
     # Special warnings
     show_supply_warnings(filtered_df, filter_params)
@@ -403,28 +272,6 @@ def show_supply_warnings(filtered_df, filter_params):
     if not warning_shown:
         st.success("✅ No critical supply issues detected")
 
-# def show_supply_detail_table(filtered_df):
-#     """Show detailed supply table"""
-#     st.markdown("### 🔍 Supply Details")
-    
-#     # Tab view for different source types
-#     source_types = filtered_df["source_type"].unique()
-#     if len(source_types) > 1:
-#         tabs = st.tabs(list(source_types) + ["All"])
-        
-#         for idx, source in enumerate(source_types):
-#             with tabs[idx]:
-#                 source_df = filtered_df[filtered_df["source_type"] == source]
-#                 display_source_table(source_df, source)
-        
-#         # All tab
-#         with tabs[-1]:
-#             display_source_table(filtered_df, "All")
-#     else:
-#         display_source_table(filtered_df, source_types[0] if len(source_types) > 0 else "All")
-
-# 1. Update show_supply_detail_table function to show "All" tab first and as default
-
 def show_supply_detail_table(filtered_df):
     """Show detailed supply table with All tab as default"""
     st.markdown("### 🔍 Supply Details")
@@ -447,8 +294,6 @@ def show_supply_detail_table(filtered_df):
     else:
         display_source_table(filtered_df, source_types[0] if len(source_types) > 0 else "All")
 
-
-
 def display_source_table(df, source_type):
     """Display table for specific source type"""
     if df.empty:
@@ -458,29 +303,39 @@ def display_source_table(df, source_type):
     # Prepare display columns based on source type
     base_columns = [
         "pt_code", "product_name", "brand", "package_size", "standard_uom",
-        "date_ref", "quantity", "value_in_usd", "supply_number", "legal_entity"
+        "date_ref", "quantity", "value_in_usd", "legal_entity"
     ]
     
     # Add source-specific columns
+    additional_columns = []
+    
     if source_type == "Inventory" and "days_until_expiry" in df.columns:
-        display_columns = base_columns + ["expiry_date", "days_until_expiry"]
+        additional_columns = ["expiry_date", "days_until_expiry"]
     elif source_type == "Pending CAN" and "days_since_arrival" in df.columns:
-        display_columns = base_columns + ["days_since_arrival"]
+        additional_columns = ["days_since_arrival"]
     elif source_type == "Pending PO" and "vendor" in df.columns:
-        display_columns = base_columns + ["vendor"]
+        additional_columns = ["vendor"]
     elif source_type == "Pending WH Transfer":
-        display_columns = base_columns + ["transfer_route", "days_in_transfer"]
+        if "transfer_route" in df.columns:
+            additional_columns.append("transfer_route")
+        if "days_in_transfer" in df.columns:
+            additional_columns.append("days_in_transfer")
         if "expiry_date" in df.columns:
-            display_columns += ["expiry_date", "days_until_expiry"]
+            additional_columns.extend(["expiry_date", "days_until_expiry"])
     elif source_type == "All":
-        display_columns = base_columns + ["source_type"]
+        additional_columns = ["source_type"]
         # Add all optional columns if they exist
         for col in ["expiry_date", "days_until_expiry", "days_since_arrival", 
                    "vendor", "transfer_route", "days_in_transfer"]:
-            if col in df.columns and col not in display_columns:
-                display_columns.append(col)
-    else:
-        display_columns = base_columns
+            if col in df.columns and col not in additional_columns:
+                additional_columns.append(col)
+    
+    # Add supply_number if exists
+    if "supply_number" in df.columns:
+        base_columns.insert(base_columns.index("legal_entity"), "supply_number")
+    
+    # Combine columns
+    display_columns = base_columns + additional_columns
     
     # Filter columns that actually exist
     display_columns = [col for col in display_columns if col in df.columns]
@@ -488,7 +343,8 @@ def display_source_table(df, source_type):
     display_df = df[display_columns].copy()
     
     # Sort by date ref
-    display_df = display_df.sort_values("date_ref", ascending=True)
+    if "date_ref" in display_df.columns:
+        display_df = display_df.sort_values("date_ref", ascending=True)
     
     # Format columns
     display_df = format_supply_display_df(display_df)
@@ -505,13 +361,16 @@ def format_supply_display_df(df):
     df = df.copy()
     
     # Format quantity and value
-    df["quantity"] = df["quantity"].apply(lambda x: format_number(x))
-    df["value_in_usd"] = df["value_in_usd"].apply(lambda x: format_currency(x, "USD"))
+    if "quantity" in df.columns:
+        df["quantity"] = df["quantity"].apply(lambda x: format_number(x))
+    if "value_in_usd" in df.columns:
+        df["value_in_usd"] = df["value_in_usd"].apply(lambda x: format_currency(x, "USD"))
     
     # Format dates
-    df["date_ref"] = df["date_ref"].apply(
-        lambda x: "❌ Missing" if pd.isna(x) else x.strftime("%Y-%m-%d")
-    )
+    if "date_ref" in df.columns:
+        df["date_ref"] = df["date_ref"].apply(
+            lambda x: "❌ Missing" if pd.isna(x) else x.strftime("%Y-%m-%d")
+        )
     
     if "expiry_date" in df.columns:
         df["expiry_date"] = df["expiry_date"].apply(
@@ -541,51 +400,15 @@ def highlight_expiry_rows(row):
     if "days_until_expiry" in row:
         days_str = row["days_until_expiry"]
         if days_str and "days" in days_str:
-            days = int(days_str.split()[0])
-            if days <= 7:
-                return ["background-color: #ffcccc"] * len(row)  # Red for very urgent
-            elif days <= 30:
-                return ["background-color: #ffe6cc"] * len(row)  # Orange for urgent
+            try:
+                days = int(days_str.split()[0])
+                if days <= 7:
+                    return ["background-color: #ffcccc"] * len(row)  # Red for very urgent
+                elif days <= 30:
+                    return ["background-color: #ffe6cc"] * len(row)  # Orange for urgent
+            except:
+                pass
     return [""] * len(row)
-
-# def show_supply_grouped_view(filtered_df, start_date, end_date):
-#     """Show grouped supply by period"""
-#     st.markdown("### 📊 Grouped Supply by Product")
-#     st.markdown(f"📅 Period: **{start_date}** to **{end_date}**")
-    
-#     # Controls
-#     col1, col2, col3 = st.columns(3)
-#     with col1:
-#         period = st.selectbox("Group by Period", PERIOD_TYPES, index=1)
-#     with col2:
-#         show_only_nonzero = st.checkbox("Show only products with quantity > 0", value=True, key="supply_show_nonzero")
-#     with col3:
-#         group_by_source = st.checkbox("Separate by source type", value=False, key="supply_group_by_source")
-    
-#     # Filter out missing dates for grouping
-#     df_summary = filtered_df[filtered_df["date_ref"].notna()].copy()
-    
-#     if df_summary.empty:
-#         st.info("No data with valid dates for grouping")
-#         return
-    
-#     # Create period column
-#     df_summary["period"] = convert_to_period(df_summary["date_ref"], period)
-    
-#     if group_by_source:
-#         # Create tabs for each source
-#         source_types = df_summary["source_type"].unique()
-#         tabs = st.tabs(list(source_types))
-        
-#         for idx, source in enumerate(source_types):
-#             with tabs[idx]:
-#                 source_df = df_summary[df_summary["source_type"] == source]
-#                 display_supply_pivot(source_df, period, show_only_nonzero, source)
-#     else:
-#         # Combined view
-#         display_supply_pivot(df_summary, period, show_only_nonzero, "All Sources")
-
-# 2. Update show_supply_grouped_view to always show tabs instead of checkbox
 
 def show_supply_grouped_view(filtered_df, start_date, end_date):
     """Show grouped supply by period with tabs for each source"""
@@ -668,17 +491,11 @@ def display_supply_pivot(df_summary, period, show_only_nonzero, title):
     for col in pivot_df.columns[2:]:
         export_pivot[col] = export_pivot[col].apply(lambda x: format_number(x))
     
-    excel_data = convert_df_to_excel(export_pivot, f"Supply_{title}")
-    st.download_button(
-        label=f"📤 Export {title} to Excel",
-        data=excel_data,
-        file_name=f"supply_{title.lower().replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        key=f"export_{title}"
+    DisplayComponents.show_export_button(
+        export_pivot, 
+        f"supply_{title.lower().replace(' ', '_')}", 
+        f"📤 Export {title} to Excel"
     )
-
-
-
 
 def create_supply_pivot(df_summary, show_only_nonzero):
     """Create pivot table for supply"""
@@ -697,15 +514,6 @@ def create_supply_pivot(df_summary, show_only_nonzero):
     
     return pivot_df
 
-def format_pivot_for_display(pivot_df):
-    """Format pivot table for display"""
-    display_pivot = pivot_df.copy()
-    for col in display_pivot.columns[2:]:  # Skip product_name and pt_code
-        display_pivot[col] = display_pivot[col].apply(lambda x: format_number(x))
-    return display_pivot
-
-
-# Replace show_supply_totals function with this new version:
 def show_supply_totals_with_indicators(df_summary, period):
     """Show period totals for supply with past period indicators"""
     # Calculate aggregates
@@ -757,7 +565,6 @@ def show_supply_totals_with_indicators(df_summary, period):
     st.markdown("#### 🔢 Column Totals")
     st.dataframe(display_final, use_container_width=True)
 
-
 # === Main Page Logic ===
 st.subheader("📥 Inbound Supply Capability")
 
@@ -765,7 +572,8 @@ st.subheader("📥 Inbound Supply Capability")
 supply_source, exclude_expired = select_supply_source()
 
 # Load and prepare data
-df_all = load_and_prepare_supply_data(supply_source, exclude_expired)
+with st.spinner("Loading supply data..."):
+    df_all = load_and_prepare_supply_data(supply_source, exclude_expired)
 
 if df_all.empty:
     st.info("No supply data available for the selected source.")
@@ -792,27 +600,32 @@ show_supply_grouped_view(filtered_df, start_date, end_date)
 st.markdown("---")
 
 # Quick Actions
-col1, col2, col3, col4 = st.columns(4)
-with col1:
-    if st.button("📊 Go to GAP Analysis", type="primary", use_container_width=True):
-        st.switch_page("pages/3_📊_GAP_Analysis.py")
+actions = [
+    {
+        "label": "📊 Go to GAP Analysis",
+        "type": "primary",
+        "page": "pages/3_📊_GAP_Analysis.py"
+    },
+    {
+        "label": "📤 View Demand",
+        "page": "pages/1_📤_Demand_Analysis.py"
+    },
+    {
+        "label": "📈 View Dashboard",
+        "page": "main.py"
+    },
+    {
+        "label": "🔄 Refresh Data",
+        "callback": lambda: (data_manager.clear_cache(), st.rerun())
+    }
+]
 
-with col2:
-    if st.button("📤 View Demand", use_container_width=True):
-        st.switch_page("pages/1_📤_Demand_Analysis.py")
-
-with col3:
-    if st.button("📈 View Dashboard", use_container_width=True):
-        st.switch_page("main.py")
-
-with col4:
-    if st.button("🔄 Refresh Data", use_container_width=True):
-        st.cache_data.clear()
-        st.rerun()
+DisplayComponents.show_action_buttons(actions)
 
 # Help section
-with st.expander("ℹ️ How to use Supply Analysis", expanded=False):
-    st.markdown("""
+DisplayComponents.show_help_section(
+    "How to use Supply Analysis",
+    """
     ### Understanding Supply Data
     
     **Data Sources:**
@@ -827,7 +640,7 @@ with st.expander("ℹ️ How to use Supply Analysis", expanded=False):
       - Inventory: Today's date
       - CAN: Arrival date
       - PO: Cargo ready date
-      - WH Transfer: Transfer start date
+      - WH Transfer: Transfer start date + lead time
     - **Days Until Expiry**: For inventory and transfer items (red < 7 days, orange < 30 days)
     - **Days Since Arrival**: For CAN items pending stock-in
     - **Days in Transfer**: For warehouse transfers in progress
@@ -845,11 +658,12 @@ with st.expander("ℹ️ How to use Supply Analysis", expanded=False):
     5. Compare supply timing with demand (go to GAP Analysis)
     
     **Tips:**
-    - Use "Separate by source type" in grouped view for detailed analysis
+    - Use tabs in grouped view for detailed analysis by source
     - Export period data for supply planning meetings
     - Set expiry warning days based on your product shelf life
     - Monitor long warehouse transfers (>3 days) for potential delays
-    """)
+    """
+)
 
 # Footer
 st.markdown("---")

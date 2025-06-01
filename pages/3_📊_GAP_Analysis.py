@@ -1,32 +1,30 @@
 import streamlit as st
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 import numpy as np
 from sqlalchemy import text
-from utils.db import get_db_engine
-from utils.data_loader import (
-    load_outbound_demand_data, 
-    load_customer_forecast_data,
-    load_inventory_data,
-    load_pending_can_data,
-    load_pending_po_data,
-    load_pending_wh_transfer_data,  # New import
-    load_active_allocations
+
+# Import refactored modules
+from utils.data_manager import DataManager
+from utils.filters import FilterManager
+from utils.display_components import DisplayComponents
+from utils.formatters import (
+    format_number, format_currency, format_percentage,
+    check_missing_dates, check_past_dates, apply_gradient_style
 )
 from utils.helpers import (
     convert_df_to_excel,
     export_multiple_sheets,
     convert_to_period,
     sort_period_columns,
-    format_number,
-    format_currency,
-    format_percentage,
-    check_missing_dates,
     save_to_session_state,
+    get_from_session_state,
+    is_past_period,
     parse_week_period,
-    parse_month_period,
-    is_past_period  
+    parse_month_period
 )
+from utils.session_state import initialize_session_state
+from utils.db import get_db_engine
 
 # === Page Config ===
 st.set_page_config(
@@ -35,108 +33,60 @@ st.set_page_config(
     layout="wide"
 )
 
+# === Initialize Session State ===
+initialize_session_state()
+
 # === Constants ===
 PERIOD_TYPES = ["Daily", "Weekly", "Monthly"]
 STYLE_MODES = ["None", "🔴 Highlight Shortage", "🌈 Heatmap"]
 
-# === Header with Navigation ===
-col1, col2, col3 = st.columns([1, 4, 1])
-with col1:
-    if st.button("← Supply"):
-        st.switch_page("pages/2_📥_Supply_Analysis.py")
-with col2:
-    st.title("📊 Supply-Demand GAP Analysis")
-with col3:
-    if st.button("🏠 Dashboard"):
-        st.switch_page("main.py")
+# === Initialize Components ===
+@st.cache_resource
+def get_data_manager():
+    return DataManager()
 
-st.markdown("---")
+data_manager = get_data_manager()
+
+# === Header with Navigation ===
+DisplayComponents.show_page_header(
+    title="Supply-Demand GAP Analysis",
+    icon="📊",
+    prev_page="pages/2_📥_Supply_Analysis.py",
+    next_page=None
+)
+
+# === Initialize session state for GAP ===
+if 'gap_analysis_ran' not in st.session_state:
+    st.session_state['gap_analysis_ran'] = False
+if 'gap_analysis_data' not in st.session_state:
+    st.session_state['gap_analysis_data'] = None
+
+# Debug mode toggle
+col1, col2 = st.columns([6, 1])
+with col2:
+    st.session_state['debug_mode'] = st.checkbox("Debug Mode", value=False)
 
 # === Data Loading Functions ===
 def load_and_prepare_demand_data(selected_demand_sources, include_converted):
     """Load and standardize demand data based on source selection"""
-    df_parts = []
+    # Use data_manager to get demand data
+    df = data_manager.get_demand_data(sources=selected_demand_sources, include_converted=include_converted)
     
-    # Debug mode
-    debug_mode = st.session_state.get('debug_mode', False)
+    if st.session_state.get('debug_mode', False) and not df.empty:
+        st.write(f"Debug - Demand data shape: {df.shape}")
+        st.write(f"Debug - Demand columns: {df.columns.tolist()}")
+        st.write(f"Debug - Products: {df['pt_code'].nunique()}")
     
-    if "OC" in selected_demand_sources:
-        df_oc = load_outbound_demand_data()
-        if not df_oc.empty:
-            if debug_mode:
-                st.write(f"Debug - OC data shape: {df_oc.shape}")
-                st.write(f"Debug - OC columns: {df_oc.columns.tolist()}")
-            
-            df_oc["source_type"] = "OC"
-            standardized_oc = standardize_demand_df(df_oc, is_forecast=False)
-            
-            if debug_mode:
-                st.write(f"Debug - Standardized OC shape: {standardized_oc.shape}")
-                # Check for potential duplicates
-                dup_check = standardized_oc.groupby(['pt_code', 'etd']).size()
-                dups = dup_check[dup_check > 1]
-                if not dups.empty:
-                    st.warning(f"Debug - Found products with multiple OC lines on same date:")
-                    st.write(dups)
-            
-            df_parts.append(standardized_oc)
-    
-    if "Forecast" in selected_demand_sources:
-        df_fc = load_customer_forecast_data()
-        if not df_fc.empty:
-            df_fc["source_type"] = "Forecast"
-            standardized_fc = standardize_demand_df(df_fc, is_forecast=True)
-            
-            # Handle converted forecasts
-            if not include_converted and 'is_converted_to_oc' in standardized_fc.columns:
-                standardized_fc = standardized_fc[standardized_fc["is_converted_to_oc"] != "Yes"]
-            
-            df_parts.append(standardized_fc)
-    
-    if df_parts:
-        final_df = pd.concat(df_parts, ignore_index=True)
-        
-        if debug_mode:
-            st.write(f"Debug - Final demand shape: {final_df.shape}")
-            st.write(f"Debug - Products: {final_df['pt_code'].nunique()}")
-        
-        return final_df
-    
-    return pd.DataFrame()
+    return df
 
-def standardize_demand_df(df, is_forecast):
-    """Standardize column names and data types for demand dataframes"""
-    df = df.copy()
+def load_and_prepare_supply_data(selected_supply_sources, exclude_expired=True):
+    """Load and standardize supply data based on source selection"""
+    # Use data_manager to get supply data
+    df = data_manager.get_supply_data(sources=selected_supply_sources, exclude_expired=exclude_expired)
     
-    # Date columns
-    df["etd"] = pd.to_datetime(df["etd"], errors="coerce")
-    df["oc_date"] = pd.to_datetime(df.get("oc_date", pd.NaT), errors="coerce")
-    
-    # Quantity and value columns
-    if is_forecast:
-        df['demand_quantity'] = pd.to_numeric(df['standard_quantity'], errors='coerce').fillna(0)
-        df['value_in_usd'] = pd.to_numeric(df.get('total_amount_usd', 0), errors='coerce').fillna(0)
-        df['demand_number'] = df.get('forecast_number', '')
-        df['is_converted_to_oc'] = df.get('is_converted_to_oc', 'No')
-        df['demand_line_id'] = df['forecast_line_id'].astype(str) + '_FC'
-    else:
-        df['demand_quantity'] = pd.to_numeric(df['pending_standard_delivery_quantity'], errors='coerce').fillna(0)
-        df['value_in_usd'] = pd.to_numeric(df.get('outstanding_amount_usd', 0), errors='coerce').fillna(0)
-        df['demand_number'] = df.get('oc_number', '')
-        df['is_converted_to_oc'] = 'N/A'
-        df['demand_line_id'] = df['ocd_id'].astype(str) + '_OC'
-    
-    # Clean string columns - IMPORTANT for proper grouping
-    string_cols = ['product_name', 'pt_code', 'brand', 'legal_entity', 'customer']
-    for col in string_cols:
-        if col in df.columns:
-            df[col] = df[col].astype(str).str.strip()
-            # Remove any double spaces
-            df[col] = df[col].str.replace(r'\s+', ' ', regex=True)
-    
-    # Clean UOM and package size
-    df['standard_uom'] = df.get('standard_uom', '').astype(str).str.strip().str.upper()
-    df['package_size'] = df.get('package_size', '').astype(str).str.strip()
+    if st.session_state.get('debug_mode', False) and not df.empty:
+        st.write(f"Debug - Supply data shape: {df.shape}")
+        st.write(f"Debug - Supply sources: {df['source_type'].value_counts().to_dict()}")
     
     return df
 
@@ -202,151 +152,26 @@ def enhance_demand_with_allocation_info(df_demand):
     
     return df_demand
 
-def load_and_prepare_supply_data(selected_supply_sources, exclude_expired=True):
-    """Load and standardize supply data based on source selection"""
-    today = pd.to_datetime("today").normalize()
-    df_parts = []
-    
-    debug_mode = st.session_state.get('debug_mode', False)
-    
-    # Load Inventory
-    if "Inventory" in selected_supply_sources:
-        inv_df = load_inventory_data()
-        if not inv_df.empty:
-            inv_df = prepare_inventory_data(inv_df, today, exclude_expired)
-            df_parts.append(inv_df)
-    
-    # Load Pending CAN
-    if "Pending CAN" in selected_supply_sources:
-        can_df = load_pending_can_data()
-        if not can_df.empty:
-            can_df = prepare_can_data(can_df)
-            df_parts.append(can_df)
-    
-    # Load Pending PO
-    if "Pending PO" in selected_supply_sources:
-        po_df = load_pending_po_data()
-        if not po_df.empty:
-            po_df = prepare_po_data(po_df)
-            df_parts.append(po_df)
-    
-    # Load Pending WH Transfer - NEW
-    if "Pending WH Transfer" in selected_supply_sources:
-        wht_df = load_pending_wh_transfer_data()
-        if not wht_df.empty:
-            wht_df = prepare_wh_transfer_data(wht_df, today, exclude_expired)
-            df_parts.append(wht_df)
-    
-    if not df_parts:
-        return pd.DataFrame()
-    
-    # Standardize all parts
-    standardized_parts = [standardize_supply_df(df) for df in df_parts]
-    final_df = pd.concat(standardized_parts, ignore_index=True)
-    
-    if debug_mode:
-        st.write(f"Debug - Supply data shape: {final_df.shape}")
-        st.write(f"Debug - Supply sources: {final_df['source_type'].value_counts().to_dict()}")
-    
-    return final_df
-
-def prepare_inventory_data(inv_df, today, exclude_expired):
-    """Prepare inventory data"""
-    inv_df = inv_df.copy()
-    inv_df["source_type"] = "Inventory"
-    inv_df["date_ref"] = today
-    inv_df["quantity"] = pd.to_numeric(inv_df["remaining_quantity"], errors="coerce").fillna(0)
-    inv_df["value_in_usd"] = pd.to_numeric(inv_df.get("inventory_value_usd", 0), errors="coerce").fillna(0)
-    inv_df["legal_entity"] = inv_df["owning_company_name"]
-    inv_df["expiry_date"] = pd.to_datetime(inv_df["expiry_date"], errors="coerce")
-    
-    if exclude_expired:
-        inv_df = inv_df[(inv_df["expiry_date"].isna()) | (inv_df["expiry_date"] >= today)]
-    
-    return inv_df
-
-def prepare_can_data(can_df):
-    """Prepare CAN data"""
-    can_df = can_df.copy()
-    can_df["source_type"] = "Pending CAN"
-    can_df["date_ref"] = pd.to_datetime(can_df["arrival_date"], errors="coerce")
-    can_df["quantity"] = pd.to_numeric(can_df["pending_quantity"], errors="coerce").fillna(0)
-    can_df["value_in_usd"] = pd.to_numeric(can_df.get("pending_value_usd", 0), errors="coerce").fillna(0)
-    can_df["legal_entity"] = can_df["consignee"]
-    return can_df
-
-def prepare_po_data(po_df):
-    """Prepare PO data"""
-    po_df = po_df.copy()
-    po_df["source_type"] = "Pending PO"
-    po_df["date_ref"] = pd.to_datetime(po_df["cargo_ready_date"], errors="coerce")
-    po_df["quantity"] = pd.to_numeric(po_df["pending_standard_arrival_quantity"], errors="coerce").fillna(0)
-    po_df["value_in_usd"] = pd.to_numeric(po_df.get("outstanding_arrival_amount_usd", 0), errors="coerce").fillna(0)
-    po_df["legal_entity"] = po_df["legal_entity"]
-    return po_df
-
-def prepare_wh_transfer_data(wht_df, today, exclude_expired):
-    """Prepare warehouse transfer data - NEW"""
-    wht_df = wht_df.copy()
-    
-    wht_df["source_type"] = "Pending WH Transfer"
-    # Assuming transfer will complete in 2-3 days, we estimate arrival date
-    wht_df["transfer_date"] = pd.to_datetime(wht_df["transfer_date"], errors="coerce")
-    wht_df["date_ref"] = wht_df["transfer_date"] + pd.Timedelta(days=5)  # Estimate 2 days for transfer
-    wht_df["quantity"] = pd.to_numeric(wht_df["transfer_quantity"], errors="coerce").fillna(0)
-    wht_df["value_in_usd"] = pd.to_numeric(wht_df.get("warehouse_transfer_value_usd", 0), errors="coerce").fillna(0)
-    wht_df["legal_entity"] = wht_df["owning_company_name"]
-    wht_df["expiry_date"] = pd.to_datetime(wht_df["expiry_date"], errors="coerce")
-    
-    if exclude_expired:
-        wht_df = wht_df[(wht_df["expiry_date"].isna()) | (wht_df["expiry_date"] >= today)]
-    
-    return wht_df
-
-def standardize_supply_df(df):
-    """Standardize supply dataframe columns"""
-    df = df.copy()
-    
-    # Clean string columns
-    string_cols = ["pt_code", "product_name", "brand"]
-    for col in string_cols:
-        if col in df.columns:
-            df[col] = df[col].astype(str).str.strip()
-            df[col] = df[col].str.replace(r'\s+', ' ', regex=True)
-    
-    # Clean UOM and package size
-    df["standard_uom"] = df.get("standard_uom", "").astype(str).str.strip().str.upper()
-    df["package_size"] = df.get("package_size", "").astype(str).str.strip()
-    
-    # Ensure value column exists
-    if "value_in_usd" not in df.columns:
-        df["value_in_usd"] = 0  # Default to 0 if no value data
-    
-    # Select standard columns - NOW INCLUDING value_in_usd
-    return df[[
-        "source_type", "pt_code", "product_name", "brand", 
-        "package_size", "standard_uom", "legal_entity", "date_ref", 
-        "quantity", "value_in_usd"
-    ]]
-
-
 def adjust_supply_for_allocations(df_supply):
     """Adjust supply quantities based on active allocations"""
     
-    # Load active allocations
-    df_allocations = load_active_allocations()
+    # Get allocations from session or load
+    df_allocations = get_from_session_state('active_allocations', pd.DataFrame())
+    
+    if df_allocations.empty:
+        # Load if not in session
+        df_allocations = data_manager.load_active_allocations()
     
     if not df_allocations.empty and not df_supply.empty:
         # Adjust available supply by subtracting undelivered allocations
         for _, alloc in df_allocations.iterrows():
             # Match by product and entity
             mask = (
-                (df_supply['pt_code'] == alloc['pt_code']) & 
-                (df_supply['legal_entity'] == alloc['legal_entity_name'])
+                (df_supply['pt_code'] == alloc.get('pt_code', '')) & 
+                (df_supply['legal_entity'] == alloc.get('legal_entity_name', ''))
             )
             
-            # Subtract undelivered allocation from available supply
-            if mask.any():
+            if mask.any() and 'undelivered_qty' in alloc:
                 df_supply.loc[mask, 'quantity'] = df_supply.loc[mask, 'quantity'].apply(
                     lambda x: max(0, x - alloc['undelivered_qty'])
                 )
@@ -411,7 +236,7 @@ def select_gap_sources():
             supply_can = st.checkbox("Pending CAN", value=True, key="supply_can")
         with col2_2:
             supply_po = st.checkbox("Pending PO", value=True, key="supply_po")
-            supply_wht = st.checkbox("Pending WH Transfer", value=True, key="supply_wht")  # NEW
+            supply_wht = st.checkbox("Pending WH Transfer", value=True, key="supply_wht")
         
         exclude_expired = st.checkbox(
             "Exclude Expired", 
@@ -428,7 +253,7 @@ def select_gap_sources():
         if supply_po:
             selected_supply_sources.append("Pending PO")
         if supply_wht:
-            selected_supply_sources.append("Pending WH Transfer")  # NEW
+            selected_supply_sources.append("Pending WH Transfer")
     
     return {
         "demand": selected_demand_sources,
@@ -439,119 +264,10 @@ def select_gap_sources():
     }
 
 # === Filtering Functions ===
-# === Updated Filtering Functions for GAP Analysis ===
 def apply_gap_filters(df_demand=None, df_supply=None):
     """Apply filters for GAP analysis with enhanced product search"""
-    with st.expander("📎 Advanced Filters", expanded=True):
-        # Get available options from data if provided
-        if df_demand is not None and df_supply is not None and not df_demand.empty and not df_supply.empty:
-            # Entities
-            all_entities = sorted(set(
-                df_demand["legal_entity"].dropna().unique().tolist() + 
-                df_supply["legal_entity"].dropna().unique().tolist()
-            ))
-            
-            # Products - Enhanced with product names
-            demand_products = df_demand[['pt_code', 'product_name']].drop_duplicates()
-            supply_products = df_supply[['pt_code', 'product_name']].drop_duplicates()
-            all_products_df = pd.concat([demand_products, supply_products]).drop_duplicates()
-            
-            # Filter out invalid PT codes
-            all_products_df = all_products_df[
-                (all_products_df['pt_code'].notna()) & 
-                (all_products_df['pt_code'] != '') &
-                (all_products_df['pt_code'] != 'nan')
-            ]
-            
-            product_options = []
-            for _, row in all_products_df.iterrows():
-                pt_code = str(row['pt_code'])
-                product_name = str(row['product_name'])[:50] if pd.notna(row['product_name']) else ""
-                option = f"{pt_code} - {product_name}"
-                product_options.append(option)
-            
-            product_options = sorted(list(set(product_options)))
-            
-            # Brands
-            all_brands = sorted(set(
-                df_demand["brand"].dropna().unique().tolist() + 
-                df_supply["brand"].dropna().unique().tolist()
-            ))
-            
-            # Get date ranges
-            demand_dates = df_demand["etd"].dropna()
-            supply_dates = df_supply["date_ref"].dropna()
-            
-            if len(demand_dates) > 0 and len(supply_dates) > 0:
-                default_start = min(demand_dates.min(), supply_dates.min()).date()
-                default_end = max(demand_dates.max(), supply_dates.max()).date()
-            elif len(demand_dates) > 0:
-                default_start = demand_dates.min().date()
-                default_end = demand_dates.max().date()
-            elif len(supply_dates) > 0:
-                default_start = supply_dates.min().date()
-                default_end = supply_dates.max().date()
-            else:
-                default_start = default_end = datetime.today().date()
-        else:
-            # Use session state if available
-            all_entities = st.session_state.get('filter_entities', [])
-            product_options = st.session_state.get('filter_product_options', [])
-            all_brands = st.session_state.get('filter_brands', [])
-            default_start = default_end = datetime.today().date()
-        
-        # Filter controls
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            selected_entity = st.multiselect(
-                "Legal Entity", 
-                options=all_entities,
-                key="gap_entity"
-            )
-        
-        with col2:
-            selected_products = st.multiselect(
-                "Product (PT Code - Name)", 
-                options=product_options,
-                key="gap_product",
-                help="Search by PT Code or Product Name"
-            )
-            
-            # Extract selected PT codes
-            selected_pt_codes = [p.split(' - ')[0] for p in selected_products]
-        
-        with col3:
-            selected_brand = st.multiselect(
-                "Brand", 
-                options=all_brands,
-                key="gap_brand"
-            )
-        
-        # Date range
-        col5, col6 = st.columns(2)
-        
-        with col5:
-            start_date = st.date_input(
-                "From Date", 
-                value=default_start,
-                key="gap_start_date"
-            )
-        
-        with col6:
-            end_date = st.date_input(
-                "To Date", 
-                value=default_end,
-                key="gap_end_date"
-            )
-    
-    return {
-        "entity": selected_entity,
-        "product": selected_pt_codes,  # Return PT codes for filtering
-        "brand": selected_brand,
-        "start_date": start_date,
-        "end_date": end_date
-    }
+    filters = FilterManager.create_gap_filters(df_demand, df_supply)
+    return filters
 
 def update_filter_options(df_demand, df_supply):
     """Update filter options based on loaded data with enhanced product search"""
@@ -613,45 +329,18 @@ def update_filter_options(df_demand, df_supply):
         st.write(f"- Product Options: {len(product_options)}")
         st.write(f"- Brands: {len(all_brands)}")
         st.write(f"- Customers: {len(all_customers)}")
-        if len(all_customers) == 0:
-            st.warning("Debug - No customers found in demand data!")
-
 
 def apply_filters_to_data(df_demand, df_supply, filters, selected_customers=None):
     """Apply filters to demand and supply dataframes"""
     # Apply filters to demand
-    filtered_demand = df_demand.copy()
-    if filters["entity"]:
-        filtered_demand = filtered_demand[filtered_demand["legal_entity"].isin(filters["entity"])]
-    if selected_customers:  # Customer filter from demand source selection
-        filtered_demand = filtered_demand[filtered_demand["customer"].isin(selected_customers)]
-    if filters["product"]:
-        filtered_demand = filtered_demand[filtered_demand["pt_code"].isin(filters["product"])]
-    if filters["brand"]:
-        filtered_demand = filtered_demand[filtered_demand["brand"].isin(filters["brand"])]
+    filtered_demand = FilterManager.apply_filters(df_demand.copy(), filters, date_column="etd")
     
-    # Date filter for demand
-    start_ts = pd.to_datetime(filters["start_date"])
-    end_ts = pd.to_datetime(filters["end_date"])
-    filtered_demand = filtered_demand[
-        filtered_demand["etd"].isna() | 
-        ((filtered_demand["etd"] >= start_ts) & (filtered_demand["etd"] <= end_ts))
-    ]
+    # Apply customer filter from demand source selection
+    if selected_customers and 'customer' in filtered_demand.columns:
+        filtered_demand = filtered_demand[filtered_demand["customer"].isin(selected_customers)]
     
     # Apply filters to supply
-    filtered_supply = df_supply.copy()
-    if filters["entity"]:
-        filtered_supply = filtered_supply[filtered_supply["legal_entity"].isin(filters["entity"])]
-    if filters["product"]:
-        filtered_supply = filtered_supply[filtered_supply["pt_code"].isin(filters["product"])]
-    if filters["brand"]:
-        filtered_supply = filtered_supply[filtered_supply["brand"].isin(filters["brand"])]
-    
-    # Date filter for supply
-    filtered_supply = filtered_supply[
-        (filtered_supply["date_ref"] >= start_ts) & 
-        (filtered_supply["date_ref"] <= end_ts)
-    ]
+    filtered_supply = FilterManager.apply_filters(df_supply.copy(), filters, date_column="date_ref")
     
     return filtered_demand, filtered_supply
 
@@ -736,77 +425,6 @@ def calculate_gap_with_carry_forward(df_demand, df_supply, period_type="Weekly")
         st.write(f"Debug - Rows with zero demand: {len(gap_df[gap_df['total_demand_qty'] == 0])}")
     
     return gap_df
-
-def calculate_product_gap_smart(product, all_periods, demand_grouped, supply_grouped):
-    """Calculate gap for a single product across all periods - smart version"""
-    pt_code = product["pt_code"]
-    product_name = product["product_name"]
-    package_size = product["package_size"]
-    uom = product["standard_uom"]
-    
-    carry_forward_qty = 0
-    results = []
-    
-    # Check if this product has any demand or supply across all periods
-    product_has_demand = not demand_grouped[demand_grouped["pt_code"] == pt_code].empty
-    product_has_supply = not supply_grouped[supply_grouped["pt_code"] == pt_code].empty
-    
-    for period in all_periods:
-        # Get demand for this period
-        demand_mask = (
-            (demand_grouped["pt_code"] == pt_code) & 
-            (demand_grouped["period"] == period)
-        )
-        demand = demand_grouped.loc[demand_mask, "total_demand_qty"].sum()
-        
-        # Get supply for this period
-        supply_mask = (
-            (supply_grouped["pt_code"] == pt_code) & 
-            (supply_grouped["period"] == period)
-        )
-        supply = supply_grouped.loc[supply_mask, "total_supply_qty"].sum()
-        
-        # Only create a row if:
-        # 1. There is demand in this period, OR
-        # 2. There is supply in this period, OR
-        # 3. There is carry forward inventory AND (product has future demand)
-        has_activity = demand > 0 or supply > 0 or (carry_forward_qty > 0 and product_has_demand)
-        
-        if has_activity:
-            # Calculate gap
-            total_available = carry_forward_qty + supply
-            gap = total_available - demand
-            
-            # Calculate fulfillment rate
-            if demand > 0:
-                fulfill_rate = min(100, (total_available / demand * 100))
-            else:
-                # If no demand, fulfillment is 100%
-                fulfill_rate = 100
-                
-            status = "✅ Fulfilled" if gap >= 0 else "❌ Shortage"
-            
-            results.append({
-                "pt_code": pt_code,
-                "product_name": product_name,
-                "package_size": package_size,
-                "standard_uom": uom,
-                "period": period,
-                "begin_inventory": carry_forward_qty,
-                "supply_in_period": supply,
-                "total_available": total_available,
-                "total_demand_qty": demand,
-                "gap_quantity": gap,
-                "fulfillment_rate_percent": fulfill_rate,
-                "fulfillment_status": status,
-            })
-        
-        # Update carry forward
-        if has_activity:
-            carry_forward_qty = max(0, total_available - demand)
-        # If no activity but has carry forward, keep it for next period
-    
-    return results
 
 def get_all_periods(demand_grouped, supply_grouped, period_type):
     """Get all unique periods sorted chronologically"""
@@ -942,7 +560,6 @@ def calculate_product_gap(product, all_periods, demand_grouped, supply_grouped):
     return results
 
 # === Display Options ===
-
 def get_gap_display_options():
     """Get display options for GAP analysis"""
     st.markdown("### ⚙️ Display Options")
@@ -988,7 +605,6 @@ def get_gap_display_options():
     )
     
     # Second row - new view options
-    # st.markdown("##### View Options")
     col5, col6, col7, col8 = st.columns(4)
     
     show_demand_only = col5.checkbox(
@@ -1031,7 +647,6 @@ def get_gap_display_options():
     }
 
 # === Display Functions ===
-
 def show_gap_summary(gap_df, display_options, df_demand_filtered=None, df_supply_filtered=None):
     """Show GAP analysis summary with enhanced metrics and data quality"""
     st.markdown("### 📊 GAP Analysis Summary")
@@ -1042,12 +657,12 @@ def show_gap_summary(gap_df, display_options, df_demand_filtered=None, df_supply
         col_dq1, col_dq2, col_dq3 = st.columns(3)
         
         with col_dq1:
-            demand_missing = check_missing_dates(df_demand_filtered, "etd", show_warning=False)
+            demand_missing = check_missing_dates(df_demand_filtered, "etd")
             if demand_missing > 0:
                 st.warning(f"⚠️ Demand: {demand_missing} records with missing ETD")
         
         with col_dq2:
-            supply_missing = check_missing_dates(df_supply_filtered, "date_ref", show_warning=False)
+            supply_missing = check_missing_dates(df_supply_filtered, "date_ref")
             if supply_missing > 0:
                 st.warning(f"⚠️ Supply: {supply_missing} records with missing dates")
         
@@ -1085,74 +700,67 @@ def show_gap_summary(gap_df, display_options, df_demand_filtered=None, df_supply
         st.markdown("#### 📈 Product Analysis")
         
         # First row - Product counts
-        col1, col2, col3, col4 = st.columns(4)
+        metrics1 = [
+            {
+                "title": "📤 Demand Products",
+                "value": len(demand_products),
+                "format_type": "number",
+                "help_text": "Total unique products in demand"
+            },
+            {
+                "title": "📥 Supply Products",
+                "value": len(supply_products),
+                "format_type": "number",
+                "help_text": "Total unique products in supply"
+            },
+            {
+                "title": "🔗 Matched Products",
+                "value": len(matched_products),
+                "format_type": "number",
+                "delta": f"{len(matched_products)/len(demand_products)*100:.1f}%" if len(demand_products) > 0 else "0%",
+                "help_text": "Products with both demand and supply"
+            },
+            {
+                "title": "📊 Total Unique Products",
+                "value": len(demand_products.union(supply_products)),
+                "format_type": "number",
+                "help_text": "All unique products across demand and supply"
+            }
+        ]
         
-        with col1:
-            st.metric(
-                "📤 Demand Products", 
-                f"{len(demand_products):,}",
-                help="Total unique products in demand"
-            )
-        
-        with col2:
-            st.metric(
-                "📥 Supply Products", 
-                f"{len(supply_products):,}",
-                help="Total unique products in supply"
-            )
-        
-        with col3:
-            st.metric(
-                "🔗 Matched Products", 
-                f"{len(matched_products):,}",
-                delta=f"{len(matched_products)/len(demand_products)*100:.1f}%" if len(demand_products) > 0 else "0%",
-                help="Products with both demand and supply"
-            )
-        
-        with col4:
-            total_unique = len(demand_products.union(supply_products))
-            st.metric(
-                "📊 Total Unique Products", 
-                f"{total_unique:,}",
-                help="All unique products across demand and supply"
-            )
+        DisplayComponents.show_summary_metrics(metrics1)
         
         # Second row - Unmatched products
-        col5, col6, col7, col8 = st.columns(4)
+        metrics2 = [
+            {
+                "title": "🚨 Demand Only",
+                "value": len(demand_only_products),
+                "format_type": "number",
+                "delta": f"-{format_currency(demand_only_value, 'USD', 0)}",
+                "delta_color": "inverse",
+                "help_text": "Products with demand but no supply"
+            },
+            {
+                "title": "📦 Supply Only",
+                "value": len(supply_only_products),
+                "format_type": "number",
+                "delta": format_currency(supply_only_value, 'USD', 0),
+                "help_text": "Products with supply but no demand"
+            },
+            {
+                "title": "❌ Products with Shortage",
+                "value": len(gap_df[gap_df["gap_quantity"] < 0]["pt_code"].unique()),
+                "format_type": "number",
+                "delta": f"{len(gap_df[gap_df['gap_quantity'] < 0]['pt_code'].unique())/len(matched_products)*100:.1f}%" if len(matched_products) > 0 else "0%"
+            },
+            {
+                "title": "📊 Avg Fulfillment Rate",
+                "value": gap_df[gap_df["total_demand_qty"] > 0]["fulfillment_rate_percent"].clip(upper=100).mean() if len(gap_df[gap_df["total_demand_qty"] > 0]) > 0 else 0,
+                "format_type": "percentage"
+            }
+        ]
         
-        with col5:
-            st.metric(
-                "🚨 Demand Only", 
-                f"{len(demand_only_products):,}",
-                delta=f"-{format_currency(demand_only_value, 'USD', 0)}",
-                delta_color="inverse",
-                help="Products with demand but no supply"
-            )
-        
-        with col6:
-            st.metric(
-                "📦 Supply Only", 
-                f"{len(supply_only_products):,}",
-                delta=f"{format_currency(supply_only_value, 'USD', 0)}",
-                help="Products with supply but no demand"
-            )
-        
-        # Original shortage metrics
-        with col7:
-            shortage_products = len(gap_df[gap_df["gap_quantity"] < 0]["pt_code"].unique())
-            st.metric(
-                "❌ Products with Shortage", 
-                f"{shortage_products:,}",
-                delta=f"{shortage_products/len(matched_products)*100:.1f}%" if len(matched_products) > 0 else "0%"
-            )
-        
-        with col8:
-            # Calculate average fulfillment rate
-            fulfillment_rates = gap_df[gap_df["total_demand_qty"] > 0]["fulfillment_rate_percent"].copy()
-            fulfillment_rates = fulfillment_rates.clip(upper=100)
-            avg_fulfillment = fulfillment_rates.mean() if len(fulfillment_rates) > 0 else 0
-            
-            st.metric("📊 Avg Fulfillment Rate", format_percentage(avg_fulfillment))
+        DisplayComponents.show_summary_metrics(metrics2)
     
     else:
         # Fallback to original metrics if detailed data not available
@@ -1164,23 +772,19 @@ def show_gap_summary(gap_df, display_options, df_demand_filtered=None, df_supply
         fulfillment_rates = fulfillment_rates.clip(upper=100)
         avg_fulfillment = fulfillment_rates.mean() if len(fulfillment_rates) > 0 else 0
         
-        col1, col2, col3, col4 = st.columns(4)
+        metrics = [
+            {"title": "Total Products", "value": total_products, "format_type": "number"},
+            {
+                "title": "Products with Shortage",
+                "value": shortage_products,
+                "format_type": "number",
+                "delta": f"{shortage_products/total_products*100:.1f}%" if total_products > 0 else "0%"
+            },
+            {"title": "Total Shortage Qty", "value": total_shortage, "format_type": "number"},
+            {"title": "Avg Fulfillment Rate", "value": avg_fulfillment, "format_type": "percentage"}
+        ]
         
-        with col1:
-            st.metric("Total Products", f"{total_products:,}")
-        
-        with col2:
-            st.metric(
-                "Products with Shortage", 
-                f"{shortage_products:,}",
-                delta=f"{shortage_products/total_products*100:.1f}%" if total_products > 0 else "0%"
-            )
-        
-        with col3:
-            st.metric("Total Shortage Qty", format_number(total_shortage))
-        
-        with col4:
-            st.metric("Avg Fulfillment Rate", format_percentage(avg_fulfillment))
+        DisplayComponents.show_summary_metrics(metrics)
     
     # Show info about filtered view
     if display_options["show_shortage_only"] or display_options["exclude_zero_demand"]:
@@ -1193,8 +797,6 @@ def show_gap_summary(gap_df, display_options, df_demand_filtered=None, df_supply
         
         st.info(f"🔍 Showing {len(filtered_df)} items out of {len(gap_df)} total items (filters applied)")
 
-
-
 def show_allocation_impact_summary(df_demand_enhanced):
     """Show how allocation affects the GAP analysis"""
     
@@ -1206,20 +808,14 @@ def show_allocation_impact_summary(df_demand_enhanced):
         total_delivered = df_demand_enhanced['total_delivered'].sum()
         total_unallocated = df_demand_enhanced['unallocated_demand'].sum()
         
-        col1, col2, col3, col4 = st.columns(4)
+        allocation_metrics = [
+            {"title": "Original Demand", "value": total_demand_original, "format_type": "number"},
+            {"title": "Already Allocated", "value": total_allocated, "format_type": "number"},
+            {"title": "Already Delivered", "value": total_delivered, "format_type": "number"},
+            {"title": "Net Unallocated", "value": total_unallocated, "format_type": "number"}
+        ]
         
-        with col1:
-            st.metric("Original Demand", format_number(total_demand_original))
-        
-        with col2:
-            st.metric("Already Allocated", format_number(total_allocated))
-            
-        with col3:
-            st.metric("Already Delivered", format_number(total_delivered))
-            
-        with col4:
-            st.metric("Net Unallocated", format_number(total_unallocated))
-
+        DisplayComponents.show_summary_metrics(allocation_metrics)
 
 def show_gap_detail_table(gap_df, display_options, df_demand_filtered=None, df_supply_filtered=None):
     """Show detailed GAP analysis table with enhanced filtering"""
@@ -1318,7 +914,6 @@ def show_gap_detail_table(gap_df, display_options, df_demand_filtered=None, df_s
         height=400
     )
 
-
 def show_gap_pivot_view(gap_df, display_options):
     """Show GAP pivot view with past period indicators and styling options"""
     st.markdown("### 📊 Pivot View - GAP by Period")
@@ -1412,9 +1007,6 @@ def show_gap_pivot_view(gap_df, display_options):
         for col in display_pivot.columns[2:]:
             display_pivot[col] = display_pivot[col].apply(lambda x: format_number(x))
         st.dataframe(display_pivot, use_container_width=True)
-    
-
-
 
 # === Export Functions ===
 def show_export_section(gap_df):
@@ -1425,13 +1017,7 @@ def show_export_section(gap_df):
     
     with col1:
         # Export detailed GAP
-        excel_data = convert_df_to_excel(gap_df, "GAP Analysis")
-        st.download_button(
-            "📊 Export GAP Details",
-            data=excel_data,
-            file_name=f"gap_analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+        DisplayComponents.show_export_button(gap_df, "gap_analysis", "📊 Export GAP Details")
     
     with col2:
         # Export shortage summary
@@ -1443,13 +1029,7 @@ def show_export_section(gap_df):
                 'total_available': 'sum'
             }).reset_index()
             
-            excel_data = convert_df_to_excel(shortage_summary, "Shortage Summary")
-            st.download_button(
-                "🚨 Export Shortage Summary",
-                data=excel_data,
-                file_name=f"shortage_summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+            DisplayComponents.show_export_button(shortage_summary, "shortage_summary", "🚨 Export Shortage Summary")
     
     with col3:
         # Export multiple sheets
@@ -1485,6 +1065,8 @@ def show_action_buttons(gap_df):
     shortage_exists = not gap_df[gap_df['gap_quantity'] < 0].empty
     surplus_exists = not gap_df[gap_df['gap_quantity'] > 0].empty
     
+    actions = []
+    
     col1, col2, col3 = st.columns(3)
     
     with col1:
@@ -1517,20 +1099,7 @@ def show_action_buttons(gap_df):
                 save_to_session_state('show_reallocation', True)
                 st.switch_page("pages/5_📌_PO_Suggestions.py")
 
-# Thay thế phần Main Page Logic với code sau:
-
 # === Main Page Logic ===
-
-# Initialize session state
-if 'gap_analysis_ran' not in st.session_state:
-    st.session_state['gap_analysis_ran'] = False
-if 'gap_analysis_data' not in st.session_state:
-    st.session_state['gap_analysis_data'] = None
-
-# Debug mode toggle
-col1, col2 = st.columns([6, 1])
-with col2:
-    st.session_state['debug_mode'] = st.checkbox("Debug Mode", value=False)
 
 # Check if we have saved analysis from session
 if st.session_state.get('gap_analysis_result') is not None and not st.session_state['gap_analysis_ran']:
@@ -1545,9 +1114,9 @@ if st.session_state.get('gap_analysis_result') is not None and not st.session_st
 # Pre-load data on first run to populate filters
 if 'initial_data_loaded' not in st.session_state:
     with st.spinner("Initializing data..."):
-        # Load with default sources - UPDATED
+        # Load with default sources
         default_demand_sources = ["OC", "Forecast"]
-        default_supply_sources = ["Inventory", "Pending CAN", "Pending PO", "Pending WH Transfer"]  # NEW
+        default_supply_sources = ["Inventory", "Pending CAN", "Pending PO", "Pending WH Transfer"]
         
         # Load demand data
         df_demand_temp = load_and_prepare_demand_data(
@@ -1569,7 +1138,7 @@ if 'initial_data_loaded' not in st.session_state:
             update_filter_options(df_demand_temp, df_supply_temp)
         
         st.session_state['initial_data_loaded'] = True
-        st.session_state['last_source_key'] = "OC-Forecast_Inventory-Pending CAN-Pending PO-Pending WH Transfer"  # UPDATED
+        st.session_state['last_source_key'] = "OC-Forecast_Inventory-Pending CAN-Pending PO-Pending WH Transfer"
 
 # Now show source selection with populated filters
 selected_sources = select_gap_sources()
@@ -1665,7 +1234,6 @@ if st.button("🚀 Run GAP Analysis", type="primary", use_container_width=True):
         if 'gap_period_type_cache' in st.session_state:
             del st.session_state['gap_period_type_cache']
 
-
 # Display results if analysis has been run
 if st.session_state.get('gap_analysis_ran', False) and st.session_state.get('gap_analysis_data') is not None:
     
@@ -1728,11 +1296,10 @@ if st.session_state.get('gap_analysis_ran', False) and st.session_state.get('gap
     else:
         st.warning("No data available for the selected filters and sources.")
 
-
-
 # Help section
-with st.expander("ℹ️ Understanding GAP Analysis", expanded=False):
-    st.markdown("""
+DisplayComponents.show_help_section(
+    "Understanding GAP Analysis",
+    """
     ### How GAP Analysis Works
     
     **Allocation Awareness:**
@@ -1771,7 +1338,8 @@ with st.expander("ℹ️ Understanding GAP Analysis", expanded=False):
     1. **Shortage → Allocation Plan**: Distribute limited supply
     2. **Shortage → PO Suggestions**: Order more inventory
     3. **Surplus → Reallocation**: Move excess to other locations
-    """)
+    """
+)
 
 # Footer
 st.markdown("---")
