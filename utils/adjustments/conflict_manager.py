@@ -78,8 +78,8 @@ class TimeAdjustmentConflictManager:
         
         for record_key, matches in conflicts.items():
             if self.resolution_strategy == ConflictResolutionStrategy.PRIORITY_BASED:
-                # Sort by explicit priority (lower number = higher priority), then by specificity
-                winner = min(matches, key=lambda m: (m.priority, -m.specificity_score))
+                # Sort by explicit priority (higher number = higher priority), then by specificity
+                winner = max(matches, key=lambda m: (m.priority, m.specificity_score))
             
             elif self.resolution_strategy == ConflictResolutionStrategy.MOST_SPECIFIC:
                 # Most specific rule wins
@@ -108,7 +108,7 @@ class TimeAdjustmentConflictManager:
                     )
                 else:
                     # If all are absolute dates, use priority-based resolution
-                    winner = min(matches, key=lambda m: (m.priority, -m.specificity_score))
+                    winner = max(matches, key=lambda m: (m.priority, m.specificity_score))
             
             resolved[record_key] = winner
         
@@ -946,19 +946,19 @@ class TimeAdjustmentConflictManager:
         
         for strategy in strategy_order:
             if strategy == ConflictResolutionStrategy.PRIORITY_BASED:
-                if warning['priorities'][0] < warning['priorities'][1]:
+                if warning['priorities'][0] > warning['priorities'][1]:
                     return {
                         'winner': f"Rule {warning['rules'][0]}",
                         'method': "Priority Based",
                         'final_offset': warning['offset_displays'][0],
-                        'explanation': f"Lower priority ({warning['priorities'][0]} < {warning['priorities'][1]})"
+                        'explanation': f"Higher priority ({warning['priorities'][0]} > {warning['priorities'][1]})"
                     }
-                elif warning['priorities'][0] > warning['priorities'][1]:
+                elif warning['priorities'][0] < warning['priorities'][1]:
                     return {
                         'winner': f"Rule {warning['rules'][1]}",
                         'method': "Priority Based",
                         'final_offset': warning['offset_displays'][1],
-                        'explanation': f"Lower priority ({warning['priorities'][1]} < {warning['priorities'][0]})"
+                        'explanation': f"Higher priority ({warning['priorities'][1]} > {warning['priorities'][0]})"
                     }
                 # Tie, continue to next strategy
                 

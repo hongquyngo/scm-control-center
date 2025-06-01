@@ -185,7 +185,7 @@ class PreviewManager:
         return filtered_df
     
     def _extract_options_from_df(self, df: pd.DataFrame, data_source: str) -> Dict[str, List[str]]:
-        """Extract filter options from dataframe"""
+        """Extract filter options from dataframe - NO LIMITS"""
         options = {'entities': [], 'customers': [], 'products': [], 'numbers': [], 'brands': []}
         
         # Entities
@@ -199,7 +199,7 @@ class PreviewManager:
             customers = df['customer'].dropna().unique()
             options['customers'] = sorted([str(c) for c in customers if str(c) != 'nan'])
         
-        # Products - limit to reasonable number
+        # Products - NO LIMIT
         if 'pt_code' in df.columns and 'product_name' in df.columns:
             # Get unique products
             products_df = df[['pt_code', 'product_name']].drop_duplicates()
@@ -212,15 +212,13 @@ class PreviewManager:
             # Sort by pt_code to get consistent ordering
             products_df = products_df.sort_values('pt_code')
             
-            # Limit to first 500 products for performance
-            products_df = products_df.head(500)
-            
+            # No limit - get all products
             options['products'] = [
                 f"{row['pt_code']} - {str(row['product_name'])[:50]}" 
                 for _, row in products_df.iterrows()
             ]
         
-        # Numbers - limit to reasonable number
+        # Numbers - NO LIMIT
         number_col = self.number_columns.get(data_source, "id")
         if number_col in df.columns:
             numbers = df[number_col].dropna().unique()
@@ -233,8 +231,8 @@ class PreviewManager:
             except:
                 numbers = sorted(numbers)
             
-            # Limit to first 200 numbers
-            options['numbers'] = numbers[:200]
+            # No limit - get all numbers
+            options['numbers'] = numbers
         
         # Brands
         if 'brand' in df.columns:

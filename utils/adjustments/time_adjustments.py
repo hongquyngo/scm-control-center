@@ -29,15 +29,33 @@ class TimeAdjustmentManager:
                     st.warning("No rules to save. Please add at least one rule first.")
         
         with col2:
-            uploaded_file = st.file_uploader(
-                "📂 Load Config",
-                type=['json'],
-                key="rule_upload",
-                label_visibility="collapsed"
-            )
+            # Use a button to trigger file upload instead
+            if st.button("📂 Load Config", use_container_width=True):
+                st.session_state.show_file_uploader = True
             
-            if uploaded_file is not None:
-                TimeAdjustmentManager._load_rules_from_file(uploaded_file)
+            # Show file uploader in a modal-like way
+            if st.session_state.get('show_file_uploader', False):
+                with st.container():
+                    st.markdown("---")
+                    uploaded_file = st.file_uploader(
+                        "Select JSON configuration file",
+                        type=['json'],
+                        key="rule_upload_file"
+                    )
+                    
+                    col_a, col_b = st.columns(2)
+                    with col_a:
+                        if uploaded_file is not None:
+                            if st.button("✅ Import", type="primary", use_container_width=True):
+                                TimeAdjustmentManager._load_rules_from_file(uploaded_file)
+                                st.session_state.show_file_uploader = False
+                                st.rerun()
+                    
+                    with col_b:
+                        if st.button("❌ Cancel", use_container_width=True):
+                            st.session_state.show_file_uploader = False
+                            st.rerun()
+                    st.markdown("---")
         
         with col3:
             if st.button("📤 Export Rules", use_container_width=True):
@@ -109,8 +127,8 @@ class TimeAdjustmentManager:
             
             **3. Priority**: 
             - Controls which rule wins when multiple rules match the same record
-            - **Lower number = Higher priority** (1 is highest, 100 is lowest)
-            - Example: Rule with priority 10 will override rule with priority 50
+            - **Higher number = Higher priority** (100 is highest, 1 is lowest)
+            - Example: Rule with priority 80 will override rule with priority 20
             
             **4. Filters**: 
             - Leave empty to apply to ALL records
@@ -177,7 +195,7 @@ class TimeAdjustmentManager:
                 min_value=1,
                 max_value=100,
                 value=50,
-                help="Priority when multiple rules match same record. Lower number = Higher priority",
+                help="Priority when multiple rules match same record. Higher number = Higher priority",
                 key="new_rule_priority"
             )
         
@@ -544,13 +562,13 @@ class TimeAdjustmentManager:
                             st.markdown(f"**Priority:** {priority_val}")
                             
                             # Priority visual indicator
-                            if priority_val <= 20:
+                            if priority_val >= 80:
                                 st.caption("🔴 Very High Priority")
-                            elif priority_val <= 40:
+                            elif priority_val >= 60:
                                 st.caption("🟠 High Priority")
-                            elif priority_val <= 60:
+                            elif priority_val >= 40:
                                 st.caption("🟡 Normal Priority")
-                            elif priority_val <= 80:
+                            elif priority_val >= 20:
                                 st.caption("🔵 Low Priority")
                             else:
                                 st.caption("⚪ Very Low Priority")
@@ -632,64 +650,129 @@ class TimeAdjustmentManager:
     
     @staticmethod
     def _load_rules_from_file(uploaded_file):
-        """Load rules from uploaded JSON file"""
+        """Load rules from uploaded JSON file with enhanced validation"""
         try:
             # Read and parse JSON file
             content = uploaded_file.read()
             data = json.loads(content)
             
-            # Validate structure
-            if not isinstance(data, dict) or 'rules' not in data:
-                st.error("❌ Invalid rule file: Missing 'rules' section")
+            # Support both old and new format
+            if isinstance(data, list):
+                # Old format: just a list of rules
+                rules = data
+                file_version = "0.0"
+            elif isinstance(data, dict):
+                # New format with metadata
+                if 'rules' not in data:
+                    st.error("❌ Invalid rule file format: Missing 'rules' section")
+                    return
+                rules = data.get('rules', [])
+                file_version = data.get('version', '0.0')
+            else:
+                st.error("❌ Invalid rule file format: Expected JSON object or array")
                 return
             
-            rules = data.get('rules', [])
+            # Validate version compatibility
+            current_version = "1.0"
+            if file_version != current_version and file_version != "0.0":
+                st.warning(f"⚠️ File version ({file_version}) differs from current version ({current_version}). Some features may not work correctly.")
             
             # Validate each rule structure
-            required_fields = ['id', 'data_source', 'filters']
+            required_fields = ['data_source', 'filters']
             valid_data_sources = ["OC", "Forecast", "Inventory", "Pending CAN", "Pending PO", "Pending WH Transfer"]
+            validated_rules = []
             
             for idx, rule in enumerate(rules):
+                # Add default id if missing
+                if 'id' not in rule:
+                    rule['id'] = str(uuid.uuid4())
+                else:
+                    # Regenerate ID to avoid conflicts
+                    rule['id'] = str(uuid.uuid4())
+                
                 # Check required fields
                 missing_fields = [field for field in required_fields if field not in rule]
                 if missing_fields:
-                    st.error(f"❌ Invalid rule at position {idx + 1}: Missing fields: {', '.join(missing_fields)}")
-                    return
+                    st.warning(f"⚠️ Rule {idx + 1}: Missing fields {missing_fields}, skipping...")
+                    continue
                 
                 # Validate data source
                 if rule['data_source'] not in valid_data_sources:
-                    st.error(f"❌ Invalid rule at position {idx + 1}: Invalid data source '{rule['data_source']}'")
-                    return
+                    st.warning(f"⚠️ Rule {idx + 1}: Invalid data source '{rule['data_source']}', skipping...")
+                    continue
                 
                 # Validate filters structure
-                if not isinstance(rule['filters'], dict):
-                    st.error(f"❌ Invalid rule at position {idx + 1}: Filters must be a dictionary")
-                    return
+                if not isinstance(rule.get('filters'), dict):
+                    st.warning(f"⚠️ Rule {idx + 1}: Invalid filters format, skipping...")
+                    continue
                 
-                # Regenerate rule ID to avoid conflicts
-                rule['id'] = str(uuid.uuid4())
+                # Add missing filter fields with defaults
+                default_filters = {
+                    'entity': ['All'],
+                    'customer': ['All'],
+                    'product': ['All'],
+                    'number': ['All'],
+                    'brand': ['All']
+                }
+                for filter_key, default_value in default_filters.items():
+                    if filter_key not in rule['filters']:
+                        rule['filters'][filter_key] = default_value
                 
-                # Ensure priority exists
+                # Ensure adjustment type exists
+                if 'adjustment_type' not in rule:
+                    # Try to infer from other fields
+                    if 'absolute_date' in rule and rule['absolute_date']:
+                        rule['adjustment_type'] = 'Absolute (Date)'
+                    else:
+                        rule['adjustment_type'] = 'Relative (Days)'
+                
+                # Ensure priority exists (with new higher=better logic)
                 if 'priority' not in rule:
-                    rule['priority'] = idx + 1
+                    rule['priority'] = 50  # Default middle priority
+                else:
+                    # If loading from old format where lower was better, invert it
+                    if file_version == "0.0" and rule['priority'] <= 100:
+                        rule['priority'] = 101 - rule['priority']
+                
+                # Validate offset days for relative adjustments
+                if rule['adjustment_type'] == 'Relative (Days)':
+                    if 'offset_days' not in rule or rule['offset_days'] is None:
+                        st.warning(f"⚠️ Rule {idx + 1}: Missing offset_days for relative adjustment, defaulting to 7")
+                        rule['offset_days'] = 7
+                
+                validated_rules.append(rule)
+            
+            if not validated_rules:
+                st.error("❌ No valid rules found in the file")
+                return
             
             # Load rules into session state
-            st.session_state.time_adjustment_rules = rules
+            st.session_state.time_adjustment_rules = validated_rules
             
             # Show success message with details
-            st.success(f"✅ Loaded successfully! {len(rules)} rules imported from '{uploaded_file.name}'")
+            st.success(f"✅ Successfully loaded {len(validated_rules)} rules from '{uploaded_file.name}'")
             
-            # Auto-expand to show loaded rules
-            if data.get('created_at'):
-                st.info(f"📅 Configuration created on: {data['created_at']}")
+            if len(validated_rules) < len(rules):
+                st.info(f"ℹ️ {len(rules) - len(validated_rules)} rules were skipped due to validation errors")
             
-            # Clear the file uploader
-            st.rerun()
+            # Show file metadata if available
+            if isinstance(data, dict):
+                metadata_info = []
+                if data.get('created_at'):
+                    metadata_info.append(f"Created: {data['created_at']}")
+                if data.get('description'):
+                    metadata_info.append(f"Description: {data['description']}")
+                if metadata_info:
+                    st.info(" | ".join(metadata_info))
+            
+            # Don't rerun here - it will be handled by the import button
             
         except json.JSONDecodeError as e:
             st.error(f"❌ Invalid JSON file: {str(e)}")
         except Exception as e:
             st.error(f"❌ Error loading rules: {str(e)}")
+            if st.session_state.get('debug_mode', False):
+                st.exception(e)
     
     @staticmethod
     def _export_session_rules():
