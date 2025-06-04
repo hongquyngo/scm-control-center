@@ -788,6 +788,53 @@ class TimeAdjustmentConflictManager:
                     st.markdown("#### 🎯 Conflict Resolution Strategy Order")
                     st.caption("Drag strategies to reorder. Conflicts will be resolved using strategies in order until a winner is found.")
                     
+                    # Help text for strategies
+                    with st.expander("ℹ️ Understanding Resolution Strategies", expanded=False):
+                        st.markdown("""
+                        ### 📊 **Priority Based**
+                        Rules with higher priority value win (100 > 50 > 1)
+                        - **When to use:** When you have clear rule importance hierarchy
+                        - **Example:** Company-wide rule (priority 90) overrides department rule (priority 50)
+                        - **Tie breaker:** If priorities are equal, moves to next strategy
+                        
+                        ### 🎯 **Most Specific**
+                        Rules with more specific filters win over general rules
+                        - **When to use:** When detailed rules should override general ones
+                        - **Specificity scoring:**
+                          - Number filter: +100 points (most specific)
+                          - Product filter: +50 points
+                          - Entity/Customer: +30 points
+                          - Brand filter: +20 points
+                          - Single value selected: +10 bonus points
+                        - **Example:** Rule for specific product wins over rule for all products
+                        
+                        ### 1️⃣ **First Match**
+                        The rule that appears first in the list wins
+                        - **When to use:** When rule order represents precedence
+                        - **Example:** Rule 1 wins over Rule 5 for same record
+                        - **Note:** Simple but predictable
+                        
+                        ### 🔚 **Last Match**
+                        The rule that appears last in the list wins
+                        - **When to use:** When newer rules should override older ones
+                        - **Example:** Rule 5 wins over Rule 1 for same record
+                        - **Note:** Last rule has final say
+                        
+                        ### ➕ **Cumulative**
+                        All matching rules are applied additively
+                        - **When to use:** When adjustments should stack
+                        - **Example:** Rule 1 (+5 days) + Rule 2 (+3 days) = +8 days total
+                        - **⚠️ Limitation:** Cannot combine with Absolute Date adjustments
+                        - **Note:** Only works with Relative (Days) adjustments
+                        
+                        ---
+                        
+                        💡 **Strategy Order Tips:**
+                        - Place your preferred strategy first
+                        - Strategies are tried in order until one produces a clear winner
+                        - If all strategies result in ties, First Match is used as final fallback
+                        """)
+                    
                     # Strategy order configuration
                     col1, col2 = st.columns([3, 1])
                     
@@ -802,6 +849,14 @@ class TimeAdjustmentConflictManager:
                             ConflictResolutionStrategy.LAST_MATCH: "🔚 Last Match"
                         }
                         
+                        strategy_descriptions = {
+                            ConflictResolutionStrategy.PRIORITY_BASED: "Higher priority value wins (100 > 50)",
+                            ConflictResolutionStrategy.MOST_SPECIFIC: "More filters = more specific = wins",
+                            ConflictResolutionStrategy.CUMULATIVE: "Add all adjustments together",
+                            ConflictResolutionStrategy.FIRST_MATCH: "First rule in list wins",
+                            ConflictResolutionStrategy.LAST_MATCH: "Last rule in list wins"
+                        }
+                        
                         for i, strategy in enumerate(st.session_state.conflict_resolution_order):
                             cols = st.columns([1, 3, 1, 1])
                             
@@ -809,7 +864,10 @@ class TimeAdjustmentConflictManager:
                                 st.markdown(f"**{i + 1}.**")
                             
                             with cols[1]:
-                                st.markdown(strategy_names[strategy])
+                                st.markdown(
+                                    f"{strategy_names[strategy]}",
+                                    help=strategy_descriptions[strategy]
+                                )
                             
                             with cols[2]:
                                 if i > 0 and st.button("⬆️", key=f"up_strategy_{strategy.value}"):
@@ -839,6 +897,20 @@ class TimeAdjustmentConflictManager:
                     # Show conflict analysis results
                     st.markdown("---")
                     st.markdown("#### 📋 Conflict Analysis Results")
+                    
+                    # Add legend for understanding results
+                    with st.expander("📖 How to read the results", expanded=False):
+                        st.markdown("""
+                        **Columns explained:**
+                        - **Rule X**: Shows the rule number, adjustment, priority, and specificity
+                        - **Resolution**: Which rule wins and the strategy used
+                        - **Final Offset**: The actual adjustment that will be applied
+                        
+                        **Resolution methods:**
+                        - 🏆 The winning rule is determined by the first strategy that can decide
+                        - 🔄 If a strategy results in a tie, the next strategy is used
+                        - ✅ The final result shows which strategy made the decision
+                        """)
                     
                     # Group warnings by data source
                     warnings_by_source = {}
@@ -902,11 +974,29 @@ class TimeAdjustmentConflictManager:
                         st.session_state.skip_strategy_selector = True  # Skip the strategy selector in detailed view
                         st.rerun()
                     
-                    # Footer
+                    # Footer with example
                     st.caption(
                         "💡 **How it works**: Conflicts are resolved by applying strategies in order. "
                         "If the first strategy results in a tie, the next strategy is used, and so on."
                     )
+                    
+                    # Add visual example
+                    with st.expander("🎓 Example: How conflict resolution works", expanded=False):
+                        st.markdown("""
+                        **Scenario:** Two rules match the same record:
+                        - Rule A: +5 days, Priority 50, 2 filters
+                        - Rule B: +10 days, Priority 50, 4 filters
+                        
+                        **Resolution process with current order:**
+                        
+                        1. **📊 Priority Based** → Both have priority 50 → **TIE**
+                        2. **🎯 Most Specific** → Rule B has more filters → **Rule B WINS!** ✅
+                        3. ~~First Match~~ (not needed, already resolved)
+                        4. ~~Last Match~~ (not needed, already resolved)
+                        5. ~~Cumulative~~ (not needed, already resolved)
+                        
+                        **Result:** Record will be adjusted by +10 days (Rule B)
+                        """)
         else:
             # No conflicts
             with st.container():

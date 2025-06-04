@@ -10,6 +10,7 @@ from sqlalchemy import text
 
 from .db import get_db_engine
 from .settings_manager import SettingsManager
+from utils.adjustments.time_adjustment_integration import TimeAdjustmentIntegration
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,8 @@ class DataManager:
             # Initialize settings manager separately to avoid circular dependency
             self._settings_manager = None
             self._cache_ttl = 300  # 5 minutes default
+            # Add time adjustment integration
+            self._time_adjustment_integration = TimeAdjustmentIntegration()
             self._initialized = True
     
     def _get_settings_manager(self):
@@ -79,25 +82,45 @@ class DataManager:
         """Load current inventory data"""
         engine = get_db_engine()
         query = "SELECT * FROM prostechvn.inventory_detailed_view"
-        return pd.read_sql(text(query), engine)
+        df = pd.read_sql(text(query), engine)
+        # Reset index to avoid reindexing issues
+        df = df.reset_index(drop=True)
+        return df
     
     @st.cache_data(ttl=1800)
     def load_pending_can(_self):
         """Load pending CAN (Container Arrival Note) data"""
         engine = get_db_engine()
         query = "SELECT * FROM prostechvn.can_pending_stockin_view"
-        return pd.read_sql(text(query), engine)
-    
+        df = pd.read_sql(text(query), engine)
+        # Reset index to avoid reindexing issues
+        df = df.reset_index(drop=True)
+        return df
+        
+
+    # Replace load_pending_po in DataManager with this version that keeps all lines
+
     @st.cache_data(ttl=1800)
     def load_pending_po(_self):
-        """Load pending Purchase Order data"""
+        """Load pending Purchase Order data - keep all lines without aggregation"""
         engine = get_db_engine()
         query = """
         SELECT * FROM prostechvn.purchase_order_full_view
         WHERE pending_standard_arrival_quantity > 0
         """
-        return pd.read_sql(text(query), engine)
-    
+        df = pd.read_sql(text(query), engine)
+        
+        # Reset index to ensure no duplicates
+        df = df.reset_index(drop=True)
+        
+        # NO AGGREGATION - Keep all lines as-is
+        # This ensures we don't lose any important information
+        # Each PO line represents a real transaction that should be visible
+        
+        logger.info(f"Loaded {len(df)} PO lines (no aggregation)")
+        
+        return df
+
     @st.cache_data(ttl=1800)
     def load_pending_wh_transfer(_self):
         """Load pending Warehouse Transfer data"""
@@ -106,8 +129,11 @@ class DataManager:
         SELECT * FROM prostechvn.warehouse_transfer_details_view wtdv
         WHERE wtdv.is_completed = 0
         """
-        return pd.read_sql(text(query), engine)
-    
+        df = pd.read_sql(text(query), engine)
+        # Reset index to avoid reindexing issues
+        df = df.reset_index(drop=True)
+        return df
+
     @st.cache_data(ttl=3600)
     def load_product_master(_self):
         """Load product master data"""
@@ -131,7 +157,7 @@ class DataManager:
         WHERE p.delete_flag = 0
         """
         return pd.read_sql(text(query), engine)
-    
+
     @st.cache_data(ttl=3600)
     def load_customer_master(_self):
         """Load customer master data"""
@@ -156,7 +182,7 @@ class DataManager:
         AND ct.name = 'Customer'
         """
         return pd.read_sql(text(query), engine)
-    
+
     @st.cache_data(ttl=1800)
     def load_active_allocations(_self):
         """Load active allocations affecting supply"""
@@ -166,195 +192,9 @@ class DataManager:
         WHERE undelivered_qty > 0
         """
         return pd.read_sql(text(query), engine)
-    
-    # === Unified Data Access Methods ===
-    
-    def get_demand_data(self, sources: List[str], include_converted: bool = False) -> pd.DataFrame:
-        """Get combined demand data with standardization"""
-        df_parts = []
-        
-        if "OC" in sources:
-            df_oc = self.load_demand_oc()
-            if not df_oc.empty:
-                df_oc["source_type"] = "OC"
-                df_parts.append(self._standardize_demand_df(df_oc, is_forecast=False))
-        
-        if "Forecast" in sources:
-            df_fc = self.load_demand_forecast()
-            if not df_fc.empty:
-                df_fc["source_type"] = "Forecast"
-                standardized_fc = self._standardize_demand_df(df_fc, is_forecast=True)
-                
-                if not include_converted and 'is_converted_to_oc' in standardized_fc.columns:
-                    # Handle multiple possible formats for converted status
-                    # Check actual data format and handle accordingly
-                    converted_values = ['Yes', 'yes', 'Y', 'y', '1', 1, True, 'True', 'true']
-                    
-                    # Debug log
-                    if st.session_state.get('debug_mode', False):
-                        before_count = len(standardized_fc)
-                        converted_count = standardized_fc['is_converted_to_oc'].isin(converted_values).sum()
-                        logger.info(f"Filtering converted forecasts: {converted_count} out of {before_count}")
-                    
-                    standardized_fc = standardized_fc[~standardized_fc["is_converted_to_oc"].isin(converted_values)]
-                
-                df_parts.append(standardized_fc)
-        
-        return pd.concat(df_parts, ignore_index=True) if df_parts else pd.DataFrame()
-    
-    def get_supply_data(self, sources: List[str], exclude_expired: bool = True) -> pd.DataFrame:
-        """Get combined supply data with standardization"""
-        today = pd.to_datetime("today").normalize()
-        df_parts = []
-        
-        if "Inventory" in sources:
-            inv_df = self.load_inventory()
-            if not inv_df.empty:
-                inv_df = self._prepare_inventory_data(inv_df, today, exclude_expired)
-                df_parts.append(inv_df)
-        
-        if "Pending CAN" in sources:
-            can_df = self.load_pending_can()
-            if not can_df.empty:
-                can_df = self._prepare_can_data(can_df)
-                df_parts.append(can_df)
-        
-        if "Pending PO" in sources:
-            po_df = self.load_pending_po()
-            if not po_df.empty:
-                po_df = self._prepare_po_data(po_df)
-                df_parts.append(po_df)
-        
-        if "Pending WH Transfer" in sources:
-            wht_df = self.load_pending_wh_transfer()
-            if not wht_df.empty:
-                wht_df = self._prepare_wh_transfer_data(wht_df, today, exclude_expired)
-                df_parts.append(wht_df)
-        
-        if not df_parts:
-            return pd.DataFrame()
-        
-        standardized_parts = [self._standardize_supply_df(df) for df in df_parts]
-        return pd.concat(standardized_parts, ignore_index=True)
-    
-    def preload_all_data(self, force_refresh: bool = False) -> Dict[str, pd.DataFrame]:
-        """Parallel loading of all data types"""
-        # Check cache validity
-        if not force_refresh and self._is_bulk_cache_valid():
-            return self._cache
-        
-        loading_tasks = {
-            'demand_oc': self.load_demand_oc,
-            'demand_forecast': self.load_demand_forecast,
-            'supply_inventory': self.load_inventory,
-            'supply_can': self.load_pending_can,
-            'supply_po': self.load_pending_po,
-            'supply_wh_transfer': self.load_pending_wh_transfer,
-            'master_products': self.load_product_master,
-            'master_customers': self.load_customer_master,
-            'active_allocations': self.load_active_allocations
-        }
-        
-        with ThreadPoolExecutor(max_workers=5) as executor:
-            future_to_key = {
-                executor.submit(func): key 
-                for key, func in loading_tasks.items()
-            }
-            
-            for future in as_completed(future_to_key):
-                key = future_to_key[future]
-                try:
-                    self._cache[key] = future.result()
-                    self._last_refresh[key] = datetime.now()
-                except Exception as e:
-                    logger.error(f"Error loading {key}: {str(e)}")
-                    self._cache[key] = pd.DataFrame()
-        
-        # Calculate insights after loading
-        self._calculate_insights()
-        
-        return self._cache
-    
-    def get_insights(self) -> Dict[str, Any]:
-        """Get calculated insights across all data"""
-        if not self._insights_cache:
-            self._calculate_insights()
-        return self._insights_cache
-    
-    def get_critical_alerts(self) -> List[Dict[str, Any]]:
-        """Get critical alerts requiring immediate action"""
-        alerts = []
-        insights = self.get_insights()
-        
-        # Demand-only products alert
-        if insights.get('demand_only_products'):
-            alerts.append({
-                'level': 'critical',
-                'icon': '📤',
-                'message': f"{len(insights.get('demand_only_products', set()))} Demand-Only products",
-                'value': f"${insights.get('demand_only_value', 0):,.0f}",
-                'action': 'no supply'
-            })
-        
-        # Overdue orders alert
-        if insights.get('demand_overdue_count', 0) > 0:
-            alerts.append({
-                'level': 'critical',
-                'icon': '🕐',
-                'message': f"{insights['demand_overdue_count']} Past ETD orders",
-                'value': f"${insights['demand_overdue_value']:,.0f}",
-                'action': 'overdue delivery'
-            })
-        
-        # Expired items alert
-        if insights.get('expired_items_count', 0) > 0:
-            alerts.append({
-                'level': 'critical',
-                'icon': '💀',
-                'message': f"{insights['expired_items_count']} Expired items",
-                'value': f"${insights['expired_items_value']:,.0f}",
-                'action': 'immediate disposal'
-            })
-        
-        return alerts
-    
-    def get_warnings(self) -> List[Dict[str, Any]]:
-        """Get warning level insights"""
-        warnings = []
-        insights = self.get_insights()
-        
-        # Supply-only products warning
-        if insights.get('supply_only_products'):
-            warnings.append({
-                'level': 'warning',
-                'icon': '📦',
-                'message': f"{len(insights.get('supply_only_products', set()))} Supply-Only products",
-                'value': f"${insights.get('supply_only_value', 0):,.0f}",
-                'action': 'potential dead stock'
-            })
-        
-        # Missing dates warnings
-        if insights.get('demand_missing_etd', 0) > 0:
-            warnings.append({
-                'level': 'warning',
-                'icon': '⚠️',
-                'message': f"{insights['demand_missing_etd']} records missing ETD",
-                'action': 'demand side'
-            })
-        
-        # Near expiry warnings
-        if insights.get('near_expiry_7d_count', 0) > 0:
-            warnings.append({
-                'level': 'warning',
-                'icon': '📅',
-                'message': f"{insights['near_expiry_7d_count']} items expiring in 7 days",
-                'value': f"${insights['near_expiry_7d_value']:,.0f}"
-            })
-        
-        return warnings
-    
-    # === Private Helper Methods ===
-    
+
+        # === Private Helper Methods ===
+
     def _is_bulk_cache_valid(self) -> bool:
         """Check if bulk cache is still valid"""
         if not self._cache:
@@ -367,7 +207,7 @@ class DataManager:
             return elapsed < self._cache_ttl
         
         return False
-    
+
     def _standardize_demand_df(self, df: pd.DataFrame, is_forecast: bool) -> pd.DataFrame:
         """Standardize demand dataframe"""
         df = df.copy()
@@ -376,10 +216,6 @@ class DataManager:
         if 'etd' in df.columns:
             df["etd"] = pd.to_datetime(df["etd"], errors="coerce")
             
-            # Apply time adjustments
-            etd_offset = self._get_settings_manager().get_setting('time_adjustments.etd_offset_days', 0)
-            if etd_offset != 0 and df["etd"].notna().any():
-                df["etd"] = df["etd"] + timedelta(days=etd_offset)
         
         if 'oc_date' in df.columns:
             df["oc_date"] = pd.to_datetime(df["oc_date"], errors="coerce")
@@ -449,12 +285,35 @@ class DataManager:
             df['package_size'] = ''
         
         return df
-    
+
     def _prepare_inventory_data(self, inv_df: pd.DataFrame, today: pd.Timestamp, exclude_expired: bool) -> pd.DataFrame:
-        """Prepare inventory data"""
+        """Prepare inventory data - preserve original dates when available"""
         inv_df = inv_df.copy()
         inv_df["source_type"] = "Inventory"
-        inv_df["date_ref"] = today
+        
+        # For inventory, check if we have actual transaction dates
+        # Priority: receipt_date > stockin_date > created_date > today
+        if 'receipt_date' in inv_df.columns:
+            inv_df["date_ref"] = pd.to_datetime(inv_df["receipt_date"], errors="coerce")
+            # Fill missing with stockin_date if available
+            if 'stockin_date' in inv_df.columns:
+                stockin_dates = pd.to_datetime(inv_df["stockin_date"], errors="coerce")
+                inv_df["date_ref"] = inv_df["date_ref"].fillna(stockin_dates)
+        elif 'stockin_date' in inv_df.columns:
+            inv_df["date_ref"] = pd.to_datetime(inv_df["stockin_date"], errors="coerce")
+        elif 'created_date' in inv_df.columns:
+            inv_df["date_ref"] = pd.to_datetime(inv_df["created_date"], errors="coerce")
+        else:
+            # Only use today as last resort
+            inv_df["date_ref"] = today
+        
+        # Fill any remaining NaT with today
+        inv_df["date_ref"] = inv_df["date_ref"].fillna(today)
+        
+        # Keep the original date columns for reference
+        for col in ['receipt_date', 'stockin_date', 'created_date']:
+            if col in inv_df.columns:
+                inv_df[col] = pd.to_datetime(inv_df[col], errors="coerce")
         
         # Map columns with existence check
         if 'remaining_quantity' in inv_df.columns:
@@ -486,16 +345,24 @@ class DataManager:
             inv_df["supply_number"] = ''
         
         return inv_df
-    
+
     def _prepare_can_data(self, can_df: pd.DataFrame) -> pd.DataFrame:
-        """Prepare CAN data"""
+        """Prepare CAN data - keep arrival_date"""
         can_df = can_df.copy()
         can_df["source_type"] = "Pending CAN"
         
+        # Keep arrival_date as the primary date
         if 'arrival_date' in can_df.columns:
-            can_df["date_ref"] = pd.to_datetime(can_df["arrival_date"], errors="coerce")
+            can_df["arrival_date"] = pd.to_datetime(can_df["arrival_date"], errors="coerce")
+            can_df["date_ref"] = can_df["arrival_date"]
         else:
             can_df["date_ref"] = pd.NaT
+            
+        # Calculate days since arrival
+        if 'arrival_date' in can_df.columns:
+            today = pd.Timestamp.now().normalize()
+            can_df["days_since_arrival"] = (today - can_df["arrival_date"]).dt.days
+            can_df["days_since_arrival"] = can_df["days_since_arrival"].fillna(0)
             
         if 'pending_quantity' in can_df.columns:
             can_df["quantity"] = pd.to_numeric(can_df["pending_quantity"], errors="coerce").fillna(0)
@@ -518,16 +385,19 @@ class DataManager:
             can_df["supply_number"] = ''
             
         return can_df
-    
+
+
+    # Update _prepare_po_data in DataManager to handle multiple lines per PO
+
     def _prepare_po_data(self, po_df: pd.DataFrame) -> pd.DataFrame:
-        """Prepare PO data"""
+        """Prepare PO data - keep all lines without aggregation"""
         po_df = po_df.copy()
         po_df["source_type"] = "Pending PO"
         
-        # Use cargo_ready_date or crd
-        date_col = 'cargo_ready_date' if 'cargo_ready_date' in po_df.columns else 'crd'
-        if date_col in po_df.columns:
-            po_df["date_ref"] = pd.to_datetime(po_df[date_col], errors="coerce")
+        # Map eta for PO
+        if 'eta' in po_df.columns:
+            po_df["eta"] = pd.to_datetime(po_df["eta"], errors="coerce")
+            po_df["date_ref"] = po_df["eta"]
         else:
             po_df["date_ref"] = pd.NaT
             
@@ -544,8 +414,14 @@ class DataManager:
         if 'legal_entity' not in po_df.columns:
             po_df["legal_entity"] = ''
             
-        if 'po_number' in po_df.columns:
-            po_df["supply_number"] = po_df["po_number"].astype(str)
+        # Use po_line_id as unique identifier instead of just po_number
+        if 'po_line_id' in po_df.columns:
+            # Create unique supply_number by combining po_number and line_id
+            po_df["supply_number"] = po_df["po_number"].astype(str) + "_L" + po_df["po_line_id"].astype(str)
+        elif 'po_number' in po_df.columns:
+            # Fallback to just po_number if line_id not available
+            # Add index to make it unique
+            po_df["supply_number"] = po_df["po_number"].astype(str) + "_" + po_df.index.astype(str)
         else:
             po_df["supply_number"] = ''
             
@@ -554,17 +430,22 @@ class DataManager:
             po_df["vendor"] = po_df["vendor_name"]
             
         return po_df
-    
+
+
+
     def _prepare_wh_transfer_data(self, wht_df: pd.DataFrame, today: pd.Timestamp, exclude_expired: bool) -> pd.DataFrame:
-        """Prepare warehouse transfer data"""
+        """Prepare warehouse transfer data - keep transfer_date"""
         wht_df = wht_df.copy()
         wht_df["source_type"] = "Pending WH Transfer"
         
+        # Keep transfer_date as the primary date
         if 'transfer_date' in wht_df.columns:
             wht_df["transfer_date"] = pd.to_datetime(wht_df["transfer_date"], errors="coerce")
-            # Apply transfer lead time from settings
-            transfer_lead_time = self._get_settings_manager().get_setting('time_adjustments.wh_transfer_lead_time', 2)
-            wht_df["date_ref"] = wht_df["transfer_date"] + pd.Timedelta(days=transfer_lead_time)
+            wht_df["date_ref"] = wht_df["transfer_date"]
+            
+            # Calculate days in transfer
+            wht_df["days_in_transfer"] = (today - wht_df["transfer_date"]).dt.days
+            wht_df["days_in_transfer"] = wht_df["days_in_transfer"].fillna(0)
         else:
             wht_df["date_ref"] = pd.NaT
             
@@ -600,9 +481,14 @@ class DataManager:
             wht_df["transfer_route"] = wht_df["from_warehouse"] + " → " + wht_df["to_warehouse"]
             
         return wht_df
-    
+
+    # Fix for _standardize_supply_df method in DataManager
+    # Replace the existing _standardize_supply_df method with this version:
+
+  # utils/data_manager.py - Add this method to DataManager class
+
     def _standardize_supply_df(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Standardize supply dataframe"""
+        """Standardize supply dataframe - preserve source-specific date columns"""
         df = df.copy()
         
         # Clean string columns - only if they exist
@@ -648,17 +534,32 @@ class DataManager:
             "quantity", "value_in_usd"
         ]
         
-        # Add optional columns if they exist
-        optional_cols = ["supply_number", "expiry_date", "days_until_expiry", 
-                        "days_since_arrival", "vendor", "transfer_route", 
-                        "days_in_transfer", "from_warehouse", "to_warehouse"]
+        # Add optional columns if they exist - SIMPLIFIED DATE COLUMNS
+        optional_cols = [
+            "supply_number", "expiry_date", "days_until_expiry", 
+            "days_since_arrival", "vendor", "transfer_route", 
+            "days_in_transfer", "from_warehouse", "to_warehouse",
+            # Source-specific date columns with {column}_original and {column}_adjusted format
+            "arrival_date", "arrival_date_original", "arrival_date_adjusted",
+            "eta", "eta_original", "eta_adjusted", 
+            "transfer_date", "transfer_date_original", "transfer_date_adjusted",
+            "date_ref", "date_ref_original", "date_ref_adjusted",
+            # Keep these for inventory date selection logic
+            "receipt_date", "stockin_date", "created_date",
+            # PO specific columns
+            "po_number", "po_line_id", "buying_quantity", "buying_uom", 
+            "purchase_unit_cost", "vendor_name"
+        ]
+
         
+        # Create final columns list without duplicates
+        final_cols = standard_cols.copy()
         for col in optional_cols:
-            if col in df.columns:
-                standard_cols.append(col)
+            if col in df.columns and col not in final_cols:
+                final_cols.append(col)
         
-        return df[standard_cols]
-    
+        return df[final_cols]
+
     def _calculate_insights(self):
         """Calculate key insights from loaded data"""
         insights = {}
@@ -815,7 +716,243 @@ class DataManager:
         
         self._insights_cache = insights
         return insights
-    
+
+    # === Public Data Access Methods ===
+
+    def get_demand_data(self, sources: List[str], include_converted: bool = False) -> pd.DataFrame:
+        """Get combined demand data with standardization"""
+        df_parts = []
+        
+        if "OC" in sources:
+            df_oc = self.load_demand_oc()
+            if not df_oc.empty:
+                df_oc["source_type"] = "OC"
+                # Standardize first
+                df_oc = self._standardize_demand_df(df_oc, is_forecast=False)
+                # Then apply time adjustments
+                df_oc = self._time_adjustment_integration.apply_adjustments(df_oc, "OC")
+                # Only append ONCE after both operations
+                df_parts.append(df_oc)
+        
+        if "Forecast" in sources:
+            df_fc = self.load_demand_forecast()
+            if not df_fc.empty:
+                df_fc["source_type"] = "Forecast"
+                # Standardize first
+                standardized_fc = self._standardize_demand_df(df_fc, is_forecast=True)
+                # Then apply time adjustments
+                standardized_fc = self._time_adjustment_integration.apply_adjustments(standardized_fc, "Forecast")
+                
+                if not include_converted and 'is_converted_to_oc' in standardized_fc.columns:
+                    # Handle multiple possible formats for converted status
+                    converted_values = ['Yes', 'yes', 'Y', 'y', '1', 1, True, 'True', 'true']
+                    
+                    # Debug log
+                    if st.session_state.get('debug_mode', False):
+                        before_count = len(standardized_fc)
+                        converted_count = standardized_fc['is_converted_to_oc'].isin(converted_values).sum()
+                        logger.info(f"Filtering converted forecasts: {converted_count} out of {before_count}")
+                    
+                    standardized_fc = standardized_fc[~standardized_fc["is_converted_to_oc"].isin(converted_values)]
+                
+                df_parts.append(standardized_fc)
+        
+        return pd.concat(df_parts, ignore_index=True) if df_parts else pd.DataFrame()
+
+
+    # Add this fix to get_supply_data method in DataManager
+    # This handles the case when some sources return empty dataframes
+
+    def get_supply_data(self, sources: List[str], exclude_expired: bool = True) -> pd.DataFrame:
+        """Get combined supply data with standardization"""
+        today = pd.to_datetime("today").normalize()
+        df_parts = []
+        
+        if "Inventory" in sources:
+            inv_df = self.load_inventory()
+            if not inv_df.empty:
+                inv_df = self._prepare_inventory_data(inv_df, today, exclude_expired)
+                inv_df = self._time_adjustment_integration.apply_adjustments(inv_df, "Inventory")
+                df_parts.append(inv_df)
+        
+        if "Pending CAN" in sources:
+            can_df = self.load_pending_can()
+            if not can_df.empty:
+                can_df = self._prepare_can_data(can_df)
+                can_df = self._time_adjustment_integration.apply_adjustments(can_df, "Pending CAN")
+                df_parts.append(can_df)
+        
+        if "Pending PO" in sources:
+            po_df = self.load_pending_po()
+            if not po_df.empty:
+                po_df = self._prepare_po_data(po_df)
+                po_df = self._time_adjustment_integration.apply_adjustments(po_df, "Pending PO")
+                df_parts.append(po_df)
+        
+        if "Pending WH Transfer" in sources:
+            wht_df = self.load_pending_wh_transfer()
+            if not wht_df.empty:
+                wht_df = self._prepare_wh_transfer_data(wht_df, today, exclude_expired)
+                wht_df = self._time_adjustment_integration.apply_adjustments(wht_df, "Pending WH Transfer")
+                df_parts.append(wht_df)
+        
+        if not df_parts:
+            return pd.DataFrame()
+        
+        # Standardize each part BEFORE concatenating
+        standardized_parts = []
+        for df in df_parts:
+            # Only standardize non-empty dataframes
+            if not df.empty and len(df.columns) > 0:
+                standardized_df = self._standardize_supply_df(df)
+                standardized_df = standardized_df.reset_index(drop=True)
+                standardized_parts.append(standardized_df)
+        
+        # If no valid parts after standardization, return empty
+        if not standardized_parts:
+            return pd.DataFrame()
+        
+        # Combine all parts with clean indices
+        # Use try-except to handle any edge cases
+        try:
+            combined_df = pd.concat(standardized_parts, ignore_index=True, sort=False)
+            combined_df = combined_df.reset_index(drop=True)
+            return combined_df
+        except Exception as e:
+            logger.error(f"Error concatenating supply data: {str(e)}")
+            # If concat fails, try manual combination
+            if standardized_parts:
+                result = standardized_parts[0].copy()
+                for df in standardized_parts[1:]:
+                    try:
+                        result = pd.concat([result, df], ignore_index=True, sort=False)
+                    except:
+                        continue
+                return result.reset_index(drop=True)
+            else:
+                return pd.DataFrame()
+
+
+    def get_adjustment_status(self) -> Dict[str, Any]:
+        """Get adjustment status from integration layer"""
+        return self._time_adjustment_integration.get_adjustment_status()
+
+    def preload_all_data(self, force_refresh: bool = False) -> Dict[str, pd.DataFrame]:
+        """Parallel loading of all data types"""
+        # Check cache validity
+        if not force_refresh and self._is_bulk_cache_valid():
+            return self._cache
+        
+        loading_tasks = {
+            'demand_oc': self.load_demand_oc,
+            'demand_forecast': self.load_demand_forecast,
+            'supply_inventory': self.load_inventory,
+            'supply_can': self.load_pending_can,
+            'supply_po': self.load_pending_po,
+            'supply_wh_transfer': self.load_pending_wh_transfer,
+            'master_products': self.load_product_master,
+            'master_customers': self.load_customer_master,
+            'active_allocations': self.load_active_allocations
+        }
+        
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            future_to_key = {
+                executor.submit(func): key 
+                for key, func in loading_tasks.items()
+            }
+            
+            for future in as_completed(future_to_key):
+                key = future_to_key[future]
+                try:
+                    self._cache[key] = future.result()
+                    self._last_refresh[key] = datetime.now()
+                except Exception as e:
+                    logger.error(f"Error loading {key}: {str(e)}")
+                    self._cache[key] = pd.DataFrame()
+        
+        # Calculate insights after loading
+        self._calculate_insights()
+        
+        return self._cache
+
+    def get_insights(self) -> Dict[str, Any]:
+        """Get calculated insights across all data"""
+        if not self._insights_cache:
+            self._calculate_insights()
+        return self._insights_cache
+
+    def get_critical_alerts(self) -> List[Dict[str, Any]]:
+        """Get critical alerts requiring immediate action"""
+        alerts = []
+        insights = self.get_insights()
+        
+        # Demand-only products alert
+        if insights.get('demand_only_products'):
+            alerts.append({
+                'level': 'critical',
+                'icon': '📤',
+                'message': f"{len(insights.get('demand_only_products', set()))} Demand-Only products",
+                'value': f"${insights.get('demand_only_value', 0):,.0f}",
+                'action': 'no supply'
+            })
+        
+        # Overdue orders alert
+        if insights.get('demand_overdue_count', 0) > 0:
+            alerts.append({
+                'level': 'critical',
+                'icon': '🕐',
+                'message': f"{insights['demand_overdue_count']} Past ETD orders",
+                'value': f"${insights['demand_overdue_value']:,.0f}",
+                'action': 'overdue delivery'
+            })
+        
+        # Expired items alert
+        if insights.get('expired_items_count', 0) > 0:
+            alerts.append({
+                'level': 'critical',
+                'icon': '💀',
+                'message': f"{insights['expired_items_count']} Expired items",
+                'value': f"${insights['expired_items_value']:,.0f}",
+                'action': 'immediate disposal'
+            })
+        
+        return alerts
+
+    def get_warnings(self) -> List[Dict[str, Any]]:
+        """Get warning level insights"""
+        warnings = []
+        insights = self.get_insights()
+        
+        # Supply-only products warning
+        if insights.get('supply_only_products'):
+            warnings.append({
+                'level': 'warning',
+                'icon': '📦',
+                'message': f"{len(insights.get('supply_only_products', set()))} Supply-Only products",
+                'value': f"${insights.get('supply_only_value', 0):,.0f}",
+                'action': 'potential dead stock'
+            })
+        
+        # Missing dates warnings
+        if insights.get('demand_missing_etd', 0) > 0:
+            warnings.append({
+                'level': 'warning',
+                'icon': '⚠️',
+                'message': f"{insights['demand_missing_etd']} records missing ETD",
+                'action': 'demand side'
+            })
+        
+        # Near expiry warnings
+        if insights.get('near_expiry_7d_count', 0) > 0:
+            warnings.append({
+                'level': 'warning',
+                'icon': '📅',
+                'message': f"{insights['near_expiry_7d_count']} items expiring in 7 days",
+                'value': f"${insights['near_expiry_7d_value']:,.0f}"
+            })
+        
+        return warnings
+
     def clear_cache(self, data_type: str = None):
         """Clear cache for specific data type or all"""
         if data_type:
@@ -830,7 +967,7 @@ class DataManager:
             self._last_refresh.clear()
             self._insights_cache.clear()
             st.cache_data.clear()
-    
+
     def set_cache_ttl(self, seconds: int):
         """Set cache time-to-live"""
         self._cache_ttl = seconds

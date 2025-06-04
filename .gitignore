@@ -6,7 +6,8 @@ __pycache__/
 
 #Ignore testing file
 
-test.py
+tests/
+backup/
 sales_performance_test.py
 user.txt
 
