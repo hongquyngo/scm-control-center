@@ -286,34 +286,18 @@ class DataManager:
         
         return df
 
+
     def _prepare_inventory_data(self, inv_df: pd.DataFrame, today: pd.Timestamp, exclude_expired: bool) -> pd.DataFrame:
-        """Prepare inventory data - preserve original dates when available"""
+        """Prepare inventory data - inventory is available NOW"""
         inv_df = inv_df.copy()
         inv_df["source_type"] = "Inventory"
         
-        # For inventory, check if we have actual transaction dates
-        # Priority: receipt_date > stockin_date > created_date > today
-        if 'receipt_date' in inv_df.columns:
-            inv_df["date_ref"] = pd.to_datetime(inv_df["receipt_date"], errors="coerce")
-            # Fill missing with stockin_date if available
-            if 'stockin_date' in inv_df.columns:
-                stockin_dates = pd.to_datetime(inv_df["stockin_date"], errors="coerce")
-                inv_df["date_ref"] = inv_df["date_ref"].fillna(stockin_dates)
-        elif 'stockin_date' in inv_df.columns:
-            inv_df["date_ref"] = pd.to_datetime(inv_df["stockin_date"], errors="coerce")
-        elif 'created_date' in inv_df.columns:
-            inv_df["date_ref"] = pd.to_datetime(inv_df["created_date"], errors="coerce")
-        else:
-            # Only use today as last resort
-            inv_df["date_ref"] = today
+        # IMPORTANT: Inventory is available NOW - use today as date_ref
+        inv_df["date_ref"] = today
         
-        # Fill any remaining NaT with today
-        inv_df["date_ref"] = inv_df["date_ref"].fillna(today)
-        
-        # Keep the original date columns for reference
-        for col in ['receipt_date', 'stockin_date', 'created_date']:
-            if col in inv_df.columns:
-                inv_df[col] = pd.to_datetime(inv_df[col], errors="coerce")
+        # Keep created_date for reference (this is the only date from SQL view)
+        if 'created_date' in inv_df.columns:
+            inv_df["created_date"] = pd.to_datetime(inv_df["created_date"], errors='coerce')
         
         # Map columns with existence check
         if 'remaining_quantity' in inv_df.columns:
@@ -346,24 +330,22 @@ class DataManager:
         
         return inv_df
 
+
     def _prepare_can_data(self, can_df: pd.DataFrame) -> pd.DataFrame:
-        """Prepare CAN data - keep arrival_date"""
+        """Prepare CAN data"""
         can_df = can_df.copy()
         can_df["source_type"] = "Pending CAN"
         
-        # Keep arrival_date as the primary date
+        # arrival_date exists in SQL view
         if 'arrival_date' in can_df.columns:
             can_df["arrival_date"] = pd.to_datetime(can_df["arrival_date"], errors="coerce")
             can_df["date_ref"] = can_df["arrival_date"]
         else:
             can_df["date_ref"] = pd.NaT
+            logger.warning("No arrival_date column in CAN data")
             
-        # Calculate days since arrival
-        if 'arrival_date' in can_df.columns:
-            today = pd.Timestamp.now().normalize()
-            can_df["days_since_arrival"] = (today - can_df["arrival_date"]).dt.days
-            can_df["days_since_arrival"] = can_df["days_since_arrival"].fillna(0)
-            
+        # days_since_arrival already calculated in SQL
+        
         if 'pending_quantity' in can_df.columns:
             can_df["quantity"] = pd.to_numeric(can_df["pending_quantity"], errors="coerce").fillna(0)
         else:
@@ -386,20 +368,18 @@ class DataManager:
             
         return can_df
 
-
-    # Update _prepare_po_data in DataManager to handle multiple lines per PO
-
     def _prepare_po_data(self, po_df: pd.DataFrame) -> pd.DataFrame:
-        """Prepare PO data - keep all lines without aggregation"""
+        """Prepare PO data"""
         po_df = po_df.copy()
         po_df["source_type"] = "Pending PO"
         
-        # Map eta for PO
+        # eta exists in SQL view
         if 'eta' in po_df.columns:
             po_df["eta"] = pd.to_datetime(po_df["eta"], errors="coerce")
             po_df["date_ref"] = po_df["eta"]
         else:
             po_df["date_ref"] = pd.NaT
+            logger.warning("No eta column in PO data")
             
         if 'pending_standard_arrival_quantity' in po_df.columns:
             po_df["quantity"] = pd.to_numeric(po_df["pending_standard_arrival_quantity"], errors="coerce").fillna(0)
@@ -414,13 +394,10 @@ class DataManager:
         if 'legal_entity' not in po_df.columns:
             po_df["legal_entity"] = ''
             
-        # Use po_line_id as unique identifier instead of just po_number
-        if 'po_line_id' in po_df.columns:
-            # Create unique supply_number by combining po_number and line_id
+        # Create unique supply_number combining po_number and line_id
+        if 'po_line_id' in po_df.columns and 'po_number' in po_df.columns:
             po_df["supply_number"] = po_df["po_number"].astype(str) + "_L" + po_df["po_line_id"].astype(str)
         elif 'po_number' in po_df.columns:
-            # Fallback to just po_number if line_id not available
-            # Add index to make it unique
             po_df["supply_number"] = po_df["po_number"].astype(str) + "_" + po_df.index.astype(str)
         else:
             po_df["supply_number"] = ''
@@ -431,14 +408,12 @@ class DataManager:
             
         return po_df
 
-
-
     def _prepare_wh_transfer_data(self, wht_df: pd.DataFrame, today: pd.Timestamp, exclude_expired: bool) -> pd.DataFrame:
-        """Prepare warehouse transfer data - keep transfer_date"""
+        """Prepare warehouse transfer data"""
         wht_df = wht_df.copy()
         wht_df["source_type"] = "Pending WH Transfer"
         
-        # Keep transfer_date as the primary date
+        # transfer_date exists in SQL view
         if 'transfer_date' in wht_df.columns:
             wht_df["transfer_date"] = pd.to_datetime(wht_df["transfer_date"], errors="coerce")
             wht_df["date_ref"] = wht_df["transfer_date"]
@@ -448,6 +423,7 @@ class DataManager:
             wht_df["days_in_transfer"] = wht_df["days_in_transfer"].fillna(0)
         else:
             wht_df["date_ref"] = pd.NaT
+            logger.warning("No transfer_date column in WH Transfer data")
             
         if 'transfer_quantity' in wht_df.columns:
             wht_df["quantity"] = pd.to_numeric(wht_df["transfer_quantity"], errors="coerce").fillna(0)
@@ -476,14 +452,12 @@ class DataManager:
             if exclude_expired:
                 wht_df = wht_df[(wht_df["expiry_date"].isna()) | (wht_df["expiry_date"] >= today)]
         
-        # Add transfer route info if available
+        # Add transfer route info
         if 'from_warehouse' in wht_df.columns and 'to_warehouse' in wht_df.columns:
             wht_df["transfer_route"] = wht_df["from_warehouse"] + " → " + wht_df["to_warehouse"]
             
         return wht_df
 
-    # Fix for _standardize_supply_df method in DataManager
-    # Replace the existing _standardize_supply_df method with this version:
 
   # utils/data_manager.py - Add this method to DataManager class
 
@@ -498,7 +472,7 @@ class DataManager:
                 df[col] = df[col].astype(str).str.strip()
                 df[col] = df[col].str.replace(r'\s+', ' ', regex=True)
             else:
-                df[col] = ''  # Create column with empty string if not exists
+                df[col] = ''
         
         # UOM and package size
         if 'standard_uom' in df.columns:
@@ -534,23 +508,24 @@ class DataManager:
             "quantity", "value_in_usd"
         ]
         
-        # Add optional columns if they exist - SIMPLIFIED DATE COLUMNS
+        # Add optional columns if they exist - INCLUDING unified_date columns
         optional_cols = [
             "supply_number", "expiry_date", "days_until_expiry", 
             "days_since_arrival", "vendor", "transfer_route", 
             "days_in_transfer", "from_warehouse", "to_warehouse",
-            # Source-specific date columns with {column}_original and {column}_adjusted format
+            # Source-specific date columns with original and adjusted format
             "arrival_date", "arrival_date_original", "arrival_date_adjusted",
             "eta", "eta_original", "eta_adjusted", 
             "transfer_date", "transfer_date_original", "transfer_date_adjusted",
-            "date_ref", "date_ref_original", "date_ref_adjusted",
+            "date_ref_original", "date_ref_adjusted",
+            # Unified date columns for All view - IMPORTANT!
+            "unified_date", "unified_date_adjusted",
             # Keep these for inventory date selection logic
             "receipt_date", "stockin_date", "created_date",
             # PO specific columns
             "po_number", "po_line_id", "buying_quantity", "buying_uom", 
             "purchase_unit_cost", "vendor_name"
         ]
-
         
         # Create final columns list without duplicates
         final_cols = standard_cols.copy()
@@ -559,6 +534,7 @@ class DataManager:
                 final_cols.append(col)
         
         return df[final_cols]
+
 
     def _calculate_insights(self):
         """Calculate key insights from loaded data"""
@@ -802,25 +778,26 @@ class DataManager:
         # Standardize each part BEFORE concatenating
         standardized_parts = []
         for df in df_parts:
-            # Only standardize non-empty dataframes
             if not df.empty and len(df.columns) > 0:
                 standardized_df = self._standardize_supply_df(df)
                 standardized_df = standardized_df.reset_index(drop=True)
                 standardized_parts.append(standardized_df)
         
-        # If no valid parts after standardization, return empty
         if not standardized_parts:
             return pd.DataFrame()
         
-        # Combine all parts with clean indices
-        # Use try-except to handle any edge cases
+        # Combine all parts
         try:
             combined_df = pd.concat(standardized_parts, ignore_index=True, sort=False)
             combined_df = combined_df.reset_index(drop=True)
+            
+            # Create unified date columns if multiple sources
+            if len(sources) > 1:
+                combined_df = self.create_unified_date_columns(combined_df)
+            
             return combined_df
         except Exception as e:
             logger.error(f"Error concatenating supply data: {str(e)}")
-            # If concat fails, try manual combination
             if standardized_parts:
                 result = standardized_parts[0].copy()
                 for df in standardized_parts[1:]:
@@ -828,10 +805,12 @@ class DataManager:
                         result = pd.concat([result, df], ignore_index=True, sort=False)
                     except:
                         continue
+                # Create unified date columns for combined result
+                if len(sources) > 1:
+                    result = self.create_unified_date_columns(result)
                 return result.reset_index(drop=True)
             else:
                 return pd.DataFrame()
-
 
     def get_adjustment_status(self) -> Dict[str, Any]:
         """Get adjustment status from integration layer"""
@@ -953,6 +932,7 @@ class DataManager:
         
         return warnings
 
+
     def clear_cache(self, data_type: str = None):
         """Clear cache for specific data type or all"""
         if data_type:
@@ -971,3 +951,50 @@ class DataManager:
     def set_cache_ttl(self, seconds: int):
         """Set cache time-to-live"""
         self._cache_ttl = seconds
+
+
+    def create_unified_date_columns(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Create unified date columns for All tab display"""
+        if df.empty or 'source_type' not in df.columns:
+            return df
+        
+        # Create unified date columns
+        df['unified_date'] = pd.NaT
+        df['unified_date_adjusted'] = pd.NaT
+        
+        # Map each source to its specific date columns
+        for source_type in df['source_type'].unique():
+            mask = df['source_type'] == source_type
+            
+            if source_type == 'Inventory':
+                if 'date_ref' in df.columns:
+                    df.loc[mask, 'unified_date'] = df.loc[mask, 'date_ref']
+                if 'date_ref_adjusted' in df.columns:
+                    df.loc[mask, 'unified_date_adjusted'] = df.loc[mask, 'date_ref_adjusted']
+                    
+            elif source_type == 'Pending CAN':
+                if 'arrival_date' in df.columns:
+                    df.loc[mask, 'unified_date'] = df.loc[mask, 'arrival_date']
+                if 'arrival_date_adjusted' in df.columns:
+                    df.loc[mask, 'unified_date_adjusted'] = df.loc[mask, 'arrival_date_adjusted']
+                    
+            elif source_type == 'Pending PO':
+                if 'eta' in df.columns:
+                    df.loc[mask, 'unified_date'] = df.loc[mask, 'eta']
+                if 'eta_adjusted' in df.columns:
+                    df.loc[mask, 'unified_date_adjusted'] = df.loc[mask, 'eta_adjusted']
+                    
+            elif source_type == 'Pending WH Transfer':
+                if 'transfer_date' in df.columns:
+                    df.loc[mask, 'unified_date'] = df.loc[mask, 'transfer_date']
+                if 'transfer_date_adjusted' in df.columns:
+                    df.loc[mask, 'unified_date_adjusted'] = df.loc[mask, 'transfer_date_adjusted']
+        
+        # Ensure datetime type
+        df['unified_date'] = pd.to_datetime(df['unified_date'], errors='coerce')
+        df['unified_date_adjusted'] = pd.to_datetime(df['unified_date_adjusted'], errors='coerce')
+        
+        logger.info(f"Created unified date columns: {df['unified_date'].notna().sum()} non-null unified_date, "
+                    f"{df['unified_date_adjusted'].notna().sum()} non-null unified_date_adjusted")
+        
+        return df

@@ -39,6 +39,7 @@ class TimeAdjustmentIntegration:
                 logger.warning("ConflictManager not available")
         return self._conflict_manager
 
+
     def apply_adjustments(self, df: pd.DataFrame, data_source: str) -> pd.DataFrame:
         """Apply time adjustments to dataframe and preserve original dates"""
         if df.empty:
@@ -55,39 +56,33 @@ class TimeAdjustmentIntegration:
             # Create a copy
             result_df = df.copy()
             
-            # Store original dates FIRST
+            # 1. Backup original (chỉ làm 1 lần)
             original_column = f"{date_column}_original"
-            
-            # Insert original column next to the date column
-            try:
-                col_index = result_df.columns.get_loc(date_column)
-                result_df.insert(col_index + 1, original_column, result_df[date_column].copy())
-            except:
-                result_df[original_column] = result_df[date_column].copy()
+            if original_column not in result_df.columns:
+                try:
+                    col_index = result_df.columns.get_loc(date_column)
+                    result_df.insert(col_index + 1, original_column, result_df[date_column].copy())
+                except:
+                    result_df[original_column] = result_df[date_column].copy()
             
             # Ensure datetime type
-            result_df[date_column] = pd.to_datetime(result_df[date_column], errors='coerce')
             result_df[original_column] = pd.to_datetime(result_df[original_column], errors='coerce')
             
-            # Check for rules
-            rules = st.session_state.get('time_adjustment_rules', [])
-            
-            if rules:
-                result_df = self._apply_advanced_adjustments(result_df, data_source, date_column)
-            else:
-                result_df = self._apply_simple_adjustments(result_df, data_source, date_column)
-            
-            # Create adjusted column with correct naming
-            adjusted_column = f"{date_column}_adjusted"  # Keep this format
-            
-            # Insert adjusted column after original
+            # 2. Create adjusted column
+            adjusted_column = f"{date_column}_adjusted"
             try:
                 col_index = result_df.columns.get_loc(original_column)
-                result_df.insert(col_index + 1, adjusted_column, result_df[date_column].copy())
+                result_df.insert(col_index + 1, adjusted_column, result_df[original_column].copy())
             except:
-                result_df[adjusted_column] = result_df[date_column].copy()
+                result_df[adjusted_column] = result_df[original_column].copy()
             
-            # Store metadata
+            # 3. Apply rules to adjusted column only
+            rules = st.session_state.get('time_adjustment_rules', [])
+            if rules:
+                result_df = self._apply_advanced_adjustments(result_df, data_source, adjusted_column)
+            # Skip simple adjustments - không dùng nữa
+            
+            # 4. Store metadata
             self._store_adjustment_metadata(data_source, result_df, date_column)
             
             return result_df
@@ -96,7 +91,8 @@ class TimeAdjustmentIntegration:
             logger.error(f"Error applying adjustments to {data_source}: {str(e)}")
             return df
 
-    def _apply_advanced_adjustments(self, df: pd.DataFrame, data_source: str, date_column: str) -> pd.DataFrame:
+
+    def _apply_advanced_adjustments(self, df: pd.DataFrame, data_source: str, adjusted_column: str) -> pd.DataFrame:
         """Apply advanced time adjustment rules"""
         rules = st.session_state.get('time_adjustment_rules', [])
         
@@ -115,45 +111,20 @@ class TimeAdjustmentIntegration:
         
         # Check for conflicts
         if len(source_rules) > 1:
-            df = self._apply_with_conflict_resolution(df, source_rules, data_source, date_column)
+            df = self._apply_with_conflict_resolution(df, source_rules, data_source, adjusted_column)
         else:
             # Single rule, apply directly
-            df = self._apply_single_rule(df, source_rules[0], date_column)
+            df = self._apply_single_rule(df, source_rules[0], adjusted_column)
         
         return df
-    
-    def _apply_simple_adjustments(self, df: pd.DataFrame, data_source: str, date_column: str) -> pd.DataFrame:
-        """Apply simple offset adjustments from settings"""
-        # Map data sources to setting keys
-        offset_mapping = {
-            'OC': 'time_adjustments.oc_etd_offset',
-            'Forecast': 'time_adjustments.forecast_etd_offset',
-            'Pending CAN': 'time_adjustments.can_arrival_offset',
-            'Pending PO': 'time_adjustments.po_crd_offset',
-            'Pending WH Transfer': 'time_adjustments.wh_transfer_lead_time'
-        }
-        
-        setting_key = offset_mapping.get(data_source)
-        if not setting_key:
-            return df
-        
-        # Get offset from settings
-        key_parts = setting_key.split('.')
-        offset_days = st.session_state.get('business_settings', {}).get(
-            key_parts[0], {}
-        ).get(key_parts[1], 0)
-        
-        if offset_days != 0:
-            # Apply offset with safe date handling
-            try:
-                df[date_column] = pd.to_datetime(df[date_column], errors='coerce') + timedelta(days=offset_days)
-                logger.info(f"Applied simple offset of {offset_days} days to {data_source} {date_column}")
-            except Exception as e:
-                logger.error(f"Error applying simple offset: {str(e)}")
-        
+
+    def _apply_simple_adjustments(self, df: pd.DataFrame, data_source: str, adjusted_column: str) -> pd.DataFrame:
+        """Apply simple offset adjustments from settings - DEPRECATED"""
+        # Không dùng nữa, giữ lại để tránh break code cũ
+        logger.info(f"Simple adjustments called but skipped for {data_source}")
         return df
-    
-    def _apply_single_rule(self, df: pd.DataFrame, rule: Dict[str, Any], date_column: str) -> pd.DataFrame:
+
+    def _apply_single_rule(self, df: pd.DataFrame, rule: Dict[str, Any], adjusted_column: str) -> pd.DataFrame:
         """Apply a single adjustment rule"""
         try:
             # Filter dataframe based on rule filters
@@ -170,19 +141,19 @@ class TimeAdjustmentIntegration:
             if adjustment_type == 'Absolute (Date)':
                 # Set to specific date - this will replace even NULL/missing dates
                 absolute_date = pd.to_datetime(rule.get('absolute_date'))
-                df.loc[mask, date_column] = absolute_date
+                df.loc[mask, adjusted_column] = absolute_date
                 logger.info(f"Set {mask.sum()} records to absolute date {absolute_date}")
             else:
                 # Apply relative offset only to non-null dates
                 offset_days = rule.get('offset_days', 0)
                 if offset_days != 0:
                     # Create a sub-mask for records that have non-null dates
-                    date_series = pd.to_datetime(df.loc[mask, date_column], errors='coerce')
+                    date_series = pd.to_datetime(df.loc[mask, adjusted_column], errors='coerce')
                     non_null_mask = mask & date_series.notna()
                     
                     if non_null_mask.sum() > 0:
                         # Apply offset only to non-null dates
-                        df.loc[non_null_mask, date_column] = date_series[non_null_mask] + timedelta(days=offset_days)
+                        df.loc[non_null_mask, adjusted_column] = date_series[non_null_mask] + timedelta(days=offset_days)
                         logger.info(f"Applied {offset_days} days offset to {non_null_mask.sum()} non-null dates")
                     
                     # Log if some records were skipped due to null dates
@@ -195,14 +166,15 @@ class TimeAdjustmentIntegration:
         except Exception as e:
             logger.error(f"Error applying single rule: {str(e)}")
             return df
-    
+
+
     def _apply_with_conflict_resolution(self, df: pd.DataFrame, rules: List[Dict], 
-                                      data_source: str, date_column: str) -> pd.DataFrame:
+                                    data_source: str, adjusted_column: str) -> pd.DataFrame:
         """Apply multiple rules with conflict resolution using vectorized operations"""
         ConflictManager = self._get_conflict_manager()
         if not ConflictManager:
             # Fallback to first rule if conflict manager not available
-            return self._apply_single_rule(df, rules[0], date_column)
+            return self._apply_single_rule(df, rules[0], adjusted_column)
         
         # Get resolution strategy order
         strategy_order = st.session_state.get('conflict_resolution_order', [
@@ -234,16 +206,16 @@ class TimeAdjustmentIntegration:
                 adjustment_type = rule.get('adjustment_type', 'Relative (Days)')
                 
                 if adjustment_type == 'Absolute (Date)':
-                    df.loc[apply_mask, date_column] = pd.to_datetime(rule.get('absolute_date'))
+                    df.loc[apply_mask, adjusted_column] = pd.to_datetime(rule.get('absolute_date'))
                 else:
                     offset_days = rule.get('offset_days', 0)
                     if offset_days != 0:
                         # Only apply to non-null dates for relative adjustments
-                        date_series = pd.to_datetime(df.loc[apply_mask, date_column], errors='coerce')
+                        date_series = pd.to_datetime(df.loc[apply_mask, adjusted_column], errors='coerce')
                         non_null_mask = apply_mask & date_series.notna()
                         
                         if non_null_mask.sum() > 0:
-                            df.loc[non_null_mask, date_column] = date_series[non_null_mask] + timedelta(days=offset_days)
+                            df.loc[non_null_mask, adjusted_column] = date_series[non_null_mask] + timedelta(days=offset_days)
         
         # Handle conflicting rows (if any)
         if conflict_mask.sum() > 0:
@@ -261,25 +233,27 @@ class TimeAdjustmentIntegration:
                         matching_rules.append((priority, rule))
                 
                 if matching_rules:
-                    # Sort by priority (lower number = higher priority)
-                    matching_rules.sort(key=lambda x: x[0])
+                    # Sort by priority (higher number = higher priority)
+                    matching_rules.sort(key=lambda x: x[0], reverse=True)
                     winning_rule = matching_rules[0][1]
                     
                     # Apply winning rule
                     adjustment_type = winning_rule.get('adjustment_type', 'Relative (Days)')
                     
                     if adjustment_type == 'Absolute (Date)':
-                        df.at[idx, date_column] = pd.to_datetime(winning_rule.get('absolute_date'))
+                        df.at[idx, adjusted_column] = pd.to_datetime(winning_rule.get('absolute_date'))
                     else:
                         offset_days = winning_rule.get('offset_days', 0)
                         if offset_days != 0:
-                            current_date = pd.to_datetime(df.at[idx, date_column], errors='coerce')
+                            current_date = pd.to_datetime(df.at[idx, adjusted_column], errors='coerce')
                             if pd.notna(current_date):
-                                df.at[idx, date_column] = current_date + timedelta(days=offset_days)
+                                df.at[idx, adjusted_column] = current_date + timedelta(days=offset_days)
                             # If current_date is NaT/null, skip for relative adjustment
         
         return df
-    
+
+
+
     def _create_filter_mask(self, df: pd.DataFrame, rule: Dict[str, Any]) -> pd.Series:
         """Create boolean mask based on rule filters"""
         mask = pd.Series(True, index=df.index)

@@ -100,18 +100,9 @@ def select_supply_source() -> Tuple[str, bool]:
 # === Helper Functions ===
 def get_supply_date_column(df: pd.DataFrame, source_type: str, use_adjusted_dates: bool) -> str:
     """Get appropriate date column for supply based on source type"""
-    # For inventory, try to find a meaningful date column
-    if source_type == 'Inventory':
-        # Check for receipt/stockin dates first
-        possible_date_cols = ['receipt_date', 'stockin_date', 'created_date', 'last_updated']
-        for col in possible_date_cols:
-            if col in df.columns and df[col].notna().any():
-                return DateModeComponent.get_date_column_for_display(df, col, use_adjusted_dates)
-        # Fallback to date_ref
-        return DateModeComponent.get_date_column_for_display(df, 'date_ref', use_adjusted_dates)
-    
-    # Map other source types to their primary date columns
+    # Map source types to their primary date columns
     date_mapping = {
+        'Inventory': 'date_ref',  # Always TODAY for inventory
         'Pending CAN': 'arrival_date',
         'Pending PO': 'eta',
         'Pending WH Transfer': 'transfer_date'
@@ -119,7 +110,6 @@ def get_supply_date_column(df: pd.DataFrame, source_type: str, use_adjusted_date
     
     base_column = date_mapping.get(source_type, 'date_ref')
     return DateModeComponent.get_date_column_for_display(df, base_column, use_adjusted_dates)
-
 
 
 # === Data Loading Functions ===
@@ -184,11 +174,21 @@ def apply_supply_filters(df: pd.DataFrame, use_adjusted_dates: bool = True) -> T
     else:
         return apply_standard_supply_filters(df, use_adjusted_dates)
 
+
 def apply_standard_supply_filters(df: pd.DataFrame, use_adjusted_dates: bool = True) -> Tuple[pd.DataFrame, date, date, Dict]:
     """Standard independent filters for supply"""
     with st.expander("📎 Filters", expanded=True):
-        # For filtering, we'll use date_ref as it should be populated for all sources
+
+        # Always use date_ref for filtering (it's unified for All tab)
         date_column = DateModeComponent.get_date_column_for_display(df, 'date_ref', use_adjusted_dates)
+
+        # For filtering, use appropriate date column based on what's available
+        if "unified_date" in df.columns:
+            # For "All" view, use unified_date
+            date_column = DateModeComponent.get_date_column_for_display(df, 'unified_date', use_adjusted_dates)
+        else:
+            # For single source, use date_ref
+            date_column = DateModeComponent.get_date_column_for_display(df, 'date_ref', use_adjusted_dates)
         
         # Row 1: Entity, Product, Brand
         col1, col2, col3 = st.columns(3)
@@ -304,7 +304,7 @@ def apply_standard_supply_filters(df: pd.DataFrame, use_adjusted_dates: bool = T
         st.markdown("#### 📅 Date Range")
         col_date1, col_date2 = st.columns(2)
         
-        # Get date range from date_ref
+        # Get date range from appropriate column
         if date_column in df.columns:
             dates = pd.to_datetime(df[date_column], errors='coerce').dropna()
             min_date = dates.min().date() if len(dates) > 0 else date.today()
@@ -353,7 +353,7 @@ def apply_standard_supply_filters(df: pd.DataFrame, use_adjusted_dates: bool = T
     if filters.get('from_warehouse'):
         filtered_df = filtered_df[filtered_df['from_warehouse'].isin(filters['from_warehouse'])]
     
-    # Apply date filter on date_ref
+    # Apply date filter on appropriate column
     if date_column in filtered_df.columns:
         filtered_df[date_column] = pd.to_datetime(filtered_df[date_column], errors='coerce')
         filtered_df = filtered_df[
@@ -384,17 +384,29 @@ def apply_standard_supply_filters(df: pd.DataFrame, use_adjusted_dates: bool = T
     
     return filtered_df, start_date, end_date, filter_params
 
+
 def apply_smart_supply_filters(df: pd.DataFrame, use_adjusted_dates: bool, 
                              filter_manager: SmartFilterManager) -> Tuple[pd.DataFrame, date, date, Dict]:
     """Apply smart interactive filters to supply dataframe"""
     try:
-        # Use date_ref for filtering purposes
-        date_column = DateModeComponent.get_date_column_for_display(df, 'date_ref', use_adjusted_dates)
+        # Use appropriate date column
+        if "unified_date" in df.columns:
+            # For "All" view, use unified_date
+            date_column = DateModeComponent.get_date_column_for_display(df, 'unified_date', use_adjusted_dates)
+        else:
+            # For single source, use date_ref
+            date_column = DateModeComponent.get_date_column_for_display(df, 'date_ref', use_adjusted_dates)
         
         # Validate date column exists
         if date_column not in df.columns:
-            st.warning(f"Date column '{date_column}' not found. Using 'date_ref' as fallback.")
-            date_column = 'date_ref' if 'date_ref' in df.columns else df.columns[0]
+            st.warning(f"Date column '{date_column}' not found.")
+            # Fallback logic
+            if "unified_date" in df.columns:
+                date_column = "unified_date"
+            elif "date_ref" in df.columns:
+                date_column = "date_ref"
+            else:
+                date_column = df.columns[0]
         
         # Configure filters based on available columns
         filter_config = {}
@@ -472,6 +484,10 @@ def apply_smart_supply_filters(df: pd.DataFrame, use_adjusted_dates: bool,
                 date_column=date_column
             )
         
+        # Validate filter result
+        if not isinstance(filters_result, dict):
+            raise ValueError(f"Invalid filter result type: {type(filters_result)}")
+        
         # Extract components
         selections = filters_result.get('selections', {})
         date_filters = filters_result.get('date_filters', {})
@@ -483,10 +499,18 @@ def apply_smart_supply_filters(df: pd.DataFrame, use_adjusted_dates: bool,
         start_date = date_filters.get('start_date', datetime.today().date())
         end_date = date_filters.get('end_date', datetime.today().date())
         
+        # Validate dates
+        if isinstance(start_date, str):
+            start_date = pd.to_datetime(start_date).date()
+        if isinstance(end_date, str):
+            end_date = pd.to_datetime(end_date).date()
+        
         # Additional supply-specific filters
         filter_params = {}
         
         # Expiry warning filter
+        st.markdown("#### 🏭 Supply-Specific Filters")
+        
         if "days_until_expiry" in df.columns:
             col1, col2, col3 = st.columns(3)
             with col1:
@@ -506,15 +530,31 @@ def apply_smart_supply_filters(df: pd.DataFrame, use_adjusted_dates: bool,
                         (filtered_df["days_until_expiry"] <= filter_params['expiry_warning_days']) &
                         (filtered_df["days_until_expiry"] >= 0)
                     ]
+                    filter_params['only_expiring'] = True
+                else:
+                    filter_params['only_expiring'] = False
         
-        # Stock status filter
-        if "quantity" in filtered_df.columns:
+            # Stock status filter
             with col3:
+                if "quantity" in filtered_df.columns:
+                    min_stock = st.number_input(
+                        "Minimum stock quantity",
+                        min_value=0,
+                        value=0,
+                        key="supply_min_stock_smart",
+                        help="Filter by minimum stock level"
+                    )
+                    if min_stock > 0:
+                        filtered_df = filtered_df[filtered_df["quantity"] >= min_stock]
+                    filter_params['min_stock'] = min_stock
+        else:
+            # If no expiry column, still check for quantity filter
+            if "quantity" in filtered_df.columns:
                 min_stock = st.number_input(
                     "Minimum stock quantity",
                     min_value=0,
                     value=0,
-                    key="supply_min_stock_smart",
+                    key="supply_min_stock_smart_alt",
                     help="Filter by minimum stock level"
                 )
                 if min_stock > 0:
@@ -528,6 +568,11 @@ def apply_smart_supply_filters(df: pd.DataFrame, use_adjusted_dates: bool,
                 st.info(f"🔍 Filtered: {len(df):,} → {len(filtered_df):,} records")
             with col2:
                 active_count = sum(1 for v in selections.values() if v)
+                # Add supply-specific filters to count
+                if filter_params.get('only_expiring'):
+                    active_count += 1
+                if filter_params.get('min_stock', 0) > 0:
+                    active_count += 1
                 if active_count > 0:
                     st.success(f"✅ {active_count} filters active")
             with col3:
@@ -541,8 +586,9 @@ def apply_smart_supply_filters(df: pd.DataFrame, use_adjusted_dates: bool,
         st.error(f"⚠️ Smart filters error: {str(e)}")
         st.info("💡 Please switch to Standard Filters mode")
         
-        # Return original data
+        # Return original data with default values
         return df, date.today(), date.today(), {}
+
 
 # === Display Functions ===
 def show_supply_summary(filtered_df: pd.DataFrame, filter_params: Dict, use_adjusted_dates: bool = True):
@@ -848,8 +894,13 @@ def display_supply_detail_for_source(df: pd.DataFrame, source_label: str,
         DisplayComponents.show_no_data_message(f"No {source_label} data available")
         return
     
-    # Get date columns for this source
+    # Get date columns for this source - IMPORTANT: This will include unified dates for All tab
     date_columns_added = get_date_columns_for_source(df, source_label)
+    
+    # Debug info
+    if st.session_state.get('supply_debug_mode', False):
+        st.write(f"🐛 Date columns for {source_label}: {date_columns_added}")
+        st.write(f"🐛 Available columns: {[col for col in date_columns_added if col in df.columns]}")
     
     # Use DisplayComponents for detail table
     DisplayComponents.render_detail_table_with_filter(
@@ -862,38 +913,52 @@ def display_supply_detail_for_source(df: pd.DataFrame, source_label: str,
         key_prefix=f"supply_{source_label.lower().replace(' ', '_')}"
     )
 
-
 def get_date_columns_for_source(df: pd.DataFrame, source_type: str) -> List[str]:
-    """Get appropriate date columns for a source type - ONLY ORIGINAL AND ADJUSTED"""
+    """Get appropriate date columns for a source type - ALWAYS SHOW BOTH ORIGINAL AND ADJUSTED"""
     date_columns = []
     
-    # Map source types to their primary date column
-    date_mapping = {
-        "All": "date_ref",
-        "Inventory": "date_ref", 
-        "Pending CAN": "arrival_date",
-        "Pending PO": "eta",
-        "Pending WH Transfer": "transfer_date"
-    }
-    
-    base_col = date_mapping.get(source_type, "date_ref")
-    
-    # Add original column (keep original name)
-    if base_col in df.columns:
-        date_columns.append(base_col)
-    
-    # Add adjusted column with {column}_adjusted format
-    adjusted_col = f"{base_col}_adjusted"
-    if adjusted_col in df.columns:
-        date_columns.append(adjusted_col)
+    if source_type == "All":
+        # For All tab, always show unified_date and unified_date_adjusted
+        if "unified_date" in df.columns:
+            date_columns.append("unified_date")
+        if "unified_date_adjusted" in df.columns:
+            date_columns.append("unified_date_adjusted")
+            
+        # If unified columns don't exist, fall back to showing all available date columns
+        if not date_columns:
+            # Check for any date columns
+            possible_dates = ["date_ref", "arrival_date", "eta", "transfer_date"]
+            for date_col in possible_dates:
+                if date_col in df.columns:
+                    date_columns.append(date_col)
+                if f"{date_col}_adjusted" in df.columns:
+                    date_columns.append(f"{date_col}_adjusted")
+    else:
+        # Map source types to their primary date column
+        date_mapping = {
+            "Inventory": "date_ref", 
+            "Pending CAN": "arrival_date",
+            "Pending PO": "eta",
+            "Pending WH Transfer": "transfer_date"
+        }
+        
+        base_col = date_mapping.get(source_type, "date_ref")
+        
+        # Always add both original and adjusted columns if they exist
+        if base_col in df.columns:
+            date_columns.append(base_col)
+        
+        # Add adjusted column
+        adjusted_col = f"{base_col}_adjusted"
+        if adjusted_col in df.columns:
+            date_columns.append(adjusted_col)
     
     return date_columns
 
 
-
 def apply_supply_detail_filter(display_df: pd.DataFrame, filter_option: str, 
                              date_columns: List[str]) -> pd.DataFrame:
-    """Apply filter to supply detail dataframe - UPDATED FOR NEW DATE COLUMNS"""
+    """Apply filter to supply detail dataframe - UPDATED FOR UNIFIED DATES"""
     if filter_option == "Show All":
         return prepare_supply_detail_display(display_df)
     
@@ -902,41 +967,73 @@ def apply_supply_detail_filter(display_df: pd.DataFrame, filter_option: str,
     # Initialize filter mask
     filter_mask = pd.Series([False] * len(display_df), index=display_df.index)
     
-    # Get base date column (first one without adjusted_ prefix)
-    base_date_col = None
-    adjusted_date_col = None
+    # Check if we're in "All" view by looking for unified_date columns
+    is_all_view = "unified_date" in display_df.columns or "unified_date_adjusted" in display_df.columns
     
-    for col in date_columns:
-        if '_adjusted' in col:
-            adjusted_date_col = col
-        else:
-            base_date_col = col
-    
-    if filter_option == "Show Missing Original Date Only":
-        if base_date_col and base_date_col in display_df.columns:
-            date_series = pd.to_datetime(display_df[base_date_col], errors='coerce')
-            filter_mask = date_series.isna()
-    
-    elif filter_option == "Show Past Original Date Only":
-        if base_date_col and base_date_col in display_df.columns:
-            date_series = pd.to_datetime(display_df[base_date_col], errors='coerce')
-            filter_mask = date_series.notna() & (date_series < today)
-    
-    elif filter_option == "Show Missing Adjusted Date Only":
-        if adjusted_date_col and adjusted_date_col in display_df.columns:
-            date_series = pd.to_datetime(display_df[adjusted_date_col], errors='coerce')
-            filter_mask = date_series.isna()
-        else:
-            st.warning("Adjusted date column not available")
-            return pd.DataFrame()
-            
-    elif filter_option == "Show Past Adjusted Date Only":
-        if adjusted_date_col and adjusted_date_col in display_df.columns:
-            date_series = pd.to_datetime(display_df[adjusted_date_col], errors='coerce')
-            filter_mask = date_series.notna() & (date_series < today)
-        else:
-            st.warning("Adjusted date column not available")
-            return pd.DataFrame()
+    if is_all_view:
+        # For All tab - use unified date columns
+        if filter_option == "Show Missing Original Date Only":
+            if "unified_date" in display_df.columns:
+                date_series = pd.to_datetime(display_df["unified_date"], errors='coerce')
+                filter_mask = date_series.isna()
+        
+        elif filter_option == "Show Past Original Date Only":
+            if "unified_date" in display_df.columns:
+                date_series = pd.to_datetime(display_df["unified_date"], errors='coerce')
+                filter_mask = date_series.notna() & (date_series < today)
+        
+        elif filter_option == "Show Missing Adjusted Date Only":
+            if "unified_date_adjusted" in display_df.columns:
+                date_series = pd.to_datetime(display_df["unified_date_adjusted"], errors='coerce')
+                filter_mask = date_series.isna()
+            else:
+                st.warning("Adjusted date column not available")
+                return pd.DataFrame()
+                
+        elif filter_option == "Show Past Adjusted Date Only":
+            if "unified_date_adjusted" in display_df.columns:
+                date_series = pd.to_datetime(display_df["unified_date_adjusted"], errors='coerce')
+                filter_mask = date_series.notna() & (date_series < today)
+            else:
+                st.warning("Adjusted date column not available")
+                return pd.DataFrame()
+    else:
+        # For source-specific tabs - use source-specific date columns
+        # Get base date column (first one without adjusted suffix)
+        base_date_col = None
+        adjusted_date_col = None
+        
+        for col in date_columns:
+            if '_adjusted' in col:
+                adjusted_date_col = col
+            elif '_original' not in col:  # Skip _original columns
+                base_date_col = col
+        
+        if filter_option == "Show Missing Original Date Only":
+            if base_date_col and base_date_col in display_df.columns:
+                date_series = pd.to_datetime(display_df[base_date_col], errors='coerce')
+                filter_mask = date_series.isna()
+        
+        elif filter_option == "Show Past Original Date Only":
+            if base_date_col and base_date_col in display_df.columns:
+                date_series = pd.to_datetime(display_df[base_date_col], errors='coerce')
+                filter_mask = date_series.notna() & (date_series < today)
+        
+        elif filter_option == "Show Missing Adjusted Date Only":
+            if adjusted_date_col and adjusted_date_col in display_df.columns:
+                date_series = pd.to_datetime(display_df[adjusted_date_col], errors='coerce')
+                filter_mask = date_series.isna()
+            else:
+                st.warning("Adjusted date column not available")
+                return pd.DataFrame()
+                
+        elif filter_option == "Show Past Adjusted Date Only":
+            if adjusted_date_col and adjusted_date_col in display_df.columns:
+                date_series = pd.to_datetime(display_df[adjusted_date_col], errors='coerce')
+                filter_mask = date_series.notna() & (date_series < today)
+            else:
+                st.warning("Adjusted date column not available")
+                return pd.DataFrame()
     
     # Apply the filter
     if filter_mask.any():
@@ -945,7 +1042,6 @@ def apply_supply_detail_filter(display_df: pd.DataFrame, filter_option: str,
         display_df = pd.DataFrame()
     
     return prepare_supply_detail_display(display_df)
-
 
 
 # === Additional utility function to ensure data integrity ===
@@ -977,9 +1073,15 @@ def prepare_supply_detail_display(display_df: pd.DataFrame) -> pd.DataFrame:
     if source_type == "All":
         base_columns.insert(0, "source_type")
     
-    # Add date columns - ONLY ORIGINAL AND ADJUSTED
+    # Add date columns based on source type
     date_columns = get_date_columns_for_source(display_df, source_type)
-    base_columns.extend(date_columns)
+    
+    # Insert date columns after standard_uom but before quantity
+    insert_index = base_columns.index("standard_uom") + 1
+    for date_col in date_columns:
+        if date_col in display_df.columns:
+            base_columns.insert(insert_index, date_col)
+            insert_index += 1
     
     # Add remaining standard columns
     base_columns.extend(["quantity", "value_in_usd", "legal_entity"])
@@ -1024,19 +1126,28 @@ def prepare_supply_detail_display(display_df: pd.DataFrame) -> pd.DataFrame:
     
     # Sort by appropriate columns
     sort_columns = []
+    
+    # For All view, sort by source_type first
+    if source_type == "All" and "source_type" in display_df.columns:
+        sort_columns.append("source_type")
+    
+    # Sort by PO number if available
     if "po_number" in display_df.columns:
         sort_columns.append("po_number")
     
-    # Use adjusted date for sorting if available
+    # Sort by appropriate date column
     for col in date_columns:
-        if 'adjusted_' in col and col in display_df.columns:
+        if col in display_df.columns and 'adjusted' in col:
             sort_columns.append(col)
             break
     else:
-        # Fallback to original date
-        if date_columns and date_columns[0] in display_df.columns:
-            sort_columns.append(date_columns[0])
+        # Fallback to original date if no adjusted found
+        for col in date_columns:
+            if col in display_df.columns:
+                sort_columns.append(col)
+                break
     
+    # Add product code as final sort
     if "pt_code" in display_df.columns:
         sort_columns.append("pt_code")
     
@@ -1070,14 +1181,16 @@ def format_supply_display_df_enhanced(df: pd.DataFrame, date_columns: List[str])
             else:
                 return str(x)
         
-        # Apply to all date columns
+        # Apply to all date columns including unified dates
         for date_col in date_columns:
             if date_col in df.columns:
                 df[date_col] = df[date_col].apply(format_date_with_status)
         
-        # Also format date_ref if it's not in date_columns
-        if "date_ref" in df.columns and "date_ref" not in date_columns:
-            df["date_ref"] = df["date_ref"].apply(format_date_with_status)
+        # Also check for unified_date columns if not in date_columns
+        if "unified_date" in df.columns and "unified_date" not in date_columns:
+            df["unified_date"] = df["unified_date"].apply(format_date_with_status)
+        if "unified_date_adjusted" in df.columns and "unified_date_adjusted" not in date_columns:
+            df["unified_date_adjusted"] = df["unified_date_adjusted"].apply(format_date_with_status)
         
         # Format expiry date
         if "expiry_date" in df.columns:
@@ -1134,6 +1247,7 @@ def format_supply_display_df_enhanced(df: pd.DataFrame, date_columns: List[str])
         logger.error(f"Error formatting display dataframe: {str(e)}")
     
     return df
+
 
 def highlight_supply_issues_enhanced(row: pd.Series, date_columns: List[str]) -> List[str]:
     """Enhanced highlighting for supply issues with proper priority"""
@@ -1214,97 +1328,88 @@ def show_supply_grouped_view(filtered_df: pd.DataFrame, start_date: date,
         # Reset index to avoid duplicate issues
         df_summary = filtered_df.reset_index(drop=True).copy()
         
-        # Create grouping date column safely
+        # Create grouping date column
         df_summary["grouping_date"] = pd.NaT
         
-        # Process each source type using index-based assignment
-        for source_type in df_summary['source_type'].unique():
-            source_indices = df_summary.index[df_summary['source_type'] == source_type]
+        # Check if this is "All" view with unified dates
+        if "unified_date" in df_summary.columns and df_summary["unified_date"].notna().any():
+            # Use unified date for grouping in "All" view
+            if use_adjusted_dates and "unified_date_adjusted" in df_summary.columns:
+                df_summary["grouping_date"] = pd.to_datetime(df_summary["unified_date_adjusted"], errors='coerce')
+            else:
+                df_summary["grouping_date"] = pd.to_datetime(df_summary["unified_date"], errors='coerce')
             
-            if source_type == 'Inventory':
-                # Try different date columns in order
-                for col in ['receipt_date', 'stockin_date', 'created_date', 'date_ref']:
-                    if col in df_summary.columns:
+            if debug_mode:
+                non_null_count = df_summary["grouping_date"].notna().sum()
+                st.write(f"🐛 Using unified dates for grouping: {non_null_count} non-null dates")
+        else:
+            # Process each source type using specific dates
+            for source_type in df_summary['source_type'].unique():
+                source_indices = df_summary.index[df_summary['source_type'] == source_type]
+                
+                if source_type == 'Inventory':
+                    # Inventory is always available NOW
+                    df_summary.loc[source_indices, "grouping_date"] = pd.Timestamp.now().normalize()
+                                
+                elif source_type == 'Pending CAN':
+                    if use_adjusted_dates and 'arrival_date_adjusted' in df_summary.columns:
                         valid_indices = df_summary.index[
                             (df_summary['source_type'] == source_type) & 
-                            df_summary[col].notna()
+                            df_summary['arrival_date_adjusted'].notna()
                         ]
                         if len(valid_indices) > 0:
                             df_summary.loc[valid_indices, "grouping_date"] = pd.to_datetime(
-                                df_summary.loc[valid_indices, col]
+                                df_summary.loc[valid_indices, 'arrival_date_adjusted'], errors='coerce'
                             )
-                            break
-                            
-            elif source_type == 'Pending CAN':
-                if 'arrival_date' in df_summary.columns:
-                    valid_indices = df_summary.index[
-                        (df_summary['source_type'] == source_type) & 
-                        df_summary['arrival_date'].notna()
-                    ]
-                    if len(valid_indices) > 0:
-                        df_summary.loc[valid_indices, "grouping_date"] = pd.to_datetime(
-                            df_summary.loc[valid_indices, 'arrival_date']
-                        )
-                elif 'date_ref' in df_summary.columns:
-                    valid_indices = df_summary.index[
-                        (df_summary['source_type'] == source_type) & 
-                        df_summary['date_ref'].notna()
-                    ]
-                    if len(valid_indices) > 0:
-                        df_summary.loc[valid_indices, "grouping_date"] = pd.to_datetime(
-                            df_summary.loc[valid_indices, 'date_ref']
-                        )
-                    
-            elif source_type == 'Pending PO':
-                if 'eta' in df_summary.columns:
-                    valid_indices = df_summary.index[
-                        (df_summary['source_type'] == source_type) & 
-                        df_summary['eta'].notna()
-                    ]
-                    if len(valid_indices) > 0:
-                        df_summary.loc[valid_indices, "grouping_date"] = pd.to_datetime(
-                            df_summary.loc[valid_indices, 'eta']
-                        )
-                elif 'date_ref' in df_summary.columns:
-                    valid_indices = df_summary.index[
-                        (df_summary['source_type'] == source_type) & 
-                        df_summary['date_ref'].notna()
-                    ]
-                    if len(valid_indices) > 0:
-                        df_summary.loc[valid_indices, "grouping_date"] = pd.to_datetime(
-                            df_summary.loc[valid_indices, 'date_ref']
-                        )
-                    
-            elif source_type == 'Pending WH Transfer':
-                if 'transfer_date' in df_summary.columns:
-                    valid_indices = df_summary.index[
-                        (df_summary['source_type'] == source_type) & 
-                        df_summary['transfer_date'].notna()
-                    ]
-                    if len(valid_indices) > 0:
-                        df_summary.loc[valid_indices, "grouping_date"] = pd.to_datetime(
-                            df_summary.loc[valid_indices, 'transfer_date']
-                        )
-                elif 'date_ref' in df_summary.columns:
-                    valid_indices = df_summary.index[
-                        (df_summary['source_type'] == source_type) & 
-                        df_summary['date_ref'].notna()
-                    ]
-                    if len(valid_indices) > 0:
-                        df_summary.loc[valid_indices, "grouping_date"] = pd.to_datetime(
-                            df_summary.loc[valid_indices, 'date_ref']
-                        )
-            else:
-                # Default case
-                if 'date_ref' in df_summary.columns:
-                    valid_indices = df_summary.index[
-                        (df_summary['source_type'] == source_type) & 
-                        df_summary['date_ref'].notna()
-                    ]
-                    if len(valid_indices) > 0:
-                        df_summary.loc[valid_indices, "grouping_date"] = pd.to_datetime(
-                            df_summary.loc[valid_indices, 'date_ref']
-                        )
+                    elif 'arrival_date' in df_summary.columns:
+                        valid_indices = df_summary.index[
+                            (df_summary['source_type'] == source_type) & 
+                            df_summary['arrival_date'].notna()
+                        ]
+                        if len(valid_indices) > 0:
+                            df_summary.loc[valid_indices, "grouping_date"] = pd.to_datetime(
+                                df_summary.loc[valid_indices, 'arrival_date'], errors='coerce'
+                            )
+                        
+                elif source_type == 'Pending PO':
+                    if use_adjusted_dates and 'eta_adjusted' in df_summary.columns:
+                        valid_indices = df_summary.index[
+                            (df_summary['source_type'] == source_type) & 
+                            df_summary['eta_adjusted'].notna()
+                        ]
+                        if len(valid_indices) > 0:
+                            df_summary.loc[valid_indices, "grouping_date"] = pd.to_datetime(
+                                df_summary.loc[valid_indices, 'eta_adjusted'], errors='coerce'
+                            )
+                    elif 'eta' in df_summary.columns:
+                        valid_indices = df_summary.index[
+                            (df_summary['source_type'] == source_type) & 
+                            df_summary['eta'].notna()
+                        ]
+                        if len(valid_indices) > 0:
+                            df_summary.loc[valid_indices, "grouping_date"] = pd.to_datetime(
+                                df_summary.loc[valid_indices, 'eta'], errors='coerce'
+                            )
+                        
+                elif source_type == 'Pending WH Transfer':
+                    if use_adjusted_dates and 'transfer_date_adjusted' in df_summary.columns:
+                        valid_indices = df_summary.index[
+                            (df_summary['source_type'] == source_type) & 
+                            df_summary['transfer_date_adjusted'].notna()
+                        ]
+                        if len(valid_indices) > 0:
+                            df_summary.loc[valid_indices, "grouping_date"] = pd.to_datetime(
+                                df_summary.loc[valid_indices, 'transfer_date_adjusted'], errors='coerce'
+                            )
+                    elif 'transfer_date' in df_summary.columns:
+                        valid_indices = df_summary.index[
+                            (df_summary['source_type'] == source_type) & 
+                            df_summary['transfer_date'].notna()
+                        ]
+                        if len(valid_indices) > 0:
+                            df_summary.loc[valid_indices, "grouping_date"] = pd.to_datetime(
+                                df_summary.loc[valid_indices, 'transfer_date'], errors='coerce'
+                            )
         
         # Filter out rows with missing grouping dates
         df_summary = df_summary[df_summary["grouping_date"].notna()].copy()
@@ -1326,7 +1431,8 @@ def show_supply_grouped_view(filtered_df: pd.DataFrame, start_date: date,
                 "Period distribution by source": {
                     source: df_summary[df_summary['source_type'] == source]['period'].nunique()
                     for source in df_summary['source_type'].unique()
-                }
+                },
+                "Sample periods": df_summary['period'].value_counts().head(5).to_dict()
             }
             DisplayComponents.show_debug_info(debug_info)
         
@@ -1350,20 +1456,31 @@ def show_supply_grouped_view(filtered_df: pd.DataFrame, start_date: date,
                     else:
                         DisplayComponents.show_no_data_message(f"No data for {source}")
         else:
-            display_supply_pivot(df_summary, period, show_only_nonzero, "All Sources")
+            # Single source
+            display_supply_pivot(df_summary, period, show_only_nonzero, source_types[0] if source_types else "All Sources")
             
     except Exception as e:
-        logger.error(f"Error showing grouped view: {str(e)}")
+        logger.error(f"Error showing grouped view: {str(e)}", exc_info=True)
         st.error(f"Error displaying grouped view: {str(e)}")
         
-        # Show debug information
+        # Show debug information on error
         if debug_mode:
-            st.write("Debug - DataFrame columns:", list(filtered_df.columns))
-            st.write("Debug - Source types:", filtered_df['source_type'].unique() if 'source_type' in filtered_df.columns else "No source_type column")
-            if 'eta' in filtered_df.columns:
-                st.write("Debug - ETA column type:", filtered_df['eta'].dtype)
-                st.write("Debug - Sample ETA values:", filtered_df['eta'].head())
-
+            st.write("Debug - Error Details:")
+            st.write(f"- DataFrame shape: {filtered_df.shape}")
+            st.write(f"- DataFrame columns: {list(filtered_df.columns)}")
+            st.write(f"- Source types: {filtered_df['source_type'].unique() if 'source_type' in filtered_df.columns else 'No source_type column'}")
+            
+            # Check date columns
+            date_cols = [col for col in filtered_df.columns if any(x in col.lower() for x in ['date', 'eta', 'arrival', 'transfer'])]
+            st.write(f"- Date columns found: {date_cols}")
+            
+            # Sample data
+            if not filtered_df.empty:
+                st.write("- Sample data (first 5 rows):")
+                display_cols = ['source_type', 'pt_code'] + date_cols[:3]
+                display_cols = [col for col in display_cols if col in filtered_df.columns]
+                if display_cols:
+                    st.dataframe(filtered_df[display_cols].head())
 
 def display_supply_pivot(df_summary: pd.DataFrame, period: str, show_only_nonzero: bool, title: str):
     """Display supply pivot table with past period indicators - using helper functions"""
@@ -1627,11 +1744,21 @@ def main():
         - **Original Dates**: Uses raw dates from source data
         - Each supply source may have different date adjustments
         
-        **Data Sources:**
-        - **Inventory**: Current stock with expiry tracking
-        - **Pending CAN**: Arrived but not stocked (arrival_date)
-        - **Pending PO**: In transit (eta)
-        - **Pending WH Transfer**: Between warehouses (transfer_date)
+        **Date References by Source:**
+        - **Inventory**: Default TODAY (current availability)
+        - Can be adjusted for planning scenarios
+        - Useful for simulating delayed availability
+        - **Pending CAN**: arrival_date (when goods arrived)
+        - **Pending PO**: eta (estimated time of arrival)
+        - **Pending WH Transfer**: transfer_date (when transfer initiated)
+
+        **Inventory Date Adjustments:**
+        While inventory typically represents immediate availability (TODAY),
+        adjustments can be useful for:
+        - Scenario planning and what-if analysis
+        - Modeling inventory constraints or holds
+        - Planning for ownership transfers
+        - Testing different GAP analysis scenarios
         
         **Date References by Source:**
         - Each source type uses its specific date column
