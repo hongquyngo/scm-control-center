@@ -33,6 +33,8 @@ from utils.db import get_db_engine
 from utils.smart_filter_manager import SmartFilterManager
 from utils.date_mode_component import DateModeComponent
 
+from typing import Tuple, Dict, Any, Optional, List
+
 # Configure logging
 logger = logging.getLogger(__name__)
 
@@ -111,6 +113,31 @@ def get_supply_date_column(df, source_type, use_adjusted):
     }
     base_column = date_mapping.get(source_type, 'date_ref')
     return DateModeComponent.get_date_column_for_display(df, base_column, use_adjusted)
+
+
+# ADD this function sau function get_supply_date_column
+
+def get_supply_date_column_for_gap(df, source_type, use_adjusted):
+    """Get supply date column - handle unified dates for All view in GAP"""
+    # Check if this is combined data with unified dates
+    if 'unified_date' in df.columns and 'source_type' in df.columns and len(df['source_type'].unique()) > 1:
+        if use_adjusted and 'unified_date_adjusted' in df.columns:
+            return 'unified_date_adjusted'
+        else:
+            return 'unified_date'
+    
+    # Otherwise use source-specific dates
+    date_mapping = {
+        'Inventory': 'date_ref',
+        'Pending CAN': 'arrival_date', 
+        'Pending PO': 'eta',
+        'Pending WH Transfer': 'transfer_date'
+    }
+    base_column = date_mapping.get(source_type, 'date_ref')
+    return DateModeComponent.get_date_column_for_display(df, base_column, use_adjusted)
+
+
+
 
 # === Data Loading Functions ===
 def load_and_prepare_demand_data(selected_demand_sources, include_converted):
@@ -1146,6 +1173,35 @@ def calculate_gap_with_carry_forward(df_demand, df_supply, period_type="Weekly",
         st.write(f"- Rows with shortage: {len(gap_df[gap_df['gap_quantity'] < 0])}")
     
     return gap_df
+
+# REPLACE phần xử lý supply period conversion trong calculate_gap_with_carry_forward
+# Tìm comment "# For supply, handle different date columns per source type" và replace đoạn code sau nó
+
+    # For supply, handle different date columns per source type
+    if 'source_type' in df_s.columns:
+        # Check if unified dates are available (multiple sources)
+        if 'unified_date' in df_s.columns and len(df_s['source_type'].unique()) > 1:
+            date_col = 'unified_date_adjusted' if use_adjusted_supply else 'unified_date'
+            df_s["period"] = convert_to_period(df_s[date_col], period_type)
+        else:
+            # Process each source type separately
+            for source_type in df_s['source_type'].unique():
+                source_mask = df_s['source_type'] == source_type
+                source_df = df_s[source_mask]
+                
+                supply_date_col = get_supply_date_column_for_gap(source_df, source_type, use_adjusted_supply)
+                if supply_date_col in source_df.columns:
+                    df_s.loc[source_mask, "period"] = convert_to_period(
+                        source_df[supply_date_col], 
+                        period_type
+                    )
+    else:
+        # Fallback if no source_type
+        if 'date_ref' in df_s.columns:
+            df_s["period"] = convert_to_period(df_s["date_ref"], period_type)
+        else:
+            st.warning("No appropriate date column found in supply data")
+            return pd.DataFrame()
 
 
 def get_all_periods(demand_grouped, supply_grouped, period_type):
@@ -2363,10 +2419,169 @@ def show_allocation_impact_summary(df_demand_enhanced):
         
         DisplayComponents.show_summary_metrics(allocation_metrics)
 
+# === GAP Detail Display Functions ===
+
+def apply_gap_detail_filter(display_df: pd.DataFrame, filter_option: str, display_options: Dict,
+                           df_demand_filtered=None, df_supply_filtered=None) -> pd.DataFrame:
+    """Apply filter to GAP detail dataframe"""
+    if filter_option == "Show All":
+        return prepare_gap_detail_display(display_df, display_options, df_demand_filtered, df_supply_filtered)
+    
+    # Apply different filters
+    if filter_option == "Show Shortage Only":
+        display_df = display_df[display_df["gap_quantity"] < 0]
+    
+    elif filter_option == "Show Past Periods Only":
+        period_type = display_options.get("period_type", "Weekly")
+        display_df = display_df[
+            display_df['period'].apply(lambda x: is_past_period(str(x), period_type))
+        ]
+    
+    elif filter_option == "Show Future Periods Only":
+        period_type = display_options.get("period_type", "Weekly")
+        display_df = display_df[
+            ~display_df['period'].apply(lambda x: is_past_period(str(x), period_type))
+        ]
+    
+    elif filter_option == "Show Zero Demand Only":
+        display_df = display_df[display_df["total_demand_qty"] == 0]
+    
+    elif filter_option == "Show Critical Shortage Only":
+        display_df = display_df[
+            (display_df["gap_quantity"] < 0) & 
+            (display_df["fulfillment_rate_percent"] < 50)
+        ]
+    
+    return prepare_gap_detail_display(display_df, display_options, df_demand_filtered, df_supply_filtered)
+
+
+def prepare_gap_detail_display(display_df: pd.DataFrame, display_options: Dict,
+                              df_demand_filtered=None, df_supply_filtered=None) -> pd.DataFrame:
+    """Prepare GAP dataframe for detail display"""
+    if display_df.empty:
+        return display_df
+    
+    display_df = display_df.copy()
+    
+    # Add Period Status column
+    period_type = display_options.get("period_type", "Weekly")
+    display_df['Period Status'] = display_df['period'].apply(
+        lambda x: "🔴 Past" if is_past_period(str(x), period_type) else "✅ Future"
+    )
+    
+    # Add Product Type column if we have the data
+    if df_demand_filtered is not None and df_supply_filtered is not None:
+        demand_products = set()
+        supply_products = set()
+        
+        if not df_demand_filtered.empty and 'pt_code' in df_demand_filtered.columns:
+            demand_products = set(df_demand_filtered['pt_code'].unique())
+        
+        if not df_supply_filtered.empty and 'pt_code' in df_supply_filtered.columns:
+            supply_products = set(df_supply_filtered['pt_code'].unique())
+        
+        if demand_products or supply_products:
+            def get_product_type(pt_code):
+                if pt_code in demand_products and pt_code in supply_products:
+                    return "🔗 Matched"
+                elif pt_code in demand_products:
+                    return "📤 Demand Only"
+                elif pt_code in supply_products:
+                    return "📥 Supply Only"
+                return "❓ Unknown"
+            
+            display_df['Product Type'] = display_df['pt_code'].apply(get_product_type)
+    
+    # Select columns to display
+    display_columns = [
+        "pt_code", "product_name", "package_size", "standard_uom", "period",
+        "Period Status", "begin_inventory", "supply_in_period", "total_available", 
+        "total_demand_qty", "gap_quantity", "fulfillment_rate_percent", 
+        "fulfillment_status"
+    ]
+    
+    # Add Product Type if exists
+    if 'Product Type' in display_df.columns:
+        display_columns.append('Product Type')
+    
+    # Only include columns that exist
+    display_columns = [col for col in display_columns if col in display_df.columns]
+    
+    # Sort by period and product
+    if 'period' in display_df.columns and 'pt_code' in display_df.columns:
+        display_df = display_df.sort_values(['period', 'pt_code'])
+    
+    return display_df[display_columns]
+
+
+def format_gap_display_df(df: pd.DataFrame, display_options: Dict) -> pd.DataFrame:
+    """Format GAP dataframe for display"""
+    df = df.copy()
+    
+    # Format numeric columns
+    numeric_cols = [
+        "begin_inventory", "supply_in_period", "total_available", 
+        "total_demand_qty", "gap_quantity"
+    ]
+    
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = df[col].apply(lambda x: format_number(x))
+    
+    if "fulfillment_rate_percent" in df.columns:
+        df["fulfillment_rate_percent"] = df["fulfillment_rate_percent"].apply(
+            lambda x: format_percentage(x)
+        )
+    
+    return df
+
+
+def highlight_gap_rows_enhanced(row):
+    """Enhanced highlighting matching Demand/Supply style with priority"""
+    styles = [""] * len(row)
+    
+    try:
+        # Priority: shortage > past period > low fulfillment > zero demand
+        
+        # Check fulfillment status first (highest priority)
+        if 'fulfillment_status' in row.index and "❌" in str(row['fulfillment_status']):
+            # Shortage - light red background
+            return ["background-color: #f8d7da"] * len(row)
+        
+        # Check if critical shortage (fulfillment < 50%)
+        if 'fulfillment_rate_percent' in row.index:
+            rate_str = str(row['fulfillment_rate_percent']).replace('%', '').strip()
+            try:
+                rate = float(rate_str)
+                if rate < 50:
+                    # Critical shortage - darker red
+                    return ["background-color: #f5c6cb"] * len(row)
+            except:
+                pass
+        
+        # Check period status
+        if 'Period Status' in row.index and "🔴" in str(row['Period Status']):
+            # Past period - light gray background
+            return ["background-color: #f0f0f0"] * len(row)
+        
+        # Check zero demand
+        if 'total_demand_qty' in row.index:
+            try:
+                demand_str = str(row['total_demand_qty']).replace(',', '').strip()
+                if float(demand_str) == 0:
+                    # Zero demand - light blue
+                    return ["background-color: #d1ecf1"] * len(row)
+            except:
+                pass
+                
+    except Exception as e:
+        logger.error(f"Error highlighting rows: {str(e)}")
+    
+    return styles
 
 
 def show_gap_detail_table(gap_df, display_options, df_demand_filtered=None, df_supply_filtered=None):
-    """Show detailed GAP analysis table with enhanced filtering"""
+    """Show detailed GAP analysis table with enhanced filtering like Demand/Supply pages"""
     st.markdown("### 📄 GAP Details by Product & Period")
     
     # Check if gap_df is empty or missing required columns
@@ -2385,142 +2600,30 @@ def show_gap_detail_table(gap_df, display_options, df_demand_filtered=None, df_s
         st.error(f"Missing required columns in GAP data: {missing_columns}")
         return
     
-    # Apply display filters
-    display_df = gap_df.copy()
-    
-    # Apply existing filters
-    if display_options["show_shortage_only"]:
-        display_df = display_df[display_df["gap_quantity"] < 0]
-    
-    if display_options["exclude_zero_demand"]:
-        display_df = display_df[display_df["total_demand_qty"] > 0]
-    
-    # Apply product type filters (with safe checks)
-    demand_products = set()
-    supply_products = set()
-    
-    # Safely extract product sets
-    if df_demand_filtered is not None and not df_demand_filtered.empty and 'pt_code' in df_demand_filtered.columns:
-        demand_products = set(df_demand_filtered['pt_code'].unique())
-    
-    if df_supply_filtered is not None and not df_supply_filtered.empty and 'pt_code' in df_supply_filtered.columns:
-        supply_products = set(df_supply_filtered['pt_code'].unique())
-    
-    # Apply product type filters only if we have data
-    if demand_products or supply_products:
-        matched_products = demand_products.intersection(supply_products)
-        demand_only_products = demand_products - supply_products
-        supply_only_products = supply_products - demand_products
-        
-        products_to_show = set()
-        
-        if display_options.get("show_matched", True):
-            products_to_show.update(matched_products)
-        
-        if display_options.get("show_demand_only", False):
-            products_to_show.update(demand_only_products)
-            
-        if display_options.get("show_supply_only", False):
-            products_to_show.update(supply_only_products)
-        
-        if products_to_show:
-            display_df = display_df[display_df["pt_code"].isin(products_to_show)]
-    
-    if display_df.empty:
-        st.info("No data to display with current filter settings.")
-        return
-    
-    # Format display
-    display_df_formatted = display_df.copy()
-    
-    # Format numeric columns
-    numeric_cols = [
-        "begin_inventory", "supply_in_period", "total_available", 
-        "total_demand_qty", "gap_quantity"
+    # Define filter options
+    filter_options = [
+        "Show All",
+        "Show Shortage Only",
+        "Show Past Periods Only", 
+        "Show Future Periods Only",
+        "Show Zero Demand Only",
+        "Show Critical Shortage Only"
     ]
     
-    for col in numeric_cols:
-        if col in display_df_formatted.columns:
-            display_df_formatted[col] = display_df_formatted[col].apply(lambda x: format_number(x))
-    
-    if "fulfillment_rate_percent" in display_df_formatted.columns:
-        display_df_formatted["fulfillment_rate_percent"] = display_df_formatted["fulfillment_rate_percent"].apply(
-            lambda x: format_percentage(x)
-        )
-    
-    # Add past period indicator
-    display_df_formatted['Period Status'] = display_df_formatted['period'].apply(
-        lambda x: "🔴 Past" if is_past_period(str(x), display_options.get("period_type", "Weekly")) else "✅ Future"
-    )
-    
-    # Add product type indicator (only if we have the data)
-    if demand_products or supply_products:
-        def get_product_type(pt_code):
-            if pt_code in demand_products and pt_code in supply_products:
-                return "🔗 Matched"
-            elif pt_code in demand_products:
-                return "📤 Demand Only"
-            elif pt_code in supply_products:
-                return "📥 Supply Only"
-            return "❓ Unknown"
-        
-        display_df_formatted['Product Type'] = display_df_formatted['pt_code'].apply(get_product_type)
-    
-    # Select columns to display
-    display_columns = [
-        "pt_code", "product_name", "package_size", "standard_uom", "period",
-        "Period Status", "begin_inventory", "supply_in_period", "total_available", 
-        "total_demand_qty", "gap_quantity", "fulfillment_rate_percent", 
-        "fulfillment_status"
-    ]
-    
-    # Add Product Type column if it exists
-    if 'Product Type' in display_df_formatted.columns:
-        display_columns.append('Product Type')
-    
-    # Only include columns that exist
-    display_columns = [col for col in display_columns if col in display_df_formatted.columns]
-    
-    # Apply row highlighting
-    styled_df = display_df_formatted[display_columns].style.apply(
-        highlight_gap_rows, axis=1
-    )
-    
-    # Display
-    st.dataframe(
-        styled_df, 
-        use_container_width=True, 
-        height=400
+    # Use DisplayComponents for detail table with filters
+    DisplayComponents.render_detail_table_with_filter(
+        df=gap_df,
+        filter_options=filter_options,
+        filter_apply_func=lambda df, opt: apply_gap_detail_filter(df, opt, display_options, 
+                                                                 df_demand_filtered, df_supply_filtered),
+        format_func=lambda df: format_gap_display_df(df, display_options),
+        style_func=highlight_gap_rows_enhanced,
+        height=600,
+        key_prefix="gap_detail"
     )
 
 
-
-def highlight_gap_rows(row):
-    """Highlight rows based on gap status and period"""
-    styles = [""] * len(row)
-    
-    try:
-        # Check period status first
-        if 'Period Status' in row.index and "🔴" in str(row['Period Status']):
-            # Past period - light gray background
-            base_style = "background-color: #f0f0f0"
-        else:
-            base_style = ""
-        
-        # Check fulfillment status
-        if 'fulfillment_status' in row.index:
-            if "❌" in str(row['fulfillment_status']):
-                # Shortage - red background
-                styles = ["background-color: #ffcccc"] * len(row)
-            elif base_style:
-                styles = [base_style] * len(row)
-        elif base_style:
-            styles = [base_style] * len(row)
-        
-    except Exception as e:
-        logger.error(f"Error highlighting rows: {str(e)}")
-    
-    return styles
+# REPLACE toàn bộ function show_gap_pivot_view
 
 def show_gap_pivot_view(gap_df, display_options):
     """Show GAP pivot view with past period indicators and styling options"""
@@ -2547,31 +2650,32 @@ def show_gap_pivot_view(gap_df, display_options):
         key="gap_style_mode"
     )
     
-    # Create pivot
-    pivot_gap = display_df.pivot_table(
-        index=["product_name", "pt_code"], 
-        columns="period",
-        values="gap_quantity",
-        aggfunc="sum",
+    # Create pivot using helper function
+    pivot_df = create_period_pivot(
+        df=display_df,
+        group_cols=["product_name", "pt_code"],
+        period_col="period",
+        value_col="gap_quantity",
+        agg_func="sum",
+        period_type=display_options["period_type"],
+        show_only_nonzero=display_options.get("show_shortage_only", False),
         fill_value=0
-    ).reset_index()
+    )
     
-    # Sort columns
-    pivot_gap = sort_period_columns(pivot_gap, display_options["period_type"], ["product_name", "pt_code"])
+    if pivot_df.empty:
+        st.info("No data to display after pivoting.")
+        return
     
-    # Create display version with past period indicators
-    display_pivot = pivot_gap.copy()
+    # Add past period indicators
+    display_pivot = apply_period_indicators(
+        df=pivot_df,
+        period_type=display_options["period_type"],
+        exclude_cols=["product_name", "pt_code"],
+        indicator="🔴"
+    )
     
-    # Rename columns with indicators for past periods
-    renamed_columns = {}
-    for col in pivot_gap.columns:
-        if col not in ["product_name", "pt_code"]:
-            if is_past_period(str(col), display_options["period_type"]):
-                renamed_columns[col] = f"🔴 {col}"
-    
-    if renamed_columns:
-        display_pivot = display_pivot.rename(columns=renamed_columns)
-        st.info("🔴 = Past period (already occurred)")
+    # Show legend
+    st.info("🔴 = Past period (already occurred)")
     
     # Apply styling based on mode
     if style_mode == "🔴 Highlight Shortage":
@@ -2597,16 +2701,12 @@ def show_gap_pivot_view(gap_df, display_options):
         st.dataframe(styled_df, use_container_width=True)
     
     elif style_mode == "🌈 Heatmap":
-        # For heatmap, use numeric values
-        heatmap_pivot = pivot_gap.copy()
-        if renamed_columns:
-            heatmap_pivot = heatmap_pivot.rename(columns=renamed_columns)
-        
-        styled_df = heatmap_pivot.style.background_gradient(
+        # For heatmap, use numeric values from original pivot
+        styled_df = pivot_df.style.background_gradient(
             cmap='RdYlGn', 
-            subset=heatmap_pivot.columns[2:], 
+            subset=pivot_df.columns[2:], 
             axis=1
-        ).format("{:,.0f}", subset=heatmap_pivot.columns[2:])
+        ).format("{:,.0f}", subset=pivot_df.columns[2:])
         st.dataframe(styled_df, use_container_width=True)
     
     else:
@@ -2614,6 +2714,70 @@ def show_gap_pivot_view(gap_df, display_options):
         for col in display_pivot.columns[2:]:
             display_pivot[col] = display_pivot[col].apply(lambda x: format_number(x))
         st.dataframe(display_pivot, use_container_width=True)
+    
+    # Show totals with indicators
+    show_gap_totals_with_indicators(display_df, display_options["period_type"])
+
+
+# ADD this function sau show_gap_pivot_view
+
+def show_gap_totals_with_indicators(df_summary: pd.DataFrame, period: str):
+    """Show period totals for GAP with past period indicators"""
+    try:
+        # Prepare data
+        df_grouped = df_summary.copy()
+        df_grouped["gap_quantity"] = pd.to_numeric(df_grouped["gap_quantity"], errors='coerce').fillna(0)
+        df_grouped["total_demand_qty"] = pd.to_numeric(df_grouped["total_demand_qty"], errors='coerce').fillna(0)
+        df_grouped["supply_in_period"] = pd.to_numeric(df_grouped["supply_in_period"], errors='coerce').fillna(0)
+        
+        # Calculate aggregates by period
+        summary_by_period = df_grouped.groupby("period").agg({
+            'total_demand_qty': 'sum',
+            'supply_in_period': 'sum',
+            'gap_quantity': 'sum'
+        })
+        
+        # Create summary DataFrame
+        summary_data = {"Metric": ["📤 TOTAL DEMAND", "📥 TOTAL SUPPLY", "📊 NET GAP"]}
+        
+        # Add all periods to summary_data with indicators
+        for period_val in summary_by_period.index:
+            col_name = f"🔴 {period_val}" if is_past_period(str(period_val), period) else str(period_val)
+            summary_data[col_name] = [
+                format_number(summary_by_period.loc[period_val, 'total_demand_qty']),
+                format_number(summary_by_period.loc[period_val, 'supply_in_period']),
+                format_number(summary_by_period.loc[period_val, 'gap_quantity'])
+            ]
+        
+        display_final = pd.DataFrame(summary_data)
+        
+        # Sort columns
+        metric_cols = ["Metric"]
+        period_cols = [col for col in display_final.columns if col not in metric_cols]
+        
+        # Sort period columns based on original period value
+        def get_sort_key(col_name):
+            # Remove indicator if present
+            clean_name = col_name.replace("🔴 ", "")
+            if period == "Weekly":
+                return parse_week_period(clean_name)
+            elif period == "Monthly":
+                return parse_month_period(clean_name)
+            else:
+                try:
+                    return pd.to_datetime(clean_name)
+                except:
+                    return pd.Timestamp.max
+        
+        sorted_period_cols = sorted(period_cols, key=get_sort_key)
+        display_final = display_final[metric_cols + sorted_period_cols]
+        
+        st.markdown("#### 🔢 Column Totals")
+        st.dataframe(display_final, use_container_width=True)
+        
+    except Exception as e:
+        logger.error(f"Error showing totals: {str(e)}")
+
 # === Export Functions ===
 def show_export_section(gap_df):
    """Show export options"""
