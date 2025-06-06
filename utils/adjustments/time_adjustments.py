@@ -19,15 +19,15 @@ class TimeAdjustmentManager:
         
         # Configuration Management Section
         st.markdown("#### ⚙️ Configuration Management")
-        col1, col2, col3, col4, col5 = st.columns(5)
-        
+        col1, col2, col3, col4 = st.columns(4)
+
         with col1:
-            if st.button("💾 Save Rules", use_container_width=True):
+            if st.button("💾 Save Config", use_container_width=True):
                 if st.session_state.time_adjustment_rules:
-                    TimeAdjustmentManager._save_rules_to_file()
+                    TimeAdjustmentManager._save_configuration()
                 else:
                     st.warning("No rules to save. Please add at least one rule first.")
-        
+
         with col2:
             # Use a button to trigger file upload instead
             if st.button("📂 Load Config", use_container_width=True):
@@ -47,7 +47,7 @@ class TimeAdjustmentManager:
                     with col_a:
                         if uploaded_file is not None:
                             if st.button("✅ Import", type="primary", use_container_width=True):
-                                TimeAdjustmentManager._load_rules_from_file(uploaded_file)
+                                TimeAdjustmentManager._load_configuration(uploaded_file)
                                 st.session_state.show_file_uploader = False
                                 st.rerun()
                     
@@ -56,22 +56,15 @@ class TimeAdjustmentManager:
                             st.session_state.show_file_uploader = False
                             st.rerun()
                     st.markdown("---")
-        
+
         with col3:
-            if st.button("📤 Export Rules", use_container_width=True):
-                if st.session_state.time_adjustment_rules:
-                    TimeAdjustmentManager._export_session_rules()
-                else:
-                    st.warning("No rules to export")
-        
-        with col4:
             if st.button("⚠️ Analyze Conflicts", use_container_width=True):
                 if st.session_state.time_adjustment_rules:
                     st.session_state.show_conflict_analysis = True
                 else:
                     st.info("No rules to analyze")
-        
-        with col5:
+
+        with col4:
             if st.button("🗑️ Clear All", use_container_width=True):
                 if st.session_state.time_adjustment_rules:
                     if st.checkbox("Confirm clear all rules", key="confirm_clear"):
@@ -445,7 +438,7 @@ class TimeAdjustmentManager:
         # Section 4: Action Buttons
         st.markdown("---")
         col1, col2, col3 = st.columns(3)
-        
+
         with col1:
             if st.button("➕ Add Rule", type="primary", use_container_width=True):
                 # Validate
@@ -483,14 +476,16 @@ class TimeAdjustmentManager:
                     else:
                         st.success(f"✅ Rule added: {data_source} → {absolute_date.strftime('%Y-%m-%d')}")
                     st.rerun()
-        
+
         with col2:
             if st.button("💾 Apply to Session", use_container_width=True):
                 # Save rules to session state
+                if 'business_settings' not in st.session_state:
+                    st.session_state.business_settings = {}
                 st.session_state.business_settings['time_adjustment_mode'] = 'advanced'
                 st.session_state.business_settings['time_adjustment_rules'] = st.session_state.time_adjustment_rules
                 st.success("✅ Rules applied to current session!")
-        
+
         with col3:
             if st.button("🔄 Reset Form", use_container_width=True):
                 # Clear temporary selections
@@ -621,36 +616,50 @@ class TimeAdjustmentManager:
             st.info("📝 No time adjustment rules configured yet. Add your first rule below.")
     
     @staticmethod
-    def _save_rules_to_file():
-        """Save current rules to a JSON file for download"""
+    def _save_configuration():
+        """Save complete configuration with rules and context"""
         try:
-            # Prepare rules data with metadata
-            rules_data = {
+            # Get current business settings
+            business_settings = st.session_state.get('business_settings', {})
+            
+            # Prepare comprehensive configuration data
+            config_data = {
                 "version": "1.0",
                 "created_at": datetime.now().isoformat(),
                 "description": "Time Adjustment Rules Configuration",
                 "rules_count": len(st.session_state.time_adjustment_rules),
-                "rules": st.session_state.time_adjustment_rules
+                "rules": st.session_state.time_adjustment_rules,
+                "metadata": {
+                    "session_id": st.session_state.get('session_id', 'unknown'),
+                    "adjustment_mode": business_settings.get('time_adjustment_mode', 'advanced'),
+                    "last_updated": st.session_state.get('settings_last_updated', datetime.now().isoformat()),
+                    "exported_by": "Time Adjustment Manager v1.0"
+                }
             }
             
-            # Convert to JSON string
-            json_str = json.dumps(rules_data, indent=2)
+            # Convert to JSON string with proper formatting
+            json_str = json.dumps(config_data, indent=2, ensure_ascii=False)
             
             # Create download button
             st.download_button(
-                label="📥 Download Rules Configuration",
+                label="📥 Download Configuration",
                 data=json_str,
-                file_name=f"time_adjustment_rules_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                file_name=f"time_adjustment_config_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
                 mime="application/json",
-                key="download_rules"
+                key="download_config"
             )
             
+            # Show success message
+            st.success(f"✅ Configuration ready to download ({len(st.session_state.time_adjustment_rules)} rules)")
+            
         except Exception as e:
-            st.error(f"❌ Error saving rules: {str(e)}")
+            st.error(f"❌ Error saving configuration: {str(e)}")
+            if st.session_state.get('debug_mode', False):
+                st.exception(e)
     
     @staticmethod
-    def _load_rules_from_file(uploaded_file):
-        """Load rules from uploaded JSON file with enhanced validation"""
+    def _load_configuration(uploaded_file):
+        """Load configuration from uploaded JSON file with enhanced validation"""
         try:
             # Read and parse JSON file
             content = uploaded_file.read()
@@ -661,15 +670,17 @@ class TimeAdjustmentManager:
                 # Old format: just a list of rules
                 rules = data
                 file_version = "0.0"
+                metadata = {}
             elif isinstance(data, dict):
                 # New format with metadata
                 if 'rules' not in data:
-                    st.error("❌ Invalid rule file format: Missing 'rules' section")
+                    st.error("❌ Invalid configuration file: Missing 'rules' section")
                     return
                 rules = data.get('rules', [])
                 file_version = data.get('version', '0.0')
+                metadata = data.get('metadata', {})
             else:
-                st.error("❌ Invalid rule file format: Expected JSON object or array")
+                st.error("❌ Invalid configuration file format: Expected JSON object or array")
                 return
             
             # Validate version compatibility
@@ -726,19 +737,23 @@ class TimeAdjustmentManager:
                     else:
                         rule['adjustment_type'] = 'Relative (Days)'
                 
-                # Ensure priority exists (with new higher=better logic)
+                # Ensure priority exists
                 if 'priority' not in rule:
                     rule['priority'] = 50  # Default middle priority
                 else:
-                    # If loading from old format where lower was better, invert it
-                    if file_version == "0.0" and rule['priority'] <= 100:
-                        rule['priority'] = 101 - rule['priority']
+                    # Ensure priority is within valid range
+                    rule['priority'] = max(1, min(100, int(rule['priority'])))
                 
                 # Validate offset days for relative adjustments
                 if rule['adjustment_type'] == 'Relative (Days)':
                     if 'offset_days' not in rule or rule['offset_days'] is None:
                         st.warning(f"⚠️ Rule {idx + 1}: Missing offset_days for relative adjustment, defaulting to 7")
                         rule['offset_days'] = 7
+                    else:
+                        # Ensure offset is not zero
+                        if rule['offset_days'] == 0:
+                            st.warning(f"⚠️ Rule {idx + 1}: Offset cannot be 0, changing to 1")
+                            rule['offset_days'] = 1
                 
                 validated_rules.append(rule)
             
@@ -749,63 +764,34 @@ class TimeAdjustmentManager:
             # Load rules into session state
             st.session_state.time_adjustment_rules = validated_rules
             
+            # Apply metadata if available
+            if metadata:
+                if metadata.get('adjustment_mode'):
+                    if 'business_settings' not in st.session_state:
+                        st.session_state.business_settings = {}
+                    st.session_state.business_settings['time_adjustment_mode'] = metadata['adjustment_mode']
+            
             # Show success message with details
             st.success(f"✅ Successfully loaded {len(validated_rules)} rules from '{uploaded_file.name}'")
             
             if len(validated_rules) < len(rules):
                 st.info(f"ℹ️ {len(rules) - len(validated_rules)} rules were skipped due to validation errors")
             
-            # Show file metadata if available
-            if isinstance(data, dict):
-                metadata_info = []
-                if data.get('created_at'):
-                    metadata_info.append(f"Created: {data['created_at']}")
-                if data.get('description'):
-                    metadata_info.append(f"Description: {data['description']}")
-                if metadata_info:
-                    st.info(" | ".join(metadata_info))
+            # Show configuration info
+            info_parts = []
+            if data.get('created_at'):
+                info_parts.append(f"Created: {data['created_at']}")
+            if data.get('description'):
+                info_parts.append(f"Description: {data['description']}")
+            if metadata.get('session_id'):
+                info_parts.append(f"Session: {metadata['session_id']}")
             
-            # Don't rerun here - it will be handled by the import button
+            if info_parts:
+                st.info(" | ".join(info_parts))
             
         except json.JSONDecodeError as e:
             st.error(f"❌ Invalid JSON file: {str(e)}")
         except Exception as e:
-            st.error(f"❌ Error loading rules: {str(e)}")
+            st.error(f"❌ Error loading configuration: {str(e)}")
             if st.session_state.get('debug_mode', False):
                 st.exception(e)
-    
-    @staticmethod
-    def _export_session_rules():
-        """Export rules with current session metadata"""
-        try:
-            # Get current business settings
-            business_settings = st.session_state.get('business_settings', {})
-            
-            # Prepare comprehensive export data
-            export_data = {
-                "version": "1.0",
-                "exported_at": datetime.now().isoformat(),
-                "session_id": st.session_state.get('session_id', 'unknown'),
-                "description": "Time Adjustment Rules with Session Context",
-                "rules_count": len(st.session_state.time_adjustment_rules),
-                "rules": st.session_state.time_adjustment_rules,
-                "session_context": {
-                    "time_adjustment_mode": business_settings.get('time_adjustment_mode', 'advanced'),
-                    "last_updated": st.session_state.get('settings_last_updated', 'unknown')
-                }
-            }
-            
-            # Convert to JSON string
-            json_str = json.dumps(export_data, indent=2)
-            
-            # Create download button
-            st.download_button(
-                label="📥 Download Full Export",
-                data=json_str,
-                file_name=f"time_rules_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
-                mime="application/json",
-                key="export_rules"
-            )
-            
-        except Exception as e:
-            st.error(f"❌ Error exporting rules: {str(e)}")
