@@ -3,6 +3,7 @@
 import pandas as pd
 from datetime import datetime
 from typing import Any, Union, List, Tuple, Optional
+import random
 
 # === FORMATTING FUNCTIONS ===
 
@@ -217,3 +218,11 @@ def apply_gradient_style(df: pd.DataFrame, columns: List[str],
                         cmap: str = 'RdYlGn', axis: int = 1):
     """Apply gradient coloring to dataframe columns"""
     return df.style.background_gradient(cmap=cmap, subset=columns, axis=axis)
+
+# Thêm vào file utils/formatters.py
+def generate_allocation_number():
+    """Generate unique allocation number with format: ALLOC-YYYYMMDD-XXXX"""
+
+    date_part = datetime.now().strftime('%Y%m%d')
+    random_part = str(random.randint(1000, 9999))
+    return f"ALLOC-{date_part}-{random_part}"
