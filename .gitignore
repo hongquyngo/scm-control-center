@@ -23,7 +23,7 @@ user.txt
 credentials.json
 *.log
 .streamlit/secrets.toml
-
+allocation_context.txt
 
 # Ignore OS-specific files
 .DS_Store
