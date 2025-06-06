@@ -1,26 +1,32 @@
-# Ignore virtual environments
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
 venv/
 .env
-__pycache__/
-*.pyc
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
 
 #Ignore testing file
 
 tests/
 backup/
-sales_performance_test.py
 user.txt
-
-# Ignore credentials and sensitive files
 credentials.json
+*.log
+.streamlit/secrets.toml
+
 
 # Ignore OS-specific files
 .DS_Store
 Thumbs.db
-
-# Ignore VSCode settings (optional, if you don't want to track them)
-.vscode/
-
-# Ignore Jupyter notebook checkpoints (if you ever use notebooks)
-.ipynb_checkpoints/
 desktop.ini
+**/desktop.ini
