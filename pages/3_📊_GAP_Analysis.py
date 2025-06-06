@@ -1645,41 +1645,41 @@ def show_gap_summary(gap_df, display_options, df_demand_filtered=None, df_supply
         show_advanced_gap_analytics(gap_df, display_options, df_demand_filtered, df_supply_filtered)
     
     # === Action Buttons (Always visible if shortage exists) ===
-    if shortage_products > 0:
-        st.markdown("---")
-        st.markdown("#### 🎯 Recommended Actions")
+    # if shortage_products > 0:
+    #     st.markdown("---")
+    #     st.markdown("#### 🎯 Recommended Actions")
         
-        col1, col2, col3 = st.columns(3)
+    #     col1, col2, col3 = st.columns(3)
         
-        with col1:
-            if st.button("🧩 Create Allocation Plan", 
-                        type="primary", 
-                        use_container_width=True,
-                        key="gap_create_allocation_btn"):  # Add unique key
-                st.switch_page("pages/4_🧩_Allocation_Plan.py")
+    #     with col1:
+    #         if st.button("🧩 Create Allocation Plan", 
+    #                     type="primary", 
+    #                     use_container_width=True,
+    #                     key="gap_create_allocation_btn"):  # Add unique key
+    #             st.switch_page("pages/4_🧩_Allocation_Plan.py")
         
-        with col2:
-            if st.button("📌 Generate PO Suggestions", 
-                        type="secondary", 
-                        use_container_width=True,
-                        key="gap_generate_po_btn"):  # Add unique key
-                st.switch_page("pages/5_📌_PO_Suggestions.py")
+    #     with col2:
+    #         if st.button("📌 Generate PO Suggestions", 
+    #                     type="secondary", 
+    #                     use_container_width=True,
+    #                     key="gap_generate_po_btn"):  # Add unique key
+    #             st.switch_page("pages/5_📌_PO_Suggestions.py")
         
-        with col3:
-            # Get shortage details for export
-            shortage_df = gap_df[gap_df['gap_quantity'] < 0].copy()
-            shortage_summary = shortage_df.groupby(['pt_code', 'product_name']).agg({
-                'gap_quantity': 'sum',
-                'total_demand_qty': 'sum'
-            }).reset_index()
-            shortage_summary['gap_quantity'] = shortage_summary['gap_quantity'].abs()
+    #     with col3:
+    #         # Get shortage details for export
+    #         shortage_df = gap_df[gap_df['gap_quantity'] < 0].copy()
+    #         shortage_summary = shortage_df.groupby(['pt_code', 'product_name']).agg({
+    #             'gap_quantity': 'sum',
+    #             'total_demand_qty': 'sum'
+    #         }).reset_index()
+    #         shortage_summary['gap_quantity'] = shortage_summary['gap_quantity'].abs()
             
-            # DisplayComponents.show_export_button already has timestamp which makes it unique
-            DisplayComponents.show_export_button(
-                df=shortage_summary,
-                filename="shortage_summary",
-                button_label="📤 Export Shortage Report"
-            )
+    #         # DisplayComponents.show_export_button already has timestamp which makes it unique
+    #         DisplayComponents.show_export_button(
+    #             df=shortage_summary,
+    #             filename="shortage_summary",
+    #             button_label="📤 Export Shortage Report"
+    #         )
 
 def show_advanced_gap_analytics(gap_df, display_options, df_demand_filtered=None, df_supply_filtered=None):
     """Show advanced analytics for power users"""
@@ -2645,44 +2645,230 @@ def show_export_section(gap_df):
 
 # === Action Buttons Section ===
 def show_action_buttons(gap_df):
-   """Show action buttons based on GAP analysis results"""
-   st.markdown("---")
-   st.header("🎯 Next Actions")
-   
-   shortage_exists = not gap_df[gap_df['gap_quantity'] < 0].empty
-   surplus_exists = not gap_df[gap_df['gap_quantity'] > 0].empty
-   
-   col1, col2, col3 = st.columns(3)
-   
-   with col1:
-       if shortage_exists:
-           st.markdown("### 🚨 Shortage Detected")
-           shortage_count = len(gap_df[gap_df['gap_quantity'] < 0]['pt_code'].unique())
-           st.info(f"Found {shortage_count} products with shortage")
-           
-           if st.button("🧩 Create Allocation Plan", type="primary", use_container_width=True):
-               st.switch_page("pages/4_🧩_Allocation_Plan.py")
-       else:
-           st.success("✅ No shortage detected!")
-   
-   with col2:
-       if shortage_exists:
-           st.markdown("### 📦 Replenishment Needed")
-           total_shortage = gap_df[gap_df['gap_quantity'] < 0]['gap_quantity'].abs().sum()
-           st.info(f"Total shortage: {format_number(total_shortage)} units")
-           
-           if st.button("📌 Generate PO Suggestions", type="secondary", use_container_width=True):
-               st.switch_page("pages/5_📌_PO_Suggestions.py")
-   
-   with col3:
-       if surplus_exists:
-           st.markdown("### 📈 Surplus Available")
-           surplus_count = len(gap_df[gap_df['gap_quantity'] > 0]['pt_code'].unique())
-           st.info(f"Found {surplus_count} products with surplus")
-           
-           if st.button("🔄 Reallocation Options", use_container_width=True):
-               save_to_session_state('show_reallocation', True)
-               st.switch_page("pages/5_📌_PO_Suggestions.py")
+    """Show action buttons based on GAP analysis results"""
+    st.markdown("---")
+    st.header("🎯 Recommended Actions")
+    
+    # Calculate conditions
+    shortage_exists = not gap_df[gap_df['gap_quantity'] < 0].empty
+    supply_exists = not gap_df[gap_df['total_available'] > 0].empty
+    surplus_exists = not gap_df[gap_df['gap_quantity'] > 0].empty
+    
+    # Get metrics
+    shortage_count = len(gap_df[gap_df['gap_quantity'] < 0]['pt_code'].unique())
+    total_shortage = gap_df[gap_df['gap_quantity'] < 0]['gap_quantity'].abs().sum()
+    surplus_count = len(gap_df[gap_df['gap_quantity'] > 0]['pt_code'].unique())
+    total_surplus = gap_df[gap_df['gap_quantity'] > 0]['gap_quantity'].sum()
+    
+    # Show action buttons
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        # Allocation Plan - available when there's supply to allocate
+        if supply_exists:
+            st.markdown("### 📋 Allocation Planning")
+            products_with_supply = len(gap_df[gap_df['total_available'] > 0]['pt_code'].unique())
+            st.info(f"Found {products_with_supply} products with available supply")
+            
+            if st.button("🧩 Create Allocation Plan", 
+                        type="primary", 
+                        use_container_width=True,
+                        key="gap_create_allocation_btn"):
+                st.switch_page("pages/4_🧩_Allocation_Plan.py")
+        else:
+            st.info("✅ No supply available for allocation")
+    
+    with col2:
+        # PO Suggestions - only for shortage
+        if shortage_exists:
+            st.markdown("### 📦 Replenishment Needed")
+            st.warning(f"Total shortage: {format_number(total_shortage)} units")
+            
+            if st.button("📌 Generate PO Suggestions", 
+                        type="secondary", 
+                        use_container_width=True,
+                        key="gap_generate_po_btn"):
+                st.switch_page("pages/5_📌_PO_Suggestions.py")
+        else:
+            st.success("✅ No shortage detected")
+    
+    with col3:
+        # Export options
+        st.markdown("### 📤 Export Reports")
+        export_gap_reports(gap_df, shortage_exists, surplus_exists)
+
+
+def export_gap_reports(gap_df, shortage_exists, surplus_exists):
+    """Export various GAP analysis reports"""
+    
+    # Export complete GAP details
+    if st.button("📊 Export GAP Details", 
+                use_container_width=True,
+                key="export_gap_details"):
+        DisplayComponents.show_export_button(
+            df=gap_df,
+            filename="gap_analysis_details",
+            button_label=None  # Hide label since button already shown
+        )
+    
+    # Export shortage summary if exists
+    if shortage_exists:
+        shortage_df = gap_df[gap_df['gap_quantity'] < 0].copy()
+        shortage_summary = shortage_df.groupby(['pt_code', 'product_name']).agg({
+            'gap_quantity': 'sum',
+            'total_demand_qty': 'sum',
+            'total_available': 'sum'
+        }).reset_index()
+        shortage_summary['gap_quantity'] = shortage_summary['gap_quantity'].abs()
+        shortage_summary.rename(columns={'gap_quantity': 'shortage_quantity'}, inplace=True)
+        
+        if st.button("🚨 Export Shortage Report",
+                    use_container_width=True,
+                    key="export_shortage_report"):
+            DisplayComponents.show_export_button(
+                df=shortage_summary,
+                filename="shortage_report",
+                button_label=None
+            )
+    
+    # Export surplus summary if exists
+    if surplus_exists:
+        surplus_df = gap_df[gap_df['gap_quantity'] > 0].copy()
+        surplus_summary = surplus_df.groupby(['pt_code', 'product_name']).agg({
+            'gap_quantity': 'sum',
+            'total_available': 'sum',
+            'total_demand_qty': 'sum'
+        }).reset_index()
+        surplus_summary.rename(columns={'gap_quantity': 'surplus_quantity'}, inplace=True)
+        
+        if st.button("📈 Export Surplus Report",
+                    use_container_width=True,
+                    key="export_surplus_report"):
+            DisplayComponents.show_export_button(
+                df=surplus_summary,
+                filename="surplus_report",
+                button_label=None
+            )
+    
+    # Export complete multi-sheet report
+    if st.button("📑 Export Complete Report",
+                use_container_width=True,
+                key="export_complete_report"):
+        export_complete_gap_report(gap_df, shortage_exists, surplus_exists)
+
+
+def export_complete_gap_report(gap_df, shortage_exists, surplus_exists):
+    """Export comprehensive GAP analysis report with multiple sheets"""
+    
+    sheets_dict = {
+        "GAP Overview": create_gap_overview_sheet(gap_df),
+        "GAP Details": gap_df
+    }
+    
+    # Add shortage sheet if exists
+    if shortage_exists:
+        shortage_df = gap_df[gap_df['gap_quantity'] < 0].copy()
+        shortage_summary = shortage_df.groupby(['pt_code', 'product_name']).agg({
+            'gap_quantity': lambda x: x.abs().sum(),
+            'total_demand_qty': 'sum',
+            'total_available': 'sum',
+            'period': 'count'
+        }).reset_index()
+        shortage_summary.rename(columns={
+            'gap_quantity': 'total_shortage',
+            'period': 'affected_periods'
+        }, inplace=True)
+        sheets_dict["Shortage Summary"] = shortage_summary
+    
+    # Add surplus sheet if exists
+    if surplus_exists:
+        surplus_df = gap_df[gap_df['gap_quantity'] > 0].copy()
+        surplus_summary = surplus_df.groupby(['pt_code', 'product_name']).agg({
+            'gap_quantity': 'sum',
+            'total_available': 'sum',
+            'total_demand_qty': 'sum',
+            'period': 'count'
+        }).reset_index()
+        surplus_summary.rename(columns={
+            'gap_quantity': 'total_surplus',
+            'period': 'surplus_periods'
+        }, inplace=True)
+        sheets_dict["Surplus Summary"] = surplus_summary
+    
+    # Add product summary
+    product_summary = gap_df.groupby(['pt_code', 'product_name']).agg({
+        'total_demand_qty': 'sum',
+        'total_available': 'sum',
+        'gap_quantity': 'sum',
+        'fulfillment_rate_percent': 'mean'
+    }).reset_index()
+    product_summary['status'] = product_summary['gap_quantity'].apply(
+        lambda x: 'Shortage' if x < 0 else 'Surplus' if x > 0 else 'Balanced'
+    )
+    sheets_dict["Product Summary"] = product_summary
+    
+    # Export to Excel
+    excel_data = export_multiple_sheets(sheets_dict)
+    st.download_button(
+        "📥 Download Complete Report",
+        data=excel_data,
+        file_name=f"gap_analysis_complete_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
+
+def create_gap_overview_sheet(gap_df):
+    """Create overview summary for GAP analysis"""
+    
+    # Calculate key metrics
+    total_products = gap_df['pt_code'].nunique()
+    total_periods = gap_df['period'].nunique()
+    
+    shortage_products = gap_df[gap_df['gap_quantity'] < 0]['pt_code'].nunique()
+    surplus_products = gap_df[gap_df['gap_quantity'] > 0]['pt_code'].nunique()
+    balanced_products = total_products - shortage_products - surplus_products
+    
+    total_demand = gap_df['total_demand_qty'].sum()
+    total_supply = gap_df['total_available'].sum()
+    total_shortage = gap_df[gap_df['gap_quantity'] < 0]['gap_quantity'].abs().sum()
+    total_surplus = gap_df[gap_df['gap_quantity'] > 0]['gap_quantity'].sum()
+    
+    avg_fulfillment = gap_df['fulfillment_rate_percent'].mean()
+    
+    # Create overview dataframe
+    overview_data = {
+        'Metric': [
+            'Analysis Period',
+            'Total Products',
+            'Total Periods',
+            'Products with Shortage',
+            'Products with Surplus', 
+            'Balanced Products',
+            'Total Demand Quantity',
+            'Total Supply Available',
+            'Total Shortage Quantity',
+            'Total Surplus Quantity',
+            'Average Fulfillment Rate',
+            'Analysis Date'
+        ],
+        'Value': [
+            f"{gap_df['period'].min()} to {gap_df['period'].max()}",
+            total_products,
+            total_periods,
+            shortage_products,
+            surplus_products,
+            balanced_products,
+            format_number(total_demand),
+            format_number(total_supply),
+            format_number(total_shortage),
+            format_number(total_surplus),
+            f"{avg_fulfillment:.1f}%",
+            datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        ]
+    }
+    
+    return pd.DataFrame(overview_data)
+
 
 # === Main Page Logic ===
 
@@ -3111,11 +3297,7 @@ if st.session_state.get('gap_analysis_ran', False) and st.session_state.get('gap
         show_gap_detail_table(gap_df, display_options, df_demand_filtered_display, df_supply_filtered_display)
         show_gap_pivot_view(gap_df, display_options)
         
-        # Export section
-        st.markdown("---")
-        show_export_section(gap_df)
-        
-        # Action buttons
+        # Single unified action section (as you have it)
         show_action_buttons(gap_df)
     else:
         st.warning("No data available for the selected filters and sources.")
@@ -3151,6 +3333,7 @@ if debug_mode:
             
             if len(gap_keys) > 10:
                 st.write(f"... and {len(gap_keys) - 10} more")
+
 
 
 # Help section
