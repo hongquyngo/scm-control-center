@@ -2,13 +2,13 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime, date
 import logging
-from typing import Tuple, Dict, Any, Optional
+from typing import Tuple, List, Dict, Any, Optional
 
 # Import refactored modules
 from utils.data_manager import DataManager
 from utils.filters import FilterManager
 from utils.display_components import DisplayComponents
-from utils.formatters import format_number, format_currency, format_percentage
+from utils.formatters import format_number, format_currency, check_missing_dates , format_percentage
 from utils.helpers import (
     convert_df_to_excel, 
     convert_to_period, 
@@ -18,7 +18,8 @@ from utils.helpers import (
     parse_week_period,
     parse_month_period,
     create_period_pivot,
-    apply_period_indicators
+    apply_period_indicators,
+    export_multiple_sheets
 )
 from utils.session_state import initialize_session_state
 from utils.date_mode_component import DateModeComponent
@@ -84,8 +85,10 @@ def select_demand_source() -> str:
     return source
 
 # === Data Loading Functions ===
+# Update load_and_prepare_demand_data function in 1_📤_Demand_Analysis.py
+
 def load_and_prepare_demand_data(source: str, use_adjusted_dates: bool = True) -> pd.DataFrame:
-    """Load and standardize demand data based on source selection"""
+    """Load and standardize demand data based on source selection WITH ALLOCATION INFO"""
     try:
         # Convert source selection to list format for data_manager
         sources = []
@@ -97,12 +100,22 @@ def load_and_prepare_demand_data(source: str, use_adjusted_dates: bool = True) -
         # Use data_manager to get demand data
         df = data_manager.get_demand_data(sources=sources, include_converted=True)
         
+        if df.empty:
+            return df
+        
+        # NEW: Enhance with allocation information
+        df = data_manager.enhance_demand_with_allocations(df)
+        
         if debug_mode and not df.empty:
             debug_info = {
                 "Total rows": len(df),
                 "Unique products": df['pt_code'].nunique() if 'pt_code' in df.columns else 0,
                 "Data sources": df['source_type'].value_counts().to_dict() if 'source_type' in df.columns else {},
-                "Date columns": [col for col in df.columns if 'etd' in col.lower()]
+                "Date columns": [col for col in df.columns if 'etd' in col.lower()],
+                # NEW: Allocation debug info
+                "Total allocated": df['total_allocated'].sum(),
+                "Total delivered": df['total_delivered'].sum(),
+                "Allocation statuses": df['allocation_status'].value_counts().to_dict()
             }
             DisplayComponents.show_debug_info(debug_info)
         
@@ -112,6 +125,7 @@ def load_and_prepare_demand_data(source: str, use_adjusted_dates: bool = True) -
         logger.error(f"Error loading demand data: {str(e)}")
         st.error(f"Failed to load demand data: {str(e)}")
         return pd.DataFrame()
+
 
 # === Filtering Functions ===
 def apply_demand_filters(df: pd.DataFrame, use_adjusted_dates: bool = True) -> Tuple[pd.DataFrame, date, date]:
@@ -434,48 +448,156 @@ def apply_smart_demand_filters(df: pd.DataFrame, use_adjusted_dates: bool,
         return df, date.today(), date.today()
 
 # === Display Functions ===
+# Update show_demand_summary function in 1_📤_Demand_Analysis.py
+
 def show_demand_summary(filtered_df: pd.DataFrame, use_adjusted_dates: bool = True):
-    """Show demand summary metrics - backlog information only"""
+    """Show demand summary metrics with status comparison AND ALLOCATION INFO"""
     if filtered_df.empty:
         DisplayComponents.show_no_data_message("No demand data to display")
         return
     
     try:
-        # Calculate main metrics
-        metrics = [
-            {
-                "title": "Total Backlog Customers",
-                "value": filtered_df["customer"].nunique() if "customer" in filtered_df.columns else 0,
-                "format_type": "number"
-            },
-            {
-                "title": "Total Backlog OC",
-                "value": filtered_df[filtered_df["source_type"] == "OC"]["demand_number"].nunique() 
-                        if "source_type" in filtered_df.columns and "demand_number" in filtered_df.columns else 0,
-                "format_type": "number"
-            },
-            {
-                "title": "Total Backlog Products",
-                "value": filtered_df["pt_code"].nunique() if "pt_code" in filtered_df.columns else 0,
-                "format_type": "number"
-            },
-            {
-                "title": "Total Pipeline Value (USD)",
-                "value": filtered_df["value_in_usd"].sum() if "value_in_usd" in filtered_df.columns else 0,
-                "format_type": "currency"
-            }
-        ]
+        st.markdown("### 📊 Demand Summary")
         
-        # Render summary section with additional content
-        DisplayComponents.render_summary_section(
-            metrics=metrics,
-            title="### 📊 Demand Summary",
-            additional_content=lambda: show_additional_summaries(filtered_df, use_adjusted_dates)
-        )
+        # Calculate key metrics
+        total_products = filtered_df["pt_code"].nunique()
+        total_demand = filtered_df["demand_quantity"].sum()
+        total_value = filtered_df["value_in_usd"].sum()
+        
+        # NEW: Allocation metrics
+        total_allocated = filtered_df["total_allocated"].sum()
+        total_delivered = filtered_df["total_delivered"].sum()
+        total_unallocated = filtered_df["unallocated_demand"].sum()
+        
+        # Calculate rates
+        allocation_rate = (total_allocated / total_demand * 100) if total_demand > 0 else 0
+        delivery_rate = (total_delivered / total_allocated * 100) if total_allocated > 0 else 0
+        fulfillment_rate = (total_delivered / total_demand * 100) if total_demand > 0 else 0
+        
+        # Row 1: Basic metrics
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric("Total Products", format_number(total_products))
+        
+        with col2:
+            st.metric("Total Demand Qty", format_number(total_demand))
+        
+        with col3:
+            st.metric("Total Value", format_currency(total_value))
+        
+        with col4:
+            # Data quality indicator
+            etd_column = DateModeComponent.get_date_column_for_display(
+                filtered_df, 'etd', use_adjusted_dates
+            )
+            missing_dates = check_missing_dates(filtered_df, etd_column)
+            if missing_dates > 0:
+                st.metric("Missing Dates", missing_dates, delta="Records", delta_color="inverse")
+            else:
+                st.metric("Data Quality", "✅ Complete")
+        
+        # NEW: Row 2 - Allocation metrics
+        st.markdown("#### 📦 Allocation Status")
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric(
+                "Allocated",
+                format_number(total_allocated),
+                delta=f"{allocation_rate:.1f}%",
+                help="Total quantity allocated in approved plans"
+            )
+        
+        with col2:
+            st.metric(
+                "Delivered", 
+                format_number(total_delivered),
+                delta=f"{fulfillment_rate:.1f}% of demand",
+                help="Quantity already delivered to customers"
+            )
+        
+        with col3:
+            st.metric(
+                "Unallocated",
+                format_number(total_unallocated),
+                delta=f"{100 - allocation_rate:.1f}% remaining",
+                delta_color="inverse" if allocation_rate < 80 else "normal",
+                help="Quantity still needs allocation"
+            )
+        
+        with col4:
+            # Allocation coverage indicator
+            if allocation_rate >= 100:
+                st.metric("Coverage", "✅ Full", help="All demand allocated")
+            elif allocation_rate >= 80:
+                st.metric("Coverage", "🟡 Good", delta=f"{allocation_rate:.0f}%")
+            else:
+                st.metric("Coverage", "🔴 Low", delta=f"{allocation_rate:.0f}%", delta_color="inverse")
+        
+        # NEW: Visual Progress Bar
+        if total_demand > 0:
+            st.markdown("#### 📊 Allocation Progress")
             
+            # Create stacked progress bar
+            progress_html = f"""
+            <div style="width: 100%; background-color: #f0f0f0; border-radius: 5px; overflow: hidden; margin: 10px 0;">
+                <div style="width: {fulfillment_rate}%; background-color: #28a745; height: 30px; float: left; text-align: center; color: white; line-height: 30px; font-weight: bold;">
+                    {fulfillment_rate:.1f}% Delivered
+                </div>
+                <div style="width: {allocation_rate - fulfillment_rate}%; background-color: #ffc107; height: 30px; float: left; text-align: center; color: black; line-height: 30px; font-weight: bold;">
+                    {allocation_rate - fulfillment_rate:.1f}% Allocated
+                </div>
+                <div style="width: {100 - allocation_rate}%; background-color: #dc3545; height: 30px; float: left; text-align: center; color: white; line-height: 30px; font-weight: bold;">
+                    {100 - allocation_rate:.1f}% Unallocated
+                </div>
+            </div>
+            <div style="text-align: center; margin-top: 5px; color: #666;">
+                Total Demand: {format_number(total_demand)} units
+            </div>
+            """
+            st.markdown(progress_html, unsafe_allow_html=True)
+        
+        # NEW: Allocation status breakdown
+        with st.expander("📈 View Allocation Details", expanded=False):
+            status_summary = filtered_df.groupby('allocation_status').agg({
+                'pt_code': 'count',
+                'demand_quantity': 'sum',
+                'total_allocated': 'sum',
+                'total_delivered': 'sum'
+            }).rename(columns={'pt_code': 'Order Count'})
+            
+            # Format numeric columns
+            for col in ['demand_quantity', 'total_allocated', 'total_delivered']:
+                if col in status_summary.columns:
+                    status_summary[col] = status_summary[col].apply(format_number)
+            
+            st.dataframe(status_summary, use_container_width=True)
+            
+            # Products with low allocation
+            low_allocation = filtered_df[
+                (filtered_df['allocation_status'].str.contains('Partial')) |
+                (filtered_df['allocation_status'] == 'Not Allocated')
+            ]
+            
+            if not low_allocation.empty:
+                st.warning(f"⚠️ {len(low_allocation)} orders need allocation attention")
+        
+        # Data quality warnings
+        DisplayComponents.show_data_quality_warnings(filtered_df, etd_column, "Demand")
+        
+        # Show date adjustment summary if applicable
+        if use_adjusted_dates and 'etd_original' in filtered_df.columns and 'etd_adjusted' in filtered_df.columns:
+            DateModeComponent.show_adjustment_summary(filtered_df, ['etd'], 'Demand')
+        
+        # Forecast conversion summary if applicable
+        if 'source_type' in filtered_df.columns and 'is_converted_to_oc' in filtered_df.columns:
+            show_forecast_conversion_summary(filtered_df)
+        
     except Exception as e:
         logger.error(f"Error showing demand summary: {str(e)}")
         st.error(f"Error displaying summary: {str(e)}")
+
 
 def show_additional_summaries(filtered_df: pd.DataFrame, use_adjusted_dates: bool):
     """Show ETD comparison and forecast conversion summaries"""
@@ -485,6 +607,7 @@ def show_additional_summaries(filtered_df: pd.DataFrame, use_adjusted_dates: boo
     # Conversion status for forecasts
     if "source_type" in filtered_df.columns and filtered_df["source_type"].str.contains("Forecast").any():
         show_forecast_conversion_summary(filtered_df)
+
 
 def show_etd_status_comparison(filtered_df: pd.DataFrame, use_adjusted_dates: bool = True):
     """Show ETD status comparison between original and adjusted"""
@@ -554,8 +677,10 @@ def show_forecast_conversion_summary(filtered_df: pd.DataFrame):
     except Exception as e:
         logger.error(f"Error showing forecast conversion summary: {str(e)}")
 
+# Update existing detail table functions in 1_📤_Demand_Analysis.py
+
 def show_demand_detail_table(filtered_df: pd.DataFrame, use_adjusted_dates: bool = True):
-    """Show detailed demand table with enhanced filtering and highlighting"""
+    """Show detailed demand table with enhanced filtering and highlighting INCLUDING ALLOCATION"""
     st.markdown("### 🔍 Demand Details")
     
     if filtered_df.empty:
@@ -563,13 +688,26 @@ def show_demand_detail_table(filtered_df: pd.DataFrame, use_adjusted_dates: bool
         return
     
     try:
-        # Define filter options
+        # Add row highlighting toggle
+        col1, col2 = st.columns([3, 1])
+        with col2:
+            enable_row_highlighting = st.checkbox(
+                "Enable Row Highlighting", 
+                value=False, 
+                key="demand_row_highlighting",
+                help="Enable to highlight rows based on allocation status and date issues. May affect performance for large datasets."
+            )
+        
+        # Enhanced filter options with allocation - SIMPLIFIED
         filter_options = [
-            "Show All",
-            "Show Missing Original ETD Only", 
-            "Show Past Original ETD Only",
-            "Show Missing Adjusted ETD Only",
-            "Show Past Adjusted ETD Only"
+            "All",
+            "Unallocated",
+            "Partially Allocated", 
+            "Fully Allocated",
+            "Missing Original ETD", 
+            "Past Original ETD",
+            "Missing Adjusted ETD",
+            "Past Adjusted ETD"
         ]
         
         # Get appropriate date columns
@@ -582,13 +720,18 @@ def show_demand_detail_table(filtered_df: pd.DataFrame, use_adjusted_dates: bool
         if 'etd_adjusted' in filtered_df.columns:
             date_columns_added.append('etd_adjusted')
         
+        # Prepare style function based on toggle
+        style_func = None
+        if enable_row_highlighting:
+            style_func = lambda row: highlight_etd_issues_enhanced(row, date_columns_added)
+        
         # Use DisplayComponents for detail table
         DisplayComponents.render_detail_table_with_filter(
             df=filtered_df,
             filter_options=filter_options,
             filter_apply_func=lambda df, opt: apply_detail_filter(df, opt, use_adjusted_dates),
             format_func=lambda df: format_demand_display_df_enhanced(df, date_columns_added),
-            style_func=lambda row: highlight_etd_issues_enhanced(row, date_columns_added),
+            style_func=style_func,  # Only apply if enabled
             height=600,
             key_prefix="demand_detail"
         )
@@ -597,180 +740,262 @@ def show_demand_detail_table(filtered_df: pd.DataFrame, use_adjusted_dates: bool
         logger.error(f"Error showing demand detail table: {str(e)}")
         st.error(f"Error displaying table: {str(e)}")
 
+
 def apply_detail_filter(display_df: pd.DataFrame, filter_option: str, 
                        use_adjusted_dates: bool) -> pd.DataFrame:
-    """Apply filter to detail dataframe"""
-    if filter_option == "Show All":
+    """Apply filter to detail dataframe INCLUDING ALLOCATION FILTERS"""
+    if filter_option == "All":
         return prepare_detail_display(display_df, use_adjusted_dates)
     
-    today = pd.Timestamp.now().normalize()
+    # NEW: Allocation filters - SIMPLIFIED
+    if filter_option == "Unallocated":
+        display_df = display_df[display_df['allocation_status'] == 'Not Allocated']
     
-    # Apply selected filter
-    if filter_option == "Show Missing Original ETD Only":
-        filter_column = 'etd_original' if 'etd_original' in display_df.columns else 'etd'
-        if filter_column in display_df.columns:
-            display_df[filter_column] = pd.to_datetime(display_df[filter_column], errors='coerce')
-            display_df = display_df[display_df[filter_column].isna()]
+    elif filter_option == "Partially Allocated":
+        display_df = display_df[display_df['allocation_status'].str.contains('Partial', na=False)]
     
-    elif filter_option == "Show Past Original ETD Only":
-        filter_column = 'etd_original' if 'etd_original' in display_df.columns else 'etd'
-        if filter_column in display_df.columns:
-            display_df[filter_column] = pd.to_datetime(display_df[filter_column], errors='coerce')
-            display_df = display_df[
-                display_df[filter_column].notna() & 
-                (display_df[filter_column] < today)
-            ]
+    elif filter_option == "Fully Allocated":
+        display_df = display_df[display_df['allocation_status'] == 'Fully Allocated']
     
-    elif filter_option == "Show Missing Adjusted ETD Only":
-        if 'etd_adjusted' in display_df.columns:
-            display_df['etd_adjusted'] = pd.to_datetime(display_df['etd_adjusted'], errors='coerce')
-            display_df = display_df[display_df['etd_adjusted'].isna()]
-        else:
-            st.warning("Adjusted ETD column not available")
-            return pd.DataFrame()
-            
-    elif filter_option == "Show Past Adjusted ETD Only":
-        if 'etd_adjusted' in display_df.columns:
-            display_df['etd_adjusted'] = pd.to_datetime(display_df['etd_adjusted'], errors='coerce')
-            display_df = display_df[
-                display_df['etd_adjusted'].notna() & 
-                (display_df['etd_adjusted'] < today)
-            ]
-        else:
-            st.warning("Adjusted ETD column not available")
-            return pd.DataFrame()
+    # Existing date filters - SIMPLIFIED
+    else:
+        today = pd.Timestamp.now().normalize()
+        
+        if filter_option == "Missing Original ETD":
+            filter_column = 'etd_original' if 'etd_original' in display_df.columns else 'etd'
+            if filter_column in display_df.columns:
+                display_df[filter_column] = pd.to_datetime(display_df[filter_column], errors='coerce')
+                display_df = display_df[display_df[filter_column].isna()]
+        
+        elif filter_option == "Past Original ETD":
+            filter_column = 'etd_original' if 'etd_original' in display_df.columns else 'etd'
+            if filter_column in display_df.columns:
+                display_df[filter_column] = pd.to_datetime(display_df[filter_column], errors='coerce')
+                display_df = display_df[display_df[filter_column] < today]
+        
+        elif filter_option == "Missing Adjusted ETD":
+            if 'etd_adjusted' in display_df.columns:
+                display_df['etd_adjusted'] = pd.to_datetime(display_df['etd_adjusted'], errors='coerce')
+                display_df = display_df[display_df['etd_adjusted'].isna()]
+        
+        elif filter_option == "Past Adjusted ETD":
+            if 'etd_adjusted' in display_df.columns:
+                display_df['etd_adjusted'] = pd.to_datetime(display_df['etd_adjusted'], errors='coerce')
+                display_df = display_df[display_df['etd_adjusted'] < today]
+    
+    return prepare_detail_display(display_df, use_adjusted_dates)
+
+
+def apply_detail_filter(display_df: pd.DataFrame, filter_option: str, 
+                       use_adjusted_dates: bool) -> pd.DataFrame:
+    """Apply filter to detail dataframe INCLUDING ALLOCATION FILTERS"""
+    if filter_option == "All":
+        return prepare_detail_display(display_df, use_adjusted_dates)
+    
+    # NEW: Allocation filters - SIMPLIFIED
+    if filter_option == "Unallocated":
+        display_df = display_df[display_df['allocation_status'] == 'Not Allocated']
+    
+    elif filter_option == "Partially Allocated":
+        display_df = display_df[display_df['allocation_status'].str.contains('Partial', na=False)]
+    
+    elif filter_option == "Fully Allocated":
+        display_df = display_df[display_df['allocation_status'] == 'Fully Allocated']
+    
+    # Existing date filters - SIMPLIFIED
+    else:
+        today = pd.Timestamp.now().normalize()
+        
+        if filter_option == "Missing Original ETD":
+            filter_column = 'etd_original' if 'etd_original' in display_df.columns else 'etd'
+            if filter_column in display_df.columns:
+                display_df[filter_column] = pd.to_datetime(display_df[filter_column], errors='coerce')
+                display_df = display_df[display_df[filter_column].isna()]
+        
+        elif filter_option == "Past Original ETD":
+            filter_column = 'etd_original' if 'etd_original' in display_df.columns else 'etd'
+            if filter_column in display_df.columns:
+                display_df[filter_column] = pd.to_datetime(display_df[filter_column], errors='coerce')
+                display_df = display_df[display_df[filter_column] < today]
+        
+        elif filter_option == "Missing Adjusted ETD":
+            if 'etd_adjusted' in display_df.columns:
+                display_df['etd_adjusted'] = pd.to_datetime(display_df['etd_adjusted'], errors='coerce')
+                display_df = display_df[display_df['etd_adjusted'].isna()]
+        
+        elif filter_option == "Past Adjusted ETD":
+            if 'etd_adjusted' in display_df.columns:
+                display_df['etd_adjusted'] = pd.to_datetime(display_df['etd_adjusted'], errors='coerce')
+                display_df = display_df[display_df['etd_adjusted'] < today]
     
     return prepare_detail_display(display_df, use_adjusted_dates)
 
 def prepare_detail_display(display_df: pd.DataFrame, use_adjusted_dates: bool) -> pd.DataFrame:
-    """Prepare dataframe for detail display"""
+    """Prepare demand dataframe for detail display WITH ALLOCATION COLUMNS"""
     if display_df.empty:
         return display_df
     
-    # Prepare display columns
-    base_columns = [
-        "pt_code", "product_name", "brand", "package_size", "standard_uom"
+    # Base columns in specific order
+    display_columns = [
+        "product_name", "pt_code", "brand", "package_size", "standard_uom",
+        "etd_original", "etd_adjusted",  # Will handle missing columns later
+        "demand_quantity", "value_in_usd", 
+        "total_allocated", "total_delivered", "unallocated_demand", 
+        "allocation_status", "allocation_numbers",
+        "source_type", "demand_number", "customer", "legal_entity", "is_converted_to_oc"
     ]
     
-    # Add date columns based on what's available
-    date_columns = []
-    if 'etd_original' in display_df.columns:
-        base_columns.append('etd_original')
-        date_columns.append('etd_original')
-    elif 'etd' in display_df.columns and 'etd_adjusted' not in display_df.columns:
-        base_columns.append('etd')
-        date_columns.append('etd')
-    
-    if 'etd_adjusted' in display_df.columns:
-        base_columns.append('etd_adjusted')
-        date_columns.append('etd_adjusted')
-    
-    # Add remaining columns
-    remaining_columns = [
-        "demand_quantity", "value_in_usd", "source_type", "demand_number", 
-        "customer", "legal_entity"
-    ]
-    base_columns.extend(remaining_columns)
-    
-    if 'is_converted_to_oc' in display_df.columns:
-        base_columns.append("is_converted_to_oc")
-    
-    # Filter to only existing columns
-    display_columns = [col for col in base_columns if col in display_df.columns]
-    display_df = display_df[display_columns].copy()
-    
-    # Sort by appropriate date column
-    sort_column = None
+    # Handle date columns based on availability
     if use_adjusted_dates and 'etd_adjusted' in display_df.columns:
-        sort_column = 'etd_adjusted'
-    elif not use_adjusted_dates and 'etd_original' in display_df.columns:
-        sort_column = 'etd_original'
+        # Keep both columns
+        pass
     elif 'etd' in display_df.columns:
-        sort_column = 'etd'
+        # Replace etd_original with etd if not using adjusted dates
+        display_columns[display_columns.index("etd_original")] = "etd"
+        display_columns.remove("etd_adjusted")
     
-    # Create sort key for proper ordering
-    if sort_column and sort_column in display_df.columns:
-        today = pd.Timestamp.now().normalize()
-        display_df["etd_sort_key"] = display_df[sort_column].apply(
-            lambda x: (0, pd.NaT) if pd.isna(x) else 
-                      (1, x) if x < today else 
-                      (2, x)
+    # Create unified demand_number column
+    if 'oc_number' in display_df.columns and 'forecast_number' in display_df.columns:
+        display_df['demand_number'] = display_df.apply(
+            lambda row: row['oc_number'] if row['source_type'] == 'OC' else row['forecast_number'],
+            axis=1
         )
-        
-        # Sort: Missing ETD first, then Past ETD, then Future ETD
-        display_df = display_df.sort_values(["etd_sort_key"], key=lambda x: [(v[0], v[1]) for v in x])
-        display_df = display_df.drop("etd_sort_key", axis=1)
+    elif 'oc_number' in display_df.columns:
+        display_df['demand_number'] = display_df['oc_number']
+    elif 'forecast_number' in display_df.columns:
+        display_df['demand_number'] = display_df['forecast_number']
+    else:
+        display_df['demand_number'] = ''
     
-    return display_df
+    # Filter to available columns
+    available_columns = [col for col in display_columns if col in display_df.columns]
+    
+    return display_df[available_columns].copy()
 
-def format_demand_display_df_enhanced(df: pd.DataFrame, date_columns: list) -> pd.DataFrame:
-    """Format dataframe columns for display with multiple date columns"""
-    df = df.copy()
+
+def format_demand_display_df_enhanced(display_df: pd.DataFrame, date_columns: List[str]) -> pd.DataFrame:
+    """Format demand display dataframe WITH ALLOCATION FORMATTING"""
+    formatted_df = display_df.copy()
+    
     today = pd.Timestamp.now().normalize()
     
-    try:
-        # Format numeric columns
-        if "demand_quantity" in df.columns:
-            df["demand_quantity"] = df["demand_quantity"].apply(lambda x: format_number(x))
-        if "value_in_usd" in df.columns:
-            df["value_in_usd"] = df["value_in_usd"].apply(lambda x: format_currency(x))
-        
-        # Enhanced ETD formatting for all date columns
-        def format_etd(x):
-            if pd.isna(x):
-                return "❌ Missing"
-            elif isinstance(x, pd.Timestamp) and x < today:
-                return f"🔴 {x.strftime('%Y-%m-%d')}"
-            elif isinstance(x, pd.Timestamp):
-                return x.strftime("%Y-%m-%d")
-            else:
-                return str(x)
-        
-        # Apply formatting to all date columns
-        for date_col in date_columns:
-            if date_col in df.columns:
-                df[date_col] = df[date_col].apply(format_etd)
-                
-    except Exception as e:
-        logger.error(f"Error formatting display dataframe: {str(e)}")
-    
-    return df
-
-def highlight_etd_issues_enhanced(row: pd.Series, date_columns: list) -> list:
-    """Highlight rows based on ETD issues across multiple date columns"""
-    styles = [""] * len(row)
-    
-    try:
-        # Check if any date column has issues
-        has_missing = False
-        has_past = False
-        
-        for date_col in date_columns:
-            if date_col in row.index:
-                cell_value = str(row[date_col])
-                if "❌ Missing" in cell_value:
-                    has_missing = True
-                elif "🔴" in cell_value:
-                    has_past = True
-        
-        # Apply highlighting based on priority: missing > past > normal
-        if has_missing:
-            # Light orange/yellow background for missing ETD
-            styles = ["background-color: #fff3cd"] * len(row)
-        elif has_past:
-            # Light red background for past ETD
-            styles = ["background-color: #f8d7da"] * len(row)
+    # Format dates with special handling for missing values AND past date indicators
+    for col in date_columns:
+        if col in formatted_df.columns:
+            # Convert to datetime first
+            formatted_df[col] = pd.to_datetime(formatted_df[col], errors='coerce')
             
-    except Exception as e:
-        logger.error(f"Error highlighting rows: {str(e)}")
+            # Create a new column for formatted display
+            formatted_values = []
+            for date_val in formatted_df[col]:
+                if pd.isna(date_val):
+                    formatted_values.append('❌ Missing')
+                else:
+                    # Format the date
+                    date_str = date_val.strftime('%Y-%m-%d')
+                    # Add past indicator if date is in the past
+                    if date_val < today:
+                        formatted_values.append(f'🔴 {date_str}')
+                    else:
+                        formatted_values.append(date_str)
+            
+            formatted_df[col] = formatted_values
+    
+    # Format allocation quantities
+    quantity_columns = ['demand_quantity', 'total_allocated', 'total_delivered', 'unallocated_demand']
+    for col in quantity_columns:
+        if col in formatted_df.columns:
+            formatted_df[col] = formatted_df[col].apply(format_number)
+    
+    # Format value
+    if 'value_in_usd' in formatted_df.columns:
+        formatted_df['value_in_usd'] = formatted_df['value_in_usd'].apply(
+            lambda x: format_currency(x) if pd.notna(x) else ''
+        )
+    
+    # Rename columns for display
+    column_mapping = {
+        'product_name': 'Product Name',
+        'pt_code': 'PT Code',
+        'brand': 'Brand',
+        'package_size': 'Package Size',
+        'standard_uom': 'Standard UOM',
+        'etd': 'ETD',
+        'etd_original': 'ETD Original',
+        'etd_adjusted': 'ETD Adjusted',
+        'demand_quantity': 'Demand Quantity',
+        'value_in_usd': 'Value (USD)',
+        'total_allocated': 'Allocated',
+        'total_delivered': 'Allocation Delivered',  # Renamed as requested
+        'unallocated_demand': 'Unallocated',
+        'allocation_status': 'Allocation Status',
+        'allocation_numbers': 'Allocation Numbers',
+        'source_type': 'Source Type',
+        'demand_number': 'Demand Number',  # Unified column
+        'customer': 'Customer',
+        'legal_entity': 'Legal Entity',
+        'is_converted_to_oc': 'Is Converted to OC'
+    }
+    
+    formatted_df.rename(columns=column_mapping, inplace=True)
+    
+    return formatted_df
+
+def highlight_etd_issues_enhanced(row, date_columns: List[str]) -> List[str]:
+    """Apply row highlighting based on conditions INCLUDING ALLOCATION STATUS"""
+    styles = [''] * len(row)
+    
+    today = pd.Timestamp.now().normalize()
+    
+    # Priority 1: Base row color based on allocation status
+    base_color = ''
+    if 'Allocation Status' in row:
+        if row['Allocation Status'] == 'Not Allocated':
+            base_color = 'background-color: #ffebee'  # Light red
+        elif 'Partial' in str(row['Allocation Status']):
+            base_color = 'background-color: #fff3cd'  # Light yellow
+        elif row['Allocation Status'] == 'Fully Allocated':
+            base_color = 'background-color: #d4edda'  # Light green
+    
+    # Apply base color to all cells
+    if base_color:
+        styles = [base_color] * len(row)
+    
+    # Priority 2: Override specific cells for date issues
+    for col in date_columns:
+        # Map to display column name
+        if col == 'etd_original':
+            display_col = 'ETD Original'
+        elif col == 'etd_adjusted':
+            display_col = 'ETD Adjusted'
+        elif col == 'etd':
+            display_col = 'ETD'
+        else:
+            display_col = col.replace('_', ' ').title()
+        
+        if display_col in row.index:
+            try:
+                col_idx = row.index.get_loc(display_col)
+                cell_value = str(row[display_col])
+                
+                # Check for missing date
+                if "❌ Missing" in cell_value:
+                    # Orange background for missing dates
+                    styles[col_idx] = 'background-color: #ffeaa7; color: #d63031; font-weight: bold'
+                elif "🔴" in cell_value:
+                    # Red background for past dates (already has indicator)
+                    styles[col_idx] = 'background-color: #fab1a0; color: #d63031; font-weight: bold'
+            except Exception as e:
+                logger.debug(f"Error highlighting column {display_col}: {str(e)}")
     
     return styles
 
-def show_demand_grouped_view(filtered_df: pd.DataFrame, start_date: date, 
-                           end_date: date, use_adjusted_dates: bool = True):
-    """Show grouped demand by period with past period indicators"""
-    st.markdown("### 📦 Grouped Demand by Product")
-    st.markdown(f"📅 Period: **{start_date}** to **{end_date}**")
+
+
+def show_demand_grouped_view(filtered_df: pd.DataFrame, start_date: date, end_date: date, 
+                           use_adjusted_dates: bool = True):
+    """Show demand grouped by period WITH ALLOCATION BREAKDOWN"""
+    st.markdown("### 📅 Demand by Period")
     
     if filtered_df.empty:
         DisplayComponents.show_no_data_message("No data to display")
@@ -787,15 +1012,40 @@ def show_demand_grouped_view(filtered_df: pd.DataFrame, start_date: date,
             st.error(f"Date column '{etd_column}' not found")
             return
         
-        # Display options
-        display_options = DisplayComponents.render_display_options(
-            page_name="demand_grouped",
-            show_period=True,
-            show_filters=["nonzero"]
-        )
+        # Display options - ENHANCED with allocation view
+        col1, col2, col3, col4 = st.columns([2, 2, 1, 1])
         
-        period = display_options.get('period_type', 'Weekly')
-        show_only_nonzero = display_options.get('show_only_nonzero', True)
+        with col1:
+            period = st.selectbox(
+                "Group by period:",
+                options=PERIOD_TYPES,
+                index=1,  # Default to Weekly
+                key="demand_period_type"
+            )
+        
+        with col2:
+            # NEW: View mode for allocation
+            view_mode = st.radio(
+                "Show values:",
+                options=["Total Demand", "Net Unallocated", "Allocation %"],
+                horizontal=True,
+                key="demand_view_mode",
+                help="Total Demand: Original values | Net Unallocated: Remaining demand | Allocation %: Coverage rate"
+            )
+        
+        with col3:
+            show_only_nonzero = st.checkbox(
+                "Hide zero",
+                value=True,
+                key="demand_hide_zero"
+            )
+        
+        with col4:
+            show_totals = st.checkbox(
+                "Show totals",
+                value=True,
+                key="demand_show_totals"
+            )
         
         # Filter out missing dates for grouping
         df_summary = filtered_df[filtered_df[etd_column].notna()].copy()
@@ -804,21 +1054,41 @@ def show_demand_grouped_view(filtered_df: pd.DataFrame, start_date: date,
             DisplayComponents.show_no_data_message("No data with valid ETD dates for grouping")
             return
         
-        # Create period column using appropriate date
-        df_summary["period"] = convert_to_period(df_summary[etd_column], period)
+        # Create period column
+        df_summary["period"] = df_summary[etd_column].apply(
+            lambda x: convert_to_period(x, period)
+        )
+        
+        # Filter valid periods
+        df_summary = df_summary[df_summary['period'].notna()]
         
         if debug_mode:
             DisplayComponents.show_debug_info({
                 "Sample periods created": df_summary[[etd_column, "period"]].head(10).to_dict()
             })
         
-        # Create pivot table
+        # Determine value column based on view mode
+        if view_mode == "Total Demand":
+            value_col = "demand_quantity"
+            agg_func = "sum"
+        elif view_mode == "Net Unallocated":
+            value_col = "unallocated_demand"
+            agg_func = "sum"
+        else:  # Allocation %
+            # Create allocation percentage column
+            df_summary['allocation_percentage'] = (
+                df_summary['total_allocated'] / df_summary['demand_quantity'] * 100
+            ).fillna(0).round(1)
+            value_col = "allocation_percentage"
+            agg_func = "mean"
+        
+        # Create pivot table using existing helper
         pivot_df = create_period_pivot(
             df=df_summary,
             group_cols=["product_name", "pt_code"],
             period_col="period",
-            value_col="demand_quantity",
-            agg_func="sum",
+            value_col=value_col,
+            agg_func=agg_func,
             period_type=period,
             show_only_nonzero=show_only_nonzero,
             fill_value=0
@@ -836,68 +1106,202 @@ def show_demand_grouped_view(filtered_df: pd.DataFrame, start_date: date,
             indicator="🔴"
         )
         
-        # Format for display
+        # Format for display based on view mode
         for col in display_pivot.columns:
             if col not in ["product_name", "pt_code"]:
-                display_pivot[col] = display_pivot[col].apply(lambda x: format_number(x))
+                if view_mode == "Allocation %":
+                    # Format as percentage
+                    display_pivot[col] = display_pivot[col].apply(
+                        lambda x: f"{x:.1f}%" if pd.notna(x) and isinstance(x, (int, float)) else x
+                    )
+                else:
+                    # Format as number
+                    display_pivot[col] = display_pivot[col].apply(lambda x: format_number(x))
         
-        # Show legend
-        st.info("🔴 = Past period (already occurred)")
+        # Show legend with view mode info
+        legend_text = "🔴 = Past period (already occurred)"
+        if view_mode == "Allocation %":
+            legend_text += " | Values show allocation coverage percentage"
+        elif view_mode == "Net Unallocated":
+            legend_text += " | Values show remaining unallocated demand"
+        st.info(legend_text)
         
-        # Display pivot
-        st.dataframe(display_pivot, use_container_width=True, height=400)
+        # Apply conditional formatting for Allocation % view
+        if view_mode == "Allocation %":
+            # Style function for percentage coloring
+            def style_allocation_percentage(val):
+                if isinstance(val, str):
+                    if '🔴' in val:
+                        return 'color: red; font-weight: bold'
+                    elif '%' in val:
+                        try:
+                            pct = float(val.replace('%', ''))
+                            if pct >= 100:
+                                return 'background-color: #d4edda; color: #155724'  # Green
+                            elif pct >= 50:
+                                return 'background-color: #fff3cd; color: #856404'  # Yellow
+                            else:
+                                return 'background-color: #f8d7da; color: #721c24'  # Red
+                        except:
+                            pass
+                return ''
+            
+            styled_df = display_pivot.style.applymap(
+                style_allocation_percentage,
+                subset=[col for col in display_pivot.columns if col not in ["product_name", "pt_code"]]
+            )
+            st.dataframe(styled_df, use_container_width=True, height=400)
+        else:
+            # Regular display
+            st.dataframe(display_pivot, use_container_width=True, height=400)
         
-        # Show totals with past period indicators
-        show_demand_totals_with_indicators(df_summary, period)
+        # Show totals with indicators - UPDATE EXISTING FUNCTION
+        if show_totals:
+            show_demand_totals_with_indicators(df_summary, period, view_mode)
         
-        # Export button (without indicators)
-        excel_pivot = format_pivot_for_display(pivot_df)
-        DisplayComponents.show_export_button(excel_pivot, "grouped_demand", "📤 Export to Excel")
+        # Export button with enhanced allocation data
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # Single sheet export (pivot only)
+            excel_pivot = format_pivot_for_display(pivot_df)
+            DisplayComponents.show_export_button(
+                excel_pivot, 
+                f"grouped_demand_{view_mode.lower().replace(' ', '_')}", 
+                "📤 Export Pivot"
+            )
+        
+        with col2:
+            # Multi-sheet export with allocation details
+            if st.button("📑 Export Full Report", key="export_demand_full"):
+                # Prepare multiple sheets
+                sheets_dict = {}
+                
+                # Sheet 1: Pivot view
+                sheets_dict[f'Pivot - {view_mode}'] = excel_pivot
+                
+                # Sheet 2: Detail data with allocation
+                detail_columns = [
+                    'pt_code', 'product_name', 'customer', 'demand_quantity',
+                    'total_allocated', 'total_delivered', 'unallocated_demand',
+                    'allocation_status', 'value_in_usd'
+                ]
+                available_cols = [col for col in detail_columns if col in filtered_df.columns]
+                sheets_dict['Demand Details'] = filtered_df[available_cols]
+                
+                # Sheet 3: Period summary
+                period_summary = df_summary.groupby('period').agg({
+                    'demand_quantity': 'sum',
+                    'total_allocated': 'sum', 
+                    'total_delivered': 'sum',
+                    'unallocated_demand': 'sum',
+                    'value_in_usd': 'sum'
+                }).reset_index()
+                
+                # Add rates
+                period_summary['allocation_rate_%'] = (
+                    period_summary['total_allocated'] / period_summary['demand_quantity'] * 100
+                ).round(1)
+                sheets_dict['Period Summary'] = period_summary
+                
+                # Sheet 4: Allocation status summary
+                allocation_summary = filtered_df.groupby('allocation_status').agg({
+                    'pt_code': 'count',
+                    'demand_quantity': 'sum',
+                    'total_allocated': 'sum',
+                    'total_delivered': 'sum',
+                    'value_in_usd': 'sum'
+                }).rename(columns={'pt_code': 'order_count'}).reset_index()
+                sheets_dict['Allocation Summary'] = allocation_summary
+                
+                # Export
+                excel_data = export_multiple_sheets(sheets_dict)
+                st.download_button(
+                    label="Download Full Report",
+                    data=excel_data,
+                    file_name=f"demand_analysis_full_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
         
     except Exception as e:
         logger.error(f"Error showing grouped view: {str(e)}")
         st.error(f"Error displaying grouped view: {str(e)}")
 
-def format_pivot_for_display(pivot_df: pd.DataFrame) -> pd.DataFrame:
-    """Format pivot table for display - PRESERVE COLUMN ORDER"""
-    display_pivot = pivot_df.copy()
-    
-    # Remember original column order
-    original_columns = list(display_pivot.columns)
-    
-    # Format only numeric columns (skip first 2 columns: product_name and pt_code)
-    for col in original_columns[2:]:  
-        display_pivot[col] = display_pivot[col].apply(lambda x: format_number(x))
-    
-    # IMPORTANT: Return with original column order preserved
-    return display_pivot[original_columns]
-
-def show_demand_totals_with_indicators(df_summary: pd.DataFrame, period: str):
-    """Show period totals for demand with past period indicators"""
+# UPDATE EXISTING FUNCTION - KHÔNG TẠO MỚI
+def show_demand_totals_with_indicators(df_summary: pd.DataFrame, period: str, 
+                                       view_mode: str = "Total Demand"):
+    """Show period totals for demand with past period indicators AND ALLOCATION INFO"""
     try:
-        # Prepare data
+        # Prepare data based on view mode
         df_grouped = df_summary.copy()
-        df_grouped["demand_quantity"] = pd.to_numeric(df_grouped["demand_quantity"], errors='coerce').fillna(0)
-        df_grouped["value_in_usd"] = pd.to_numeric(df_grouped["value_in_usd"], errors='coerce').fillna(0)
         
-        # Calculate aggregates
-        qty_by_period = df_grouped.groupby("period")["demand_quantity"].sum()
-        val_by_period = df_grouped.groupby("period")["value_in_usd"].sum()
-        
-        # Create summary DataFrame
-        summary_data = {"Metric": ["🔢 TOTAL QUANTITY", "💵 TOTAL VALUE (USD)"]}
-        
-        # Add all periods to summary_data with indicators
-        for period_val in qty_by_period.index:
-            col_name = f"🔴 {period_val}" if is_past_period(str(period_val), period) else str(period_val)
-            summary_data[col_name] = [
-                format_number(qty_by_period[period_val]),
-                format_currency(val_by_period[period_val])
-            ]
+        if view_mode == "Total Demand":
+            # Original behavior
+            df_grouped["demand_quantity"] = pd.to_numeric(df_grouped["demand_quantity"], errors='coerce').fillna(0)
+            df_grouped["value_in_usd"] = pd.to_numeric(df_grouped["value_in_usd"], errors='coerce').fillna(0)
+            
+            # Calculate aggregates
+            qty_by_period = df_grouped.groupby("period")["demand_quantity"].sum()
+            val_by_period = df_grouped.groupby("period")["value_in_usd"].sum()
+            
+            # Create summary DataFrame - EXISTING FORMAT
+            summary_data = {"Metric": ["🔢 TOTAL QUANTITY", "💵 TOTAL VALUE (USD)"]}
+            
+            # Add all periods to summary_data with indicators
+            for period_val in qty_by_period.index:
+                col_name = f"🔴 {period_val}" if is_past_period(str(period_val), period) else str(period_val)
+                summary_data[col_name] = [
+                    format_number(qty_by_period[period_val]),
+                    format_currency(val_by_period[period_val])
+                ]
+                
+        elif view_mode == "Net Unallocated":
+            # Show unallocated totals
+            df_grouped["unallocated_demand"] = pd.to_numeric(df_grouped["unallocated_demand"], errors='coerce').fillna(0)
+            df_grouped["demand_quantity"] = pd.to_numeric(df_grouped["demand_quantity"], errors='coerce').fillna(0)
+            
+            unalloc_by_period = df_grouped.groupby("period")["unallocated_demand"].sum()
+            demand_by_period = df_grouped.groupby("period")["demand_quantity"].sum()
+            
+            summary_data = {"Metric": ["🔢 UNALLOCATED QTY", "📊 TOTAL DEMAND", "📈 UNALLOCATED %"]}
+            
+            for period_val in unalloc_by_period.index:
+                col_name = f"🔴 {period_val}" if is_past_period(str(period_val), period) else str(period_val)
+                total_demand = demand_by_period[period_val]
+                unalloc_qty = unalloc_by_period[period_val]
+                unalloc_pct = (unalloc_qty / total_demand * 100) if total_demand > 0 else 0
+                
+                summary_data[col_name] = [
+                    format_number(unalloc_qty),
+                    format_number(total_demand),
+                    f"{unalloc_pct:.1f}%"
+                ]
+                
+        else:  # Allocation %
+            # Show allocation percentage summary
+            df_grouped["total_allocated"] = pd.to_numeric(df_grouped["total_allocated"], errors='coerce').fillna(0)
+            df_grouped["demand_quantity"] = pd.to_numeric(df_grouped["demand_quantity"], errors='coerce').fillna(0)
+            
+            alloc_by_period = df_grouped.groupby("period")["total_allocated"].sum()
+            demand_by_period = df_grouped.groupby("period")["demand_quantity"].sum()
+            
+            summary_data = {"Metric": ["📦 ALLOCATED QTY", "📊 TOTAL DEMAND", "✅ ALLOCATION %"]}
+            
+            for period_val in alloc_by_period.index:
+                col_name = f"🔴 {period_val}" if is_past_period(str(period_val), period) else str(period_val)
+                total_demand = demand_by_period[period_val]
+                alloc_qty = alloc_by_period[period_val]
+                alloc_pct = (alloc_qty / total_demand * 100) if total_demand > 0 else 0
+                
+                summary_data[col_name] = [
+                    format_number(alloc_qty),
+                    format_number(total_demand),
+                    f"{alloc_pct:.1f}%"
+                ]
         
         display_final = pd.DataFrame(summary_data)
         
-        # Sort columns (need to handle renamed columns)
+        # Sort columns (need to handle renamed columns) - EXISTING LOGIC
         metric_cols = ["Metric"]
         period_cols = [col for col in display_final.columns if col not in metric_cols]
         
@@ -920,6 +1324,120 @@ def show_demand_totals_with_indicators(df_summary: pd.DataFrame, period: str):
         
     except Exception as e:
         logger.error(f"Error showing totals: {str(e)}")
+
+# UPDATE EXISTING FUNCTION - KHÔNG TẠO MỚI
+def show_demand_totals_with_indicators(df_summary: pd.DataFrame, period: str, 
+                                       view_mode: str = "Total Demand"):
+    """Show period totals for demand with past period indicators AND ALLOCATION INFO"""
+    try:
+        # Prepare data based on view mode
+        df_grouped = df_summary.copy()
+        
+        if view_mode == "Total Demand":
+            # Original behavior
+            df_grouped["demand_quantity"] = pd.to_numeric(df_grouped["demand_quantity"], errors='coerce').fillna(0)
+            df_grouped["value_in_usd"] = pd.to_numeric(df_grouped["value_in_usd"], errors='coerce').fillna(0)
+            
+            # Calculate aggregates
+            qty_by_period = df_grouped.groupby("period")["demand_quantity"].sum()
+            val_by_period = df_grouped.groupby("period")["value_in_usd"].sum()
+            
+            # Create summary DataFrame - EXISTING FORMAT
+            summary_data = {"Metric": ["🔢 TOTAL QUANTITY", "💵 TOTAL VALUE (USD)"]}
+            
+            # Add all periods to summary_data with indicators
+            for period_val in qty_by_period.index:
+                col_name = f"🔴 {period_val}" if is_past_period(str(period_val), period) else str(period_val)
+                summary_data[col_name] = [
+                    format_number(qty_by_period[period_val]),
+                    format_currency(val_by_period[period_val])
+                ]
+                
+        elif view_mode == "Net Unallocated":
+            # Show unallocated totals
+            df_grouped["unallocated_demand"] = pd.to_numeric(df_grouped["unallocated_demand"], errors='coerce').fillna(0)
+            df_grouped["demand_quantity"] = pd.to_numeric(df_grouped["demand_quantity"], errors='coerce').fillna(0)
+            
+            unalloc_by_period = df_grouped.groupby("period")["unallocated_demand"].sum()
+            demand_by_period = df_grouped.groupby("period")["demand_quantity"].sum()
+            
+            summary_data = {"Metric": ["🔢 UNALLOCATED QTY", "📊 TOTAL DEMAND", "📈 UNALLOCATED %"]}
+            
+            for period_val in unalloc_by_period.index:
+                col_name = f"🔴 {period_val}" if is_past_period(str(period_val), period) else str(period_val)
+                total_demand = demand_by_period[period_val]
+                unalloc_qty = unalloc_by_period[period_val]
+                unalloc_pct = (unalloc_qty / total_demand * 100) if total_demand > 0 else 0
+                
+                summary_data[col_name] = [
+                    format_number(unalloc_qty),
+                    format_number(total_demand),
+                    f"{unalloc_pct:.1f}%"
+                ]
+                
+        else:  # Allocation %
+            # Show allocation percentage summary
+            df_grouped["total_allocated"] = pd.to_numeric(df_grouped["total_allocated"], errors='coerce').fillna(0)
+            df_grouped["demand_quantity"] = pd.to_numeric(df_grouped["demand_quantity"], errors='coerce').fillna(0)
+            
+            alloc_by_period = df_grouped.groupby("period")["total_allocated"].sum()
+            demand_by_period = df_grouped.groupby("period")["demand_quantity"].sum()
+            
+            summary_data = {"Metric": ["📦 ALLOCATED QTY", "📊 TOTAL DEMAND", "✅ ALLOCATION %"]}
+            
+            for period_val in alloc_by_period.index:
+                col_name = f"🔴 {period_val}" if is_past_period(str(period_val), period) else str(period_val)
+                total_demand = demand_by_period[period_val]
+                alloc_qty = alloc_by_period[period_val]
+                alloc_pct = (alloc_qty / total_demand * 100) if total_demand > 0 else 0
+                
+                summary_data[col_name] = [
+                    format_number(alloc_qty),
+                    format_number(total_demand),
+                    f"{alloc_pct:.1f}%"
+                ]
+        
+        display_final = pd.DataFrame(summary_data)
+        
+        # Sort columns (need to handle renamed columns) - EXISTING LOGIC
+        metric_cols = ["Metric"]
+        period_cols = [col for col in display_final.columns if col not in metric_cols]
+        
+        # Sort period columns based on original period value
+        def get_sort_key(col_name):
+            # Remove indicator if present
+            clean_name = col_name.replace("🔴 ", "")
+            if period == "Weekly":
+                return parse_week_period(clean_name)
+            elif period == "Monthly":
+                return parse_month_period(clean_name)
+            else:
+                return clean_name
+        
+        sorted_period_cols = sorted(period_cols, key=get_sort_key)
+        display_final = display_final[metric_cols + sorted_period_cols]
+        
+        st.markdown("#### 🔢 Column Totals")
+        st.dataframe(display_final, use_container_width=True)
+        
+    except Exception as e:
+        logger.error(f"Error showing totals: {str(e)}")
+
+
+def format_pivot_for_display(pivot_df: pd.DataFrame) -> pd.DataFrame:
+    """Format pivot table for display - PRESERVE COLUMN ORDER"""
+    display_pivot = pivot_df.copy()
+    
+    # Remember original column order
+    original_columns = list(display_pivot.columns)
+    
+    # Format only numeric columns (skip first 2 columns: product_name and pt_code)
+    for col in original_columns[2:]:  
+        display_pivot[col] = display_pivot[col].apply(lambda x: format_number(x))
+    
+    # IMPORTANT: Return with original column order preserved
+    return display_pivot[original_columns]
+
 
 # === Main Page Logic ===
 def main():

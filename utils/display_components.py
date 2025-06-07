@@ -527,7 +527,7 @@ class DisplayComponents:
         Standardized filter option radio buttons
         Used in detail tables for all pages
         """
-        st.markdown("**Filter Options:**")
+        # st.markdown("**Filter Options:**")
         return st.radio(
             "Select filter:",
             options=options,
