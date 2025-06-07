@@ -35,6 +35,15 @@ from utils.date_mode_component import DateModeComponent
 
 from typing import Tuple, Dict, Any, Optional, List
 
+def ensure_numeric_columns(df, columns):
+    """Ensure columns are numeric type to prevent Arrow errors"""
+    for col in columns:
+        if col in df.columns:
+            # Convert to numeric, replacing errors with 0
+            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+    return df
+
+
 # Configure logging
 logger = logging.getLogger(__name__)
 
@@ -115,11 +124,19 @@ def get_supply_date_column(df, source_type, use_adjusted):
 
 
 # === Data Loading Functions ===
+
+
+
 def load_and_prepare_demand_data(selected_demand_sources, include_converted):
     """Load and standardize demand data based on source selection"""
     try:
         # Use data_manager to get demand data
         df = data_manager.get_demand_data(sources=selected_demand_sources, include_converted=include_converted)
+
+        # ADD THIS - Fix numeric columns
+        numeric_cols = ['demand_quantity', 'buying_quantity', 'value_in_usd', 
+                       'total_allocated', 'total_delivered', 'undelivered_allocated']
+        df = ensure_numeric_columns(df, numeric_cols)
         
         if debug_mode and not df.empty:
             st.write(f"🐛 Demand data shape: {df.shape}")
@@ -143,6 +160,10 @@ def load_and_prepare_supply_data(selected_supply_sources, exclude_expired=True):
     try:
         # Use data_manager to get supply data
         df = data_manager.get_supply_data(sources=selected_supply_sources, exclude_expired=exclude_expired)
+
+        # ADD THIS - Fix numeric columns
+        numeric_cols = ['quantity', 'buying_quantity', 'value_in_usd']
+        df = ensure_numeric_columns(df, numeric_cols)
         
         if debug_mode and not df.empty:
             st.write(f"🐛 Supply data shape: {df.shape}")
@@ -230,12 +251,19 @@ def enhance_demand_with_allocation_info(df_demand):
     ).clip(lower=0)
     
     # Add allocation status with percentage
-    df_demand['allocation_status'] = df_demand.apply(
-        lambda x: 'Fully Allocated' if x['unallocated_demand'] <= 0 
-        else f'Partial ({x["total_allocated"]/x["demand_quantity"]*100:.0f}%)' if x['total_allocated'] > 0 and x['demand_quantity'] > 0
-        else 'Not Allocated', 
-        axis=1
-    )
+    def get_allocation_status(row):
+        """Safely calculate allocation status"""
+        if row['demand_quantity'] <= 0:
+            return 'No Demand'
+        elif row['unallocated_demand'] <= 0:
+            return 'Fully Allocated'
+        elif row['total_allocated'] > 0:
+            pct = (row['total_allocated'] / row['demand_quantity'] * 100)
+            return f'Partial ({pct:.0f}%)'
+        else:
+            return 'Not Allocated'
+
+    df_demand['allocation_status'] = df_demand.apply(get_allocation_status, axis=1)
     
     return df_demand
 
