@@ -113,29 +113,6 @@ def get_supply_date_column(df, source_type, use_adjusted):
     return DateModeComponent.get_date_column_for_display(df, base_column, use_adjusted)
 
 
-# ADD this function sau function get_supply_date_column
-
-def get_supply_date_column_for_gap(df, source_type, use_adjusted):
-    """Get supply date column - handle unified dates for All view in GAP"""
-    # Check if this is combined data with unified dates
-    if 'unified_date' in df.columns and 'source_type' in df.columns and len(df['source_type'].unique()) > 1:
-        if use_adjusted and 'unified_date_adjusted' in df.columns:
-            return 'unified_date_adjusted'
-        else:
-            return 'unified_date'
-    
-    # Otherwise use source-specific dates
-    date_mapping = {
-        'Inventory': 'date_ref',
-        'Pending CAN': 'arrival_date', 
-        'Pending PO': 'eta',
-        'Pending WH Transfer': 'transfer_date'
-    }
-    base_column = date_mapping.get(source_type, 'date_ref')
-    return DateModeComponent.get_date_column_for_display(df, base_column, use_adjusted)
-
-
-
 
 # === Data Loading Functions ===
 def load_and_prepare_demand_data(selected_demand_sources, include_converted):
@@ -1191,34 +1168,6 @@ def calculate_gap_with_carry_forward(df_demand, df_supply, period_type="Weekly",
     
     return gap_df
 
-# REPLACE phần xử lý supply period conversion trong calculate_gap_with_carry_forward
-# Tìm comment "# For supply, handle different date columns per source type" và replace đoạn code sau nó
-
-    # For supply, handle different date columns per source type
-    if 'source_type' in df_s.columns:
-        # Check if unified dates are available (multiple sources)
-        if 'unified_date' in df_s.columns and len(df_s['source_type'].unique()) > 1:
-            date_col = 'unified_date_adjusted' if use_adjusted_supply else 'unified_date'
-            df_s["period"] = convert_to_period(df_s[date_col], period_type)
-        else:
-            # Process each source type separately
-            for source_type in df_s['source_type'].unique():
-                source_mask = df_s['source_type'] == source_type
-                source_df = df_s[source_mask]
-                
-                supply_date_col = get_supply_date_column_for_gap(source_df, source_type, use_adjusted_supply)
-                if supply_date_col in source_df.columns:
-                    df_s.loc[source_mask, "period"] = convert_to_period(
-                        source_df[supply_date_col], 
-                        period_type
-                    )
-    else:
-        # Fallback if no source_type
-        if 'date_ref' in df_s.columns:
-            df_s["period"] = convert_to_period(df_s["date_ref"], period_type)
-        else:
-            st.warning("No appropriate date column found in supply data")
-            return pd.DataFrame()
 
 
 def get_all_periods(demand_grouped, supply_grouped, period_type):
@@ -1644,42 +1593,7 @@ def show_gap_summary(gap_df, display_options, df_demand_filtered=None, df_supply
     if st.checkbox("🔍 Show Advanced Analytics", key="gap_show_advanced"):
         show_advanced_gap_analytics(gap_df, display_options, df_demand_filtered, df_supply_filtered)
     
-    # === Action Buttons (Always visible if shortage exists) ===
-    # if shortage_products > 0:
-    #     st.markdown("---")
-    #     st.markdown("#### 🎯 Recommended Actions")
-        
-    #     col1, col2, col3 = st.columns(3)
-        
-    #     with col1:
-    #         if st.button("🧩 Create Allocation Plan", 
-    #                     type="primary", 
-    #                     use_container_width=True,
-    #                     key="gap_create_allocation_btn"):  # Add unique key
-    #             st.switch_page("pages/4_🧩_Allocation_Plan.py")
-        
-    #     with col2:
-    #         if st.button("📌 Generate PO Suggestions", 
-    #                     type="secondary", 
-    #                     use_container_width=True,
-    #                     key="gap_generate_po_btn"):  # Add unique key
-    #             st.switch_page("pages/5_📌_PO_Suggestions.py")
-        
-    #     with col3:
-    #         # Get shortage details for export
-    #         shortage_df = gap_df[gap_df['gap_quantity'] < 0].copy()
-    #         shortage_summary = shortage_df.groupby(['pt_code', 'product_name']).agg({
-    #             'gap_quantity': 'sum',
-    #             'total_demand_qty': 'sum'
-    #         }).reset_index()
-    #         shortage_summary['gap_quantity'] = shortage_summary['gap_quantity'].abs()
-            
-    #         # DisplayComponents.show_export_button already has timestamp which makes it unique
-    #         DisplayComponents.show_export_button(
-    #             df=shortage_summary,
-    #             filename="shortage_summary",
-    #             button_label="📤 Export Shortage Report"
-    #         )
+
 
 def show_advanced_gap_analytics(gap_df, display_options, df_demand_filtered=None, df_supply_filtered=None):
     """Show advanced analytics for power users"""
