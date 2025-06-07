@@ -942,6 +942,19 @@ def calculate_gap_with_carry_forward(df_demand, df_supply, period_type="Weekly",
         st.warning("No data available for GAP calculation")
         return pd.DataFrame()
     
+    # Helper function for safe period validation
+    def is_valid_period(period):
+        """Check if period is valid"""
+        if pd.isna(period):
+            return False
+        if period is None:
+            return False
+        # Convert to string and check
+        period_str = str(period).strip()
+        if period_str == "" or period_str.lower() == "nan" or period_str.lower() == "none":
+            return False
+        return True
+    
     # Special handling for demand-only scenario (no supply)
     if not df_demand.empty and df_supply.empty:
         st.info("📤 Demand-Only Scenario: No supply available for these products")
@@ -951,18 +964,24 @@ def calculate_gap_with_carry_forward(df_demand, df_supply, period_type="Weekly",
         
         df_d = df_demand_enhanced.copy()
         
-        # Convert demand dates to periods
+        # Convert demand dates to periods with null handling
         demand_date_col = get_demand_date_column(df_d, use_adjusted_demand)
-        df_d["period"] = convert_to_period(df_d[demand_date_col], period_type)
+        if demand_date_col and demand_date_col in df_d.columns:
+            df_d["period"] = df_d[demand_date_col].apply(
+                lambda x: convert_to_period(x, period_type) if pd.notna(x) else None
+            )
+        else:
+            logger.warning(f"Demand date column {demand_date_col} not found")
+            df_d["period"] = None
         
-        # Remove invalid periods
-        df_d = df_d[df_d["period"].notna() & (df_d["period"] != "")]
+        # Remove invalid periods using safe validation
+        df_d = df_d[df_d["period"].apply(is_valid_period)]
         
         if df_d.empty:
             st.warning("No valid period data for demand")
             return pd.DataFrame()
         
-        # Group demand
+        # Group demand - KEEP BOTH original and unallocated
         demand_grouped = df_d.groupby(
             ["pt_code", "product_name", "package_size", "standard_uom", "period"],
             as_index=False,
@@ -972,7 +991,8 @@ def calculate_gap_with_carry_forward(df_demand, df_supply, period_type="Weekly",
             "unallocated_demand": "sum"
         })
         
-        # Use unallocated demand for GAP calculation
+        # Rename for clarity - DON'T OVERWRITE
+        demand_grouped["original_demand_qty"] = demand_grouped["demand_quantity"]
         demand_grouped["total_demand_qty"] = demand_grouped["unallocated_demand"]
         
         # Create GAP results with zero supply
@@ -988,6 +1008,7 @@ def calculate_gap_with_carry_forward(df_demand, df_supply, period_type="Weekly",
                 "supply_in_period": 0,
                 "total_available": 0,
                 "total_demand_qty": row["total_demand_qty"],
+                "original_demand_qty": row["original_demand_qty"],  # Keep original
                 "gap_quantity": -row["total_demand_qty"],  # Negative because no supply
                 "fulfillment_rate_percent": 0,
                 "fulfillment_status": "❌ No Supply"
@@ -1008,28 +1029,34 @@ def calculate_gap_with_carry_forward(df_demand, df_supply, period_type="Weekly",
         
         # Convert supply dates to periods based on source type
         if 'source_type' in df_s.columns:
-            # Create period column for each source type
-            df_s["period"] = pd.NaT
+            # Initialize period column
+            df_s["period"] = None
             
             for source_type in df_s['source_type'].unique():
                 source_mask = df_s['source_type'] == source_type
                 source_df = df_s[source_mask]
                 
                 supply_date_col = get_supply_date_column(source_df, source_type, use_adjusted_supply)
-                if supply_date_col in source_df.columns:
-                    # Convert to period for this source type
-                    periods = convert_to_period(source_df[supply_date_col], period_type)
+                if supply_date_col and supply_date_col in source_df.columns:
+                    # Safe conversion with null handling
+                    periods = source_df[supply_date_col].apply(
+                        lambda x: convert_to_period(x, period_type) if pd.notna(x) else None
+                    )
                     df_s.loc[source_mask, "period"] = periods
+                else:
+                    logger.warning(f"Supply date column {supply_date_col} not found for {source_type}")
         else:
-            # Fallback - use date_ref if exists, otherwise skip
+            # Fallback - use date_ref if exists
             if 'date_ref' in df_s.columns:
-                df_s["period"] = convert_to_period(df_s["date_ref"], period_type)
+                df_s["period"] = df_s['date_ref'].apply(
+                    lambda x: convert_to_period(x, period_type) if pd.notna(x) else None
+                )
             else:
                 st.warning("No date column found in supply data")
                 return pd.DataFrame()
         
-        # Remove invalid periods
-        df_s = df_s[df_s["period"].notna() & (df_s["period"] != "")]
+        # Remove invalid periods using safe validation
+        df_s = df_s[df_s["period"].apply(is_valid_period)]
         
         if df_s.empty:
             st.warning("No valid period data for supply")
@@ -1057,6 +1084,7 @@ def calculate_gap_with_carry_forward(df_demand, df_supply, period_type="Weekly",
                 "supply_in_period": row["quantity"],
                 "total_available": row["quantity"],
                 "total_demand_qty": 0,
+                "original_demand_qty": 0,  # Add original demand
                 "gap_quantity": row["quantity"],  # Positive because no demand
                 "fulfillment_rate_percent": 100,
                 "fulfillment_status": "✅ Excess Supply"
@@ -1084,34 +1112,52 @@ def calculate_gap_with_carry_forward(df_demand, df_supply, period_type="Weekly",
     df_d = df_demand_enhanced.copy()
     df_s = df_supply.copy()
     
-    # Convert to periods using appropriate date columns
+    # Convert demand dates to periods with validation
     demand_date_col = get_demand_date_column(df_d, use_adjusted_demand)
-    df_d["period"] = convert_to_period(df_d[demand_date_col], period_type)
+    if demand_date_col and demand_date_col in df_d.columns:
+        df_d["period"] = df_d[demand_date_col].apply(
+            lambda x: convert_to_period(x, period_type) if pd.notna(x) else None
+        )
+    else:
+        logger.warning(f"Demand date column {demand_date_col} not found")
+        df_d["period"] = None
     
-    # For supply, handle different date columns per source type
+    # Convert supply dates to periods with validation
     if 'source_type' in df_s.columns:
+        # Initialize period column
+        df_s["period"] = None
+        
         for source_type in df_s['source_type'].unique():
             source_mask = df_s['source_type'] == source_type
             source_df = df_s[source_mask]
             
             supply_date_col = get_supply_date_column(source_df, source_type, use_adjusted_supply)
-            if supply_date_col in source_df.columns:
-                df_s.loc[source_mask, "period"] = convert_to_period(
-                    source_df[supply_date_col], 
-                    period_type
+            
+            # Check if column exists before using
+            if supply_date_col and supply_date_col in source_df.columns:
+                # Safe conversion
+                periods = source_df[supply_date_col].apply(
+                    lambda x: convert_to_period(x, period_type) if pd.notna(x) else None
                 )
+                df_s.loc[source_mask, "period"] = periods
+            else:
+                logger.warning(f"Supply date column {supply_date_col} not found for {source_type}")
     else:
-        # Fallback if no source_type
+        # Fallback if no source_type column
+        logger.warning("No source_type column in supply data")
         if 'date_ref' in df_s.columns:
-            df_s["period"] = convert_to_period(df_s["date_ref"], period_type)
+            df_s["period"] = df_s['date_ref'].apply(
+                lambda x: convert_to_period(x, period_type) if pd.notna(x) else None
+            )
         else:
             st.warning("No appropriate date column found in supply data")
             return pd.DataFrame()
     
-    # Remove rows with invalid periods
-    df_d = df_d[df_d["period"].notna() & (df_d["period"] != "")]
-    df_s = df_s[df_s["period"].notna() & (df_s["period"] != "")]
+    # Filter with safe validation
+    df_d = df_d[df_d["period"].apply(is_valid_period)]
+    df_s = df_s[df_s["period"].apply(is_valid_period)]
     
+    # Log filtering results
     if debug_mode:
         st.write("🐛 After period conversion:")
         st.write(f"- Demand records with valid periods: {len(df_d)}")
@@ -1119,7 +1165,7 @@ def calculate_gap_with_carry_forward(df_demand, df_supply, period_type="Weekly",
         st.write(f"- Unique demand products: {df_d['pt_code'].nunique()}")
         st.write(f"- Unique supply products: {df_s['pt_code'].nunique()}")
     
-    # Group demand by product and period
+    # Group demand - KEEP BOTH values
     demand_grouped = df_d.groupby(
         ["pt_code", "product_name", "package_size", "standard_uom", "period"],
         as_index=False,
@@ -1129,8 +1175,9 @@ def calculate_gap_with_carry_forward(df_demand, df_supply, period_type="Weekly",
         "unallocated_demand": "sum"
     })
     
-    # Use unallocated demand for GAP calculation
-    demand_grouped["total_demand_qty"] = demand_grouped["unallocated_demand"]
+    # Rename for clarity - DON'T OVERWRITE
+    demand_grouped["original_demand_qty"] = demand_grouped["demand_quantity"]
+    demand_grouped["total_demand_qty"] = demand_grouped["unallocated_demand"]  # Use unallocated for GAP calc
     
     # Group supply
     supply_grouped = df_s.groupby(
@@ -1195,7 +1242,6 @@ def calculate_gap_with_carry_forward(df_demand, df_supply, period_type="Weekly",
         st.write(f"- Rows with shortage: {len(gap_df[gap_df['gap_quantity'] < 0])}")
     
     return gap_df
-
 
 
 def get_all_periods(demand_grouped, supply_grouped, period_type):
