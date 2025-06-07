@@ -1138,3 +1138,66 @@ class DataManager:
             demand_df['allocation_status'] = 'Not Allocated'
             demand_df['allocation_numbers'] = ''
             return demand_df
+        
+
+    def enhance_supply_with_allocations(self, supply_df: pd.DataFrame) -> pd.DataFrame:
+        """Enhance supply data with allocation information"""
+        if supply_df.empty:
+            return supply_df
+        
+        try:
+            # Load active allocations
+            allocations_df = self.load_active_allocations()
+            
+            if allocations_df.empty:
+                # No allocations, add default columns
+                supply_df['allocation_undelivered'] = 0
+                supply_df['available_quantity'] = supply_df['quantity']
+                return supply_df
+            
+            # Group allocations by product and entity to get total undelivered
+            allocation_summary = allocations_df.groupby(['pt_code', 'legal_entity_name']).agg({
+                'undelivered_qty': 'sum'
+            }).reset_index()
+            allocation_summary.rename(columns={
+                'legal_entity_name': 'legal_entity',
+                'undelivered_qty': 'allocation_undelivered'
+            }, inplace=True)
+            
+            # Merge with supply data
+            supply_enhanced = supply_df.merge(
+                allocation_summary,
+                on=['pt_code', 'legal_entity'],
+                how='left'
+            )
+            
+            # Fill NaN values
+            supply_enhanced['allocation_undelivered'] = supply_enhanced['allocation_undelivered'].fillna(0)
+            
+            # Calculate available quantity
+            supply_enhanced['available_quantity'] = (
+                supply_enhanced['quantity'] - supply_enhanced['allocation_undelivered']
+            ).clip(lower=0)
+            
+            # Log summary if debug mode
+            if st.session_state.get('debug_mode', False):
+                total_supply = supply_enhanced['quantity'].sum()
+                total_allocated = supply_enhanced['allocation_undelivered'].sum()
+                total_available = supply_enhanced['available_quantity'].sum()
+                
+                logger.info(f"Supply allocation impact: Total={total_supply:,.0f}, "
+                        f"Allocated={total_allocated:,.0f}, Available={total_available:,.0f}")
+                
+                # Products with allocation impact
+                impacted = supply_enhanced[supply_enhanced['allocation_undelivered'] > 0]
+                if not impacted.empty:
+                    logger.info(f"Products with allocations: {impacted['pt_code'].nunique()}")
+            
+            return supply_enhanced
+            
+        except Exception as e:
+            logger.error(f"Error enhancing supply with allocations: {str(e)}")
+            # Return original with default values
+            supply_df['allocation_undelivered'] = 0
+            supply_df['available_quantity'] = supply_df['quantity']
+            return supply_df

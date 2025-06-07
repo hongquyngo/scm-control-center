@@ -113,46 +113,48 @@ def get_supply_date_column(df: pd.DataFrame, source_type: str, use_adjusted_date
 
 
 # === Data Loading Functions ===
-def load_and_prepare_supply_data(supply_source: str, exclude_expired: bool = True, 
-                                use_adjusted_dates: bool = True) -> pd.DataFrame:
-    """Load and standardize supply data based on source selection"""
+def load_and_prepare_supply_data(source_type: str, exclude_expired: bool, use_adjusted_dates: bool = True) -> pd.DataFrame:
+    """Load and standardize supply data based on source selection WITH ALLOCATION INFO"""
     try:
-        # Convert source selection to list format for data_manager
+        # Determine sources to load
         sources = []
-        if supply_source == "All":
-            sources = ["Inventory", "Pending CAN", "Pending PO", "Pending WH Transfer"]
-        elif supply_source == "Inventory Only":
+        if source_type == "Inventory Only":
             sources = ["Inventory"]
-        elif supply_source == "Pending CAN Only":
+        elif source_type == "Pending CAN Only":
             sources = ["Pending CAN"]
-        elif supply_source == "Pending PO Only":
+        elif source_type == "Pending PO Only":
             sources = ["Pending PO"]
-        elif supply_source == "Pending WH Transfer Only":
+        elif source_type == "Pending WH Transfer Only":
             sources = ["Pending WH Transfer"]
+        elif source_type == "All":
+            sources = ["Inventory", "Pending CAN", "Pending PO", "Pending WH Transfer"]
         
         # Use data_manager to get supply data
         df = data_manager.get_supply_data(sources=sources, exclude_expired=exclude_expired)
         
-        # FIX: Reset index to ensure no duplicates
-        if not df.empty:
-            df = df.reset_index(drop=True)
+        if df.empty:
+            return df
+        
+        # NEW: Enhance with allocation information
+        df = data_manager.enhance_supply_with_allocations(df)
         
         if debug_mode and not df.empty:
             debug_info = {
                 "Total rows": len(df),
                 "Unique products": df['pt_code'].nunique() if 'pt_code' in df.columns else 0,
-                "Supply sources": df['source_type'].value_counts().to_dict() if 'source_type' in df.columns else {},
-                "Date columns": [col for col in df.columns if any(x in col.lower() for x in 
-                               ['date', 'arrival', 'eta', 'transfer', 'created', 'receipt', 'stockin'])],
-                "Index is unique": df.index.is_unique,  # Add this check
-                "Duplicate rows": df.duplicated().sum()  # Add this check
+                "Data sources": df['source_type'].value_counts().to_dict() if 'source_type' in df.columns else {},
+                "Date columns": [col for col in df.columns if any(d in col.lower() for d in ['date', 'eta', 'arrival'])],
+                # NEW: Allocation debug info
+                "Total allocated": df['allocation_undelivered'].sum() if 'allocation_undelivered' in df.columns else 0,
+                "Total available": df['available_quantity'].sum() if 'available_quantity' in df.columns else 0,
+                "Items with allocations": len(df[df['allocation_undelivered'] > 0]) if 'allocation_undelivered' in df.columns else 0
             }
             DisplayComponents.show_debug_info(debug_info)
         
         return df
         
     except Exception as e:
-        logger.error(f"Error loading supply data: {str(e)}")
+        logger.error(f"Error in load_and_prepare_supply_data: {str(e)}")
         st.error(f"Failed to load supply data: {str(e)}")
         return pd.DataFrame()
 
@@ -605,7 +607,6 @@ def show_supply_summary(filtered_df: pd.DataFrame, filter_params: Dict, use_adju
             'pt_code': 'nunique'
         }).reset_index()
         
-        
         # Display overall metrics
         metrics = [
             {
@@ -625,6 +626,15 @@ def show_supply_summary(filtered_df: pd.DataFrame, filter_params: Dict, use_adju
             }
         ]
         
+        # NEW: Add allocation metric if columns exist
+        if 'allocation_undelivered' in filtered_df.columns:
+            metrics.append({
+                "title": "Allocation Impact",
+                "value": filtered_df["allocation_undelivered"].sum(),
+                "format_type": "number",
+                "delta": f"{filtered_df[filtered_df['allocation_undelivered'] > 0]['pt_code'].nunique()} products"
+            })
+        
         # Render summary section with additional content
         DisplayComponents.render_summary_section(
             metrics=metrics,
@@ -634,7 +644,7 @@ def show_supply_summary(filtered_df: pd.DataFrame, filter_params: Dict, use_adju
         
     except Exception as e:
         logger.error(f"Error showing supply summary: {str(e)}")
-        st.error(f"Error displaying summary: {str(e)}")
+        st.error(f"Error displaying supply summary: {str(e)}")
 
 
 def show_additional_supply_info(filtered_df: pd.DataFrame, source_summary: pd.DataFrame, 
@@ -1083,10 +1093,16 @@ def prepare_supply_detail_display(display_df: pd.DataFrame) -> pd.DataFrame:
             base_columns.insert(insert_index, date_col)
             insert_index += 1
     
-    # Add remaining standard columns
-    base_columns.extend(["quantity", "value_in_usd", "legal_entity"])
+    # Add quantity columns
+    base_columns.append("quantity")
     
-    # Add source-specific additional columns
+    # NEW: Add allocation columns if they exist
+    if "allocation_undelivered" in display_df.columns:
+        base_columns.extend(["allocation_undelivered", "available_quantity"])
+    
+    base_columns.extend(["value_in_usd", "legal_entity"])
+    
+    # Add source-specific additional columns (KEEP EXISTING CODE)
     additional_columns = []
     
     if "expiry_date" in display_df.columns:
@@ -1124,7 +1140,7 @@ def prepare_supply_detail_display(display_df: pd.DataFrame) -> pd.DataFrame:
     
     display_df = display_df[display_columns].copy()
     
-    # Sort by appropriate columns
+    # Sort by appropriate columns (KEEP EXISTING SORT LOGIC)
     sort_columns = []
     
     # For All view, sort by source_type first
@@ -1169,7 +1185,13 @@ def format_supply_display_df_enhanced(df: pd.DataFrame, date_columns: List[str])
         if "value_in_usd" in df.columns:
             df["value_in_usd"] = df["value_in_usd"].apply(lambda x: format_currency(x))
         
-        # Enhanced date formatting with indicators for all date columns
+        # NEW: Format allocation columns
+        if "allocation_undelivered" in df.columns:
+            df["allocation_undelivered"] = df["allocation_undelivered"].apply(lambda x: format_number(x))
+        if "available_quantity" in df.columns:
+            df["available_quantity"] = df["available_quantity"].apply(lambda x: format_number(x))
+        
+        # Enhanced date formatting with indicators for all date columns (KEEP EXISTING CODE)
         def format_date_with_status(x):
             if pd.isna(x):
                 return "❌ Missing"
@@ -1192,13 +1214,13 @@ def format_supply_display_df_enhanced(df: pd.DataFrame, date_columns: List[str])
         if "unified_date_adjusted" in df.columns and "unified_date_adjusted" not in date_columns:
             df["unified_date_adjusted"] = df["unified_date_adjusted"].apply(format_date_with_status)
         
-        # Format expiry date
+        # Format expiry date (KEEP EXISTING CODE)
         if "expiry_date" in df.columns:
             df["expiry_date"] = df["expiry_date"].apply(
                 lambda x: "" if pd.isna(x) else x.strftime("%Y-%m-%d")
             )
         
-        # Format days columns with color coding
+        # Format days columns with color coding (KEEP EXISTING CODE)
         if "days_until_expiry" in df.columns:
             def format_days_until_expiry(x):
                 if pd.isna(x):
@@ -1211,42 +1233,25 @@ def format_supply_display_df_enhanced(df: pd.DataFrame, date_columns: List[str])
                 elif days <= 30:
                     return f"🟡 {days} days"
                 else:
-                    return f"✅ {days} days"
-            
+                    return f"🟢 {days} days"
             df["days_until_expiry"] = df["days_until_expiry"].apply(format_days_until_expiry)
         
         if "days_since_arrival" in df.columns:
-            def format_days_since_arrival(x):
-                if pd.isna(x):
-                    return ""
-                days = int(x)
-                if days > 7:
-                    return f"🔴 {days} days"
-                elif days > 3:
-                    return f"🟡 {days} days"
-                else:
-                    return f"✅ {days} days"
-            
-            df["days_since_arrival"] = df["days_since_arrival"].apply(format_days_since_arrival)
+            df["days_since_arrival"] = df["days_since_arrival"].apply(
+                lambda x: f"{int(x)} days" if pd.notna(x) else ""
+            )
         
         if "days_in_transfer" in df.columns:
-            def format_days_in_transfer(x):
-                if pd.isna(x):
-                    return ""
-                days = int(x)
-                if days > 3:
-                    return f"🔴 {days} days"
-                elif days > 2:
-                    return f"🟡 {days} days"
-                else:
-                    return f"✅ {days} days"
-            
-            df["days_in_transfer"] = df["days_in_transfer"].apply(format_days_in_transfer)
+            df["days_in_transfer"] = df["days_in_transfer"].apply(
+                lambda x: f"{int(x)} days" if pd.notna(x) else ""
+            )
+        
+        return df
         
     except Exception as e:
-        logger.error(f"Error formatting display dataframe: {str(e)}")
-    
-    return df
+        logger.error(f"Error formatting supply dataframe: {str(e)}")
+        return df
+
 
 
 def highlight_supply_issues_enhanced(row: pd.Series, date_columns: List[str]) -> List[str]:
