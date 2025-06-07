@@ -181,120 +181,7 @@ def load_and_prepare_supply_data(selected_supply_sources, exclude_expired=True):
         st.error(f"Failed to load supply data: {str(e)}")
         return pd.DataFrame()
 
-def enhance_demand_with_allocation_info(df_demand):
-    """Add allocation information to demand dataframe - IMPROVED VERSION"""
-    engine = get_db_engine()
-    
-    # Initialize allocation columns first
-    df_demand['total_allocated'] = 0
-    df_demand['total_delivered'] = 0
-    df_demand['undelivered_allocated'] = 0
-    
-    try:
-        # Query all allocations using the view
-        allocations_query = """
-        SELECT 
-            pt_code,
-            demand_type,
-            demand_reference_id,
-            SUM(total_allocated_qty) as total_allocated,
-            SUM(total_delivered_qty) as total_delivered,
-            SUM(undelivered_qty) as undelivered_allocated
-        FROM active_allocations_view
-        GROUP BY pt_code, demand_type, demand_reference_id
-        """
-        
-        allocations_df = pd.read_sql(text(allocations_query), engine)
-        
-        if not allocations_df.empty and 'demand_line_id' in df_demand.columns:
-            # Create mapping for demand_reference_id
-            df_demand['demand_ref_id'] = df_demand['demand_line_id'].str.extract(r'(\d+)_')[0]
-            df_demand['demand_ref_id'] = pd.to_numeric(df_demand['demand_ref_id'], errors='coerce')
-            
-            # Determine demand type from source_type
-            df_demand['alloc_demand_type'] = df_demand['source_type'].map({
-                'OC': 'OC',
-                'Forecast': 'FORECAST'
-            })
-            
-            # Merge allocations
-            df_demand = df_demand.merge(
-                allocations_df,
-                left_on=['pt_code', 'alloc_demand_type', 'demand_ref_id'],
-                right_on=['pt_code', 'demand_type', 'demand_reference_id'],
-                how='left',
-                suffixes=('', '_alloc')
-            )
-            
-            # Update allocation columns
-            for col in ['total_allocated', 'total_delivered', 'undelivered_allocated']:
-                col_alloc = f'{col}_alloc'
-                if col_alloc in df_demand.columns:
-                    df_demand[col] = df_demand[col_alloc].fillna(0)
-                    df_demand.drop(columns=[col_alloc], inplace=True)
-            
-            # Clean up temp columns
-            df_demand.drop(columns=['demand_ref_id', 'alloc_demand_type', 'demand_type', 
-                                   'demand_reference_id'], errors='ignore', inplace=True)
-                
-    except Exception as e:
-        logger.error(f"Error loading allocation data: {str(e)}")
-        # Continue with zero allocations
-    
-    # Ensure columns are numeric
-    for col in ['total_allocated', 'total_delivered', 'undelivered_allocated']:
-        df_demand[col] = pd.to_numeric(df_demand[col], errors='coerce').fillna(0)
-    
-    # Calculate unallocated demand
-    df_demand['unallocated_demand'] = (
-        df_demand['demand_quantity'] - df_demand['total_allocated']
-    ).clip(lower=0)
-    
-    # Add allocation status with percentage
-    def get_allocation_status(row):
-        """Safely calculate allocation status"""
-        if row['demand_quantity'] <= 0:
-            return 'No Demand'
-        elif row['unallocated_demand'] <= 0:
-            return 'Fully Allocated'
-        elif row['total_allocated'] > 0:
-            pct = (row['total_allocated'] / row['demand_quantity'] * 100)
-            return f'Partial ({pct:.0f}%)'
-        else:
-            return 'Not Allocated'
 
-    df_demand['allocation_status'] = df_demand.apply(get_allocation_status, axis=1)
-    
-    return df_demand
-
-
-def adjust_supply_for_allocations(df_supply):
-    """Adjust supply quantities based on active allocations"""
-    # Get allocations from session or load
-    df_allocations = get_from_session_state('active_allocations', pd.DataFrame())
-    
-    if df_allocations.empty:
-        # Load if not in session
-        df_allocations = data_manager.load_active_allocations()
-    
-    if not df_allocations.empty and not df_supply.empty:
-        # Adjust available supply by subtracting undelivered allocations
-        for _, alloc in df_allocations.iterrows():
-            # Match by product and entity
-            mask = (
-                (df_supply['pt_code'] == alloc.get('pt_code', '')) & 
-                (df_supply['legal_entity'] == alloc.get('legal_entity_name', ''))
-            )
-            
-            if mask.any() and 'undelivered_qty' in alloc:
-                df_supply.loc[mask, 'quantity'] = df_supply.loc[mask, 'quantity'].apply(
-                    lambda x: max(0, x - alloc['undelivered_qty'])
-                )
-    
-    # Remove rows with zero quantity
-    df_supply = df_supply[df_supply['quantity'] > 0].copy()
-    
-    return df_supply
 
 # === Source Selection ===
 def select_gap_sources():
@@ -960,7 +847,8 @@ def calculate_gap_with_carry_forward(df_demand, df_supply, period_type="Weekly",
         st.info("📤 Demand-Only Scenario: No supply available for these products")
         
         # Enhance demand with allocation info
-        df_demand_enhanced = enhance_demand_with_allocation_info(df_demand)
+
+        df_demand_enhanced = data_manager.enhance_demand_with_allocations(df_demand)
         
         df_d = df_demand_enhanced.copy()
         
@@ -1107,7 +995,7 @@ def calculate_gap_with_carry_forward(df_demand, df_supply, period_type="Weekly",
         st.write(f"- Use adjusted supply: {use_adjusted_supply}")
     
     # Enhance demand with allocation info
-    df_demand_enhanced = enhance_demand_with_allocation_info(df_demand)
+    df_demand_enhanced = data_manager.enhance_demand_with_allocations(df_demand)
     
     df_d = df_demand_enhanced.copy()
     df_s = df_supply.copy()
@@ -2385,6 +2273,8 @@ def highlight_gap_rows_enhanced(row):
     return styles
 
 
+# Replace the show_gap_detail_table function in 3_📊_GAP_Analysis.py
+
 def show_gap_detail_table(gap_df, display_options, df_demand_filtered=None, df_supply_filtered=None):
     """Show detailed GAP analysis table with enhanced filtering like Demand/Supply pages"""
     st.markdown("### 📄 GAP Details by Product & Period")
@@ -2405,6 +2295,16 @@ def show_gap_detail_table(gap_df, display_options, df_demand_filtered=None, df_s
         st.error(f"Missing required columns in GAP data: {missing_columns}")
         return
     
+    # Add row highlighting toggle - same as Demand Analysis
+    col1, col2 = st.columns([3, 1])
+    with col2:
+        enable_row_highlighting = st.checkbox(
+            "Enable Row Highlighting", 
+            value=False, 
+            key="gap_row_highlighting",
+            help="Enable to highlight rows based on shortage status and period issues. May affect performance for large datasets."
+        )
+    
     # Define filter options
     filter_options = [
         "Show All",
@@ -2415,6 +2315,11 @@ def show_gap_detail_table(gap_df, display_options, df_demand_filtered=None, df_s
         "Show Critical Shortage Only"
     ]
     
+    # Prepare style function based on toggle
+    style_func = None
+    if enable_row_highlighting:
+        style_func = highlight_gap_rows_enhanced
+    
     # Use DisplayComponents for detail table with filters
     DisplayComponents.render_detail_table_with_filter(
         df=gap_df,
@@ -2422,7 +2327,7 @@ def show_gap_detail_table(gap_df, display_options, df_demand_filtered=None, df_s
         filter_apply_func=lambda df, opt: apply_gap_detail_filter(df, opt, display_options, 
                                                                  df_demand_filtered, df_supply_filtered),
         format_func=lambda df: format_gap_display_df(df, display_options),
-        style_func=highlight_gap_rows_enhanced,
+        style_func=style_func,  # Only apply if enabled
         height=600,
         key_prefix="gap_detail"
     )
@@ -3019,7 +2924,7 @@ if st.button("🚀 Run GAP Analysis", type="primary", use_container_width=True):
         
         # Adjust supply for allocations
         with st.spinner("Adjusting supply for allocations..."):
-            df_supply_adjusted = adjust_supply_for_allocations(df_supply_all.copy())
+            df_supply_adjusted = data_manager.enhance_supply_with_allocations(df_supply_all.copy())
         
         # DEBUG: Check filters being applied
         if debug_mode:
@@ -3242,7 +3147,7 @@ if st.session_state.get('gap_analysis_ran', False) and st.session_state.get('gap
     )
     
     # Show allocation impact
-    df_demand_enhanced = enhance_demand_with_allocation_info(df_demand_filtered_display)
+    df_demand_enhanced = data_manager.enhance_demand_with_allocations(df_demand_filtered_display)
     show_allocation_impact_summary(df_demand_enhanced)
     
     # Check if we need to recalculate GAP based on period change

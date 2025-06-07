@@ -1043,102 +1043,180 @@ class DataManager:
             logger.error(f"Error loading allocations: {str(e)}")
             return pd.DataFrame()
 
+
     def enhance_demand_with_allocations(self, demand_df: pd.DataFrame) -> pd.DataFrame:
-        """Enhance demand data with allocation information"""
+        """Enhance demand data with allocation information
+        
+        Compatible with both Demand Analysis and GAP Analysis usage.
+        Adds allocation information including allocated quantities, delivery status,
+        and unallocated demand calculations.
+        """
         if demand_df.empty:
             return demand_df
         
         try:
-            # Load allocations
-            allocations_df = self.load_active_allocations()
+            # Load allocations using the active_allocations_view
+            engine = get_db_engine()
+            allocations_query = text("""
+                SELECT 
+                    pt_code,
+                    demand_type,
+                    demand_reference_id,
+                    SUM(total_allocated_qty) as total_allocated,
+                    SUM(total_delivered_qty) as total_delivered,
+                    SUM(undelivered_qty) as undelivered_allocated
+                FROM active_allocations_view
+                GROUP BY pt_code, demand_type, demand_reference_id
+            """)
+            
+            allocations_df = pd.read_sql(allocations_query, engine)
+            
+            # Initialize allocation columns with defaults
+            demand_df['total_allocated'] = 0
+            demand_df['total_delivered'] = 0
+            demand_df['undelivered_allocated'] = 0
+            demand_df['allocation_numbers'] = ''
+            
+            # Keep original demand quantity for GAP analysis
+            demand_df['original_demand_qty'] = demand_df['demand_quantity'].copy()
             
             if allocations_df.empty:
-                # No allocations, add empty columns
-                demand_df['total_allocated'] = 0
-                demand_df['total_delivered'] = 0
-                demand_df['undelivered_allocated'] = 0
+                # No allocations exist
                 demand_df['unallocated_demand'] = demand_df['demand_quantity']
                 demand_df['allocation_status'] = 'Not Allocated'
-                demand_df['allocation_numbers'] = ''
                 return demand_df
             
             # Create demand reference ID for matching
-            demand_df['demand_ref_id'] = demand_df.apply(
-                lambda row: f"{row.get('oc_number', row.get('forecast_number', ''))}",
-                axis=1
-            )
+            # Handle different ID formats based on source
+            if 'demand_line_id' in demand_df.columns:
+                # For GAP Analysis: Extract reference ID from demand_line_id (e.g., "123_OC" -> "123")
+                demand_df['temp_ref_id'] = demand_df['demand_line_id'].str.extract(r'(\d+)_')[0]
+                demand_df['temp_ref_id'] = pd.to_numeric(demand_df['temp_ref_id'], errors='coerce')
+                
+                # Also extract demand type from line ID
+                demand_df['temp_demand_type'] = demand_df['demand_line_id'].str.extract(r'_([A-Z]+)$')[0]
+                demand_df['temp_demand_type'] = demand_df['temp_demand_type'].map({
+                    'OC': 'OC',
+                    'FC': 'FORECAST'
+                }).fillna(demand_df['source_type'].map({'OC': 'OC', 'Forecast': 'FORECAST'}))
+                
+            else:
+                # For Demand Analysis: Use existing reference fields
+                # For OC: use ocd_id or oc_id
+                # For Forecast: use forecast_line_id or forecast_id
+                if 'ocd_id' in demand_df.columns:
+                    demand_df['temp_ref_id'] = pd.to_numeric(demand_df['ocd_id'], errors='coerce')
+                elif 'oc_id' in demand_df.columns:
+                    demand_df['temp_ref_id'] = pd.to_numeric(demand_df['oc_id'], errors='coerce')
+                elif 'forecast_line_id' in demand_df.columns:
+                    demand_df['temp_ref_id'] = pd.to_numeric(demand_df['forecast_line_id'], errors='coerce')
+                elif 'forecast_id' in demand_df.columns:
+                    demand_df['temp_ref_id'] = pd.to_numeric(demand_df['forecast_id'], errors='coerce')
+                else:
+                    # Fallback: try to extract from demand_number
+                    demand_df['temp_ref_id'] = pd.to_numeric(
+                        demand_df.get('demand_number', pd.Series()).str.extract(r'(\d+)')[0], 
+                        errors='coerce'
+                    )
+                
+                # Determine demand type from source_type
+                demand_df['temp_demand_type'] = demand_df['source_type'].map({
+                    'OC': 'OC',
+                    'Forecast': 'FORECAST'
+                }).fillna('OC')  # Default to OC if unknown
             
-            # Determine demand type
-            demand_df['demand_type'] = demand_df['source_type'].map({
-                'OC': 'OC',
-                'Forecast': 'FORECAST'
-            })
+            # Log matching info in debug mode
+            if st.session_state.get('debug_mode', False):
+                logger.info(f"Demand enhancement - Reference IDs: {demand_df['temp_ref_id'].notna().sum()}/{len(demand_df)}")
+                logger.info(f"Demand types: {demand_df['temp_demand_type'].value_counts().to_dict()}")
+                logger.info(f"Allocation types: {allocations_df['demand_type'].value_counts().to_dict()}")
             
-            # Group allocations by demand reference
-            allocation_summary = allocations_df.groupby(['demand_type', 'demand_reference_id']).agg({
-                'allocated_qty': 'sum',
-                'delivered_qty': 'sum',
-                'undelivered_qty': 'sum',
-                'allocation_number': lambda x: ', '.join(x.unique())
-            }).reset_index()
-            
-            # Merge with demand data
+            # Merge allocations with demand
             demand_enhanced = demand_df.merge(
-                allocation_summary,
-                left_on=['demand_type', 'demand_ref_id'],
-                right_on=['demand_type', 'demand_reference_id'],
+                allocations_df,
+                left_on=['pt_code', 'temp_demand_type', 'temp_ref_id'],
+                right_on=['pt_code', 'demand_type', 'demand_reference_id'],
                 how='left',
                 suffixes=('', '_alloc')
             )
             
-            # Fill NaN values
-            demand_enhanced['allocated_qty'] = demand_enhanced['allocated_qty'].fillna(0)
-            demand_enhanced['delivered_qty'] = demand_enhanced['delivered_qty'].fillna(0)
-            demand_enhanced['undelivered_qty'] = demand_enhanced['undelivered_qty'].fillna(0)
-            demand_enhanced['allocation_number'] = demand_enhanced['allocation_number'].fillna('')
+            # Update allocation columns with merged values
+            for col in ['total_allocated', 'total_delivered', 'undelivered_allocated']:
+                col_alloc = f'{col}_alloc'
+                if col_alloc in demand_enhanced.columns:
+                    # Use merged values where available, keep defaults where not
+                    mask = demand_enhanced[col_alloc].notna()
+                    demand_enhanced.loc[mask, col] = demand_enhanced.loc[mask, col_alloc]
             
-            # Calculate metrics
-            demand_enhanced['total_allocated'] = demand_enhanced['allocated_qty']
-            demand_enhanced['total_delivered'] = demand_enhanced['delivered_qty']
-            demand_enhanced['undelivered_allocated'] = demand_enhanced['undelivered_qty']
+            # Ensure numeric types
+            for col in ['total_allocated', 'total_delivered', 'undelivered_allocated', 'demand_quantity']:
+                demand_enhanced[col] = pd.to_numeric(demand_enhanced[col], errors='coerce').fillna(0)
+            
+            # Calculate unallocated demand
             demand_enhanced['unallocated_demand'] = (
                 demand_enhanced['demand_quantity'] - demand_enhanced['total_allocated']
             ).clip(lower=0)
             
-            # Calculate allocation status
+            # Calculate allocation status with percentage
             def get_allocation_status(row):
-                if row['demand_quantity'] <= 0:
-                    return 'No Demand'
-                elif row['total_allocated'] >= row['demand_quantity']:
-                    return 'Fully Allocated'
-                elif row['total_allocated'] > 0:
-                    pct = (row['total_allocated'] / row['demand_quantity'] * 100)
-                    return f'Partial ({pct:.0f}%)'
-                else:
+                """Calculate allocation status with safety checks"""
+                try:
+                    if row['demand_quantity'] <= 0:
+                        return 'No Demand'
+                    elif row['total_allocated'] <= 0:
+                        return 'Not Allocated'
+                    elif row['total_allocated'] >= row['demand_quantity']:
+                        return 'Fully Allocated'
+                    else:
+                        pct = (row['total_allocated'] / row['demand_quantity'] * 100)
+                        return f'Partial ({pct:.0f}%)'
+                except:
                     return 'Not Allocated'
             
             demand_enhanced['allocation_status'] = demand_enhanced.apply(get_allocation_status, axis=1)
-            demand_enhanced['allocation_numbers'] = demand_enhanced['allocation_number']
             
-            # Clean up columns
-            columns_to_drop = ['demand_ref_id', 'demand_type', 'demand_reference_id', 
-                            'allocated_qty', 'delivered_qty', 'undelivered_qty', 'allocation_number']
-            demand_enhanced.drop(columns=[col for col in columns_to_drop if col in demand_enhanced.columns], 
-                            inplace=True)
+            # Clean up temporary columns
+            temp_cols = ['temp_ref_id', 'temp_demand_type', 'demand_type', 'demand_reference_id']
+            for col in temp_cols:
+                if col in demand_enhanced.columns:
+                    demand_enhanced.drop(columns=[col], inplace=True)
+            
+            # Drop allocation merge columns
+            alloc_cols = [col for col in demand_enhanced.columns if col.endswith('_alloc')]
+            if alloc_cols:
+                demand_enhanced.drop(columns=alloc_cols, inplace=True)
+            
+            # Log summary in debug mode
+            if st.session_state.get('debug_mode', False):
+                allocation_summary = demand_enhanced.groupby('allocation_status').agg({
+                    'pt_code': 'count',
+                    'demand_quantity': 'sum',
+                    'total_allocated': 'sum'
+                })
+                logger.info(f"Allocation summary:\n{allocation_summary}")
+                
+                # Check for any products with allocations
+                allocated_products = demand_enhanced[demand_enhanced['total_allocated'] > 0]
+                if not allocated_products.empty:
+                    logger.info(f"Products with allocations: {allocated_products['pt_code'].nunique()}")
+                    logger.info(f"Total allocated quantity: {allocated_products['total_allocated'].sum():,.0f}")
             
             return demand_enhanced
             
         except Exception as e:
-            logger.error(f"Error enhancing demand with allocations: {str(e)}")
-            # Return original with default values
+            logger.error(f"Error enhancing demand with allocations: {str(e)}", exc_info=True)
+            
+            # Return original with default values to ensure compatibility
             demand_df['total_allocated'] = 0
             demand_df['total_delivered'] = 0
             demand_df['undelivered_allocated'] = 0
             demand_df['unallocated_demand'] = demand_df['demand_quantity']
             demand_df['allocation_status'] = 'Not Allocated'
             demand_df['allocation_numbers'] = ''
+            demand_df['original_demand_qty'] = demand_df['demand_quantity']
+            
             return demand_df
-        
+
 
     def enhance_supply_with_allocations(self, supply_df: pd.DataFrame) -> pd.DataFrame:
         """Enhance supply data with allocation information"""
