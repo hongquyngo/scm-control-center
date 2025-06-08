@@ -226,3 +226,4 @@ def generate_allocation_number():
     date_part = datetime.now().strftime('%Y%m%d')
     random_part = str(random.randint(1000, 9999))
     return f"ALLOC-{date_part}-{random_part}"
+

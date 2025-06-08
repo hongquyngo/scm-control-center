@@ -5,8 +5,11 @@ import numpy as np
 from sqlalchemy import text
 import plotly.express as px
 import plotly.graph_objects as go
+from typing import Tuple, List, Dict, Any, Optional
+import logging
 
 # Import modules
+from utils.smart_filter_manager import SmartFilterManager
 from utils.data_manager import DataManager
 from utils.display_components import DisplayComponents
 from utils.formatters import format_number, format_currency, format_percentage
@@ -23,8 +26,12 @@ from utils.allocation_methods import AllocationMethods
 from utils.allocation_components import AllocationComponents
 from utils.allocation_validators import AllocationValidator
 
+# Configure logging
+logger = logging.getLogger(__name__)
+
 
 # === Functions Implementation ===
+
 
 def show_allocation_list():
     """Display list of allocation plans with filters"""
@@ -33,10 +40,11 @@ def show_allocation_list():
     # Filters
     col1, col2, col3, col4 = st.columns(4)
     with col1:
+        # Update status options theo database thực tế
         status_filter = st.multiselect(
             "Status", 
-            options=['DRAFT', 'APPROVED', 'EXECUTED', 'CANCELLED'],
-            default=['DRAFT', 'APPROVED']
+            options=['DRAFT', 'ALLOCATED', 'PARTIAL_DELIVERED', 'DELIVERED', 'CANCELLED'],
+            default=['DRAFT', 'ALLOCATED', 'PARTIAL_DELIVERED']
         )
     
     with col2:
@@ -60,16 +68,24 @@ def show_allocation_list():
         st.info("No allocation plans found")
         return
     
-    # Summary metrics
-    col1, col2, col3, col4 = st.columns(4)
+    # Summary metrics với display_status mới
+    col1, col2, col3, col4, col5 = st.columns(5)
+    
+    # Count by display_status (computed in view)
     with col1:
         st.metric("Total Plans", len(allocations))
     with col2:
-        st.metric("Draft", len(allocations[allocations['status'] == 'DRAFT']))
+        draft_count = len(allocations[allocations['display_status'] == 'ALL_DRAFT'])
+        st.metric("Draft", draft_count)
     with col3:
-        st.metric("Approved", len(allocations[allocations['status'] == 'APPROVED']))
+        in_progress = len(allocations[allocations['display_status'] == 'IN_PROGRESS'])
+        st.metric("In Progress", in_progress)
     with col4:
-        st.metric("Executed", len(allocations[allocations['status'] == 'EXECUTED']))
+        delivered = len(allocations[allocations['display_status'] == 'ALL_DELIVERED'])
+        st.metric("Delivered", delivered)
+    with col5:
+        cancelled = len(allocations[allocations['display_status'] == 'ALL_CANCELLED'])
+        st.metric("Cancelled", cancelled)
     
     # Display table with actions
     for idx, row in allocations.iterrows():
@@ -84,14 +100,37 @@ def show_allocation_list():
             
             with col2:
                 st.write(f"Date: {row['allocation_date'].strftime('%Y-%m-%d')}")
-                st.caption(f"Items: {row.get('item_count', 0)}")
+                st.caption(f"Items: {row.get('total_count', 0)}")
                 if row.get('hard_allocation_count', 0) > 0:
                     st.caption(f"🔒 HARD: {row['hard_allocation_count']}")
             
             with col3:
-                status_color = ALLOCATION_STATUS_COLORS.get(row['status'], 'gray')
-                st.markdown(f"Status: :{status_color}[{row['status']}]")
-                if row['status'] == 'EXECUTED':
+                # Map display_status to color
+                status_colors = {
+                    'ALL_DRAFT': 'gray',
+                    'IN_PROGRESS': 'blue',
+                    'ALL_DELIVERED': 'green',
+                    'ALL_CANCELLED': 'red',
+                    'MIXED_DRAFT': 'orange',
+                    'MIXED': 'violet'
+                }
+                status_color = status_colors.get(row['display_status'], 'gray')
+                
+                # Display user-friendly status
+                status_display = {
+                    'ALL_DRAFT': 'Draft',
+                    'IN_PROGRESS': 'In Progress',
+                    'ALL_DELIVERED': 'Delivered',
+                    'ALL_CANCELLED': 'Cancelled',
+                    'MIXED_DRAFT': 'Mixed (Draft)',
+                    'MIXED': 'Mixed Status',
+                    'EMPTY': 'Empty'
+                }.get(row['display_status'], row['display_status'])
+                
+                st.markdown(f"Status: :{status_color}[{status_display}]")
+                
+                # Show fulfillment rate if in progress or delivered
+                if row['display_status'] in ['IN_PROGRESS', 'ALL_DELIVERED', 'MIXED']:
                     st.caption(f"Fulfillment: {row.get('fulfillment_rate', 0):.1f}%")
             
             with col4:
@@ -101,27 +140,36 @@ def show_allocation_list():
                     st.rerun()
             
             with col5:
-                if row['status'] == 'DRAFT':
+                # Only allow edit for draft plans
+                if row['display_status'] in ['ALL_DRAFT', 'MIXED_DRAFT']:
                     if st.button("✏️ Edit", key=f"edit_{row['id']}"):
                         st.session_state['allocation_mode'] = 'edit'
                         st.session_state['selected_allocation_id'] = row['id']
                         st.rerun()
-            
+
             with col6:
-                if row['status'] == 'DRAFT':
+                # Actions based on status
+                if row['display_status'] == 'ALL_DRAFT':
                     col6_1, col6_2 = st.columns(2)
                     with col6_1:
-                        if st.button("✅ Approve", key=f"approve_{row['id']}", type="primary"):
-                            if allocation_manager.approve_allocation(row['id'], st.session_state.get('username', 'System')):
-                                st.success("Approved successfully!")
+                        if st.button("✅ Allocate", key=f"allocate_{row['id']}", type="primary"):
+                            if allocation_manager.bulk_update_allocation_status(row['id'], 'ALLOCATED'):
+                                st.success("Plan allocated successfully!")
                                 st.rerun()
                     with col6_2:
-                        if st.button("❌ Cancel", key=f"cancel_{row['id']}"):
-                            if allocation_manager.cancel_allocation(row['id']):
-                                st.info("Cancelled")
+                        if st.button("❌ Cancel", key=f"cancel_plan_{row['id']}"):
+                            if allocation_manager.cancel_allocation_plan(row['id']):
+                                st.info("Plan cancelled")
                                 st.rerun()
-            
+                
+                elif row['display_status'] in ['IN_PROGRESS', 'MIXED']:
+                    # Show delivery progress
+                    delivered_pct = (row.get('total_delivered', 0) / row.get('total_allocated_effective', 1) * 100) if row.get('total_allocated_effective', 0) > 0 else 0
+                    st.progress(delivered_pct / 100)
+                    st.caption(f"{delivered_pct:.0f}% delivered")
+
             st.divider()
+
 
 def show_create_allocation_wizard():
     """Multi-step wizard for creating allocation plan"""
@@ -176,133 +224,549 @@ def show_create_allocation_wizard():
         show_step6_confirm_with_mapping()
 
 def show_step1_select_products():
-    """Step 1: Select products for allocation"""
+    """Step 1: Select products for allocation with pagination and smart filters"""
     st.markdown("#### 📦 Select Products for Allocation")
     
-    # Get data from GAP analysis or demand/supply data
+    # Get data from GAP analysis - this is the primary source
     gap_data = get_from_session_state('gap_analysis_result', pd.DataFrame())
-    demand_data = get_from_session_state('demand_filtered', pd.DataFrame())
-    supply_data = get_from_session_state('supply_filtered', pd.DataFrame())
+    
+    # IMPORTANT: Also get the ORIGINAL filtered demand and supply data
+    # These contain the full columns including legal_entity, customer, brand
+    demand_filtered = get_from_session_state('demand_filtered', pd.DataFrame())
+    supply_filtered = get_from_session_state('supply_filtered', pd.DataFrame())
     
     # Check data availability
-    if gap_data.empty and demand_data.empty:
-        st.error("No data found. Please run GAP Analysis or load demand data first.")
+    if gap_data.empty:
+        st.error("No GAP Analysis data found. Please run GAP Analysis first to identify products with available supply.")
+        
+        # Show button to go to GAP Analysis
+        if st.button("🔄 Go to GAP Analysis"):
+            st.switch_page("pages/3_📊_GAP_Analysis.py")
         return
     
-    # Prepare product summary
-    if not gap_data.empty:
-        # Use GAP analysis data if available
-        product_summary = gap_data.groupby(['pt_code', 'product_name']).agg({
-            'gap_quantity': 'sum',
-            'total_demand_qty': 'sum',
-            'total_available': 'sum'
-        }).reset_index()
-        
-        product_summary['status'] = product_summary['gap_quantity'].apply(
-            lambda x: '🔴 Shortage' if x < 0 else '🟢 Available'
-        )
-        product_summary['gap_abs'] = product_summary['gap_quantity'].abs()
-    else:
-        # Use demand data directly
-        demand_summary = demand_data.groupby(['pt_code', 'product_name']).agg({
-            'demand_quantity': 'sum'
-        }).reset_index()
-        
-        supply_summary = supply_data.groupby(['pt_code']).agg({
-            'quantity': 'sum'
-        }).reset_index()
-        
-        product_summary = demand_summary.merge(
-            supply_summary, 
-            on='pt_code', 
-            how='left'
-        )
-        product_summary['quantity'] = product_summary['quantity'].fillna(0)
-        product_summary['gap_quantity'] = product_summary['quantity'] - product_summary['demand_quantity']
-        product_summary['total_demand_qty'] = product_summary['demand_quantity']
-        product_summary['total_available'] = product_summary['quantity']
-        product_summary['status'] = product_summary['gap_quantity'].apply(
-            lambda x: '🔴 Shortage' if x < 0 else '🟢 Available'
-        )
-        product_summary['gap_abs'] = product_summary['gap_quantity'].abs()
+    # IMPORTANT: Calculate fulfillment percentage with proper zero division handling
+    import numpy as np
+    gap_data['fulfillment_percentage'] = np.where(
+        gap_data['total_demand_qty'] > 0,
+        (gap_data['total_available'] / gap_data['total_demand_qty']) * 100,
+        0  # When demand = 0, fulfillment = 0
+    )
     
-    # Filter options
-    col1, col2, col3 = st.columns(3)
+    # Filter products with BOTH demand AND available supply
+    products_with_supply = gap_data[
+        (gap_data['total_demand_qty'] > 0) & 
+        (gap_data['total_available'] > 0)
+    ].copy()
+    
+    if products_with_supply.empty:
+        st.warning("No products with both demand and available supply found in GAP Analysis results.")
+        st.info("💡 Products need to have both demand (>0) and available supply (>0) to be allocated.")
+        return
+    
+    # NEW: Enrich products_with_supply with additional columns from demand/supply data
+    # This is needed because GAP analysis aggregates and loses these columns
+    if not demand_filtered.empty:
+        # Get unique values per product from demand data
+        demand_enrichment = demand_filtered.groupby('pt_code').agg({
+            'legal_entity': lambda x: list(x.dropna().unique()),
+            'customer': lambda x: list(x.dropna().unique()) if 'customer' in demand_filtered.columns else [],
+            'brand': lambda x: list(x.dropna().unique()) if 'brand' in demand_filtered.columns else []
+        }).reset_index()
+        
+        # Merge enrichment data
+        products_with_supply = products_with_supply.merge(
+            demand_enrichment, 
+            on='pt_code', 
+            how='left',
+            suffixes=('', '_demand')
+        )
+    
+    if not supply_filtered.empty:
+        # Get unique values per product from supply data
+        supply_enrichment = supply_filtered.groupby('pt_code').agg({
+            'legal_entity': lambda x: list(x.dropna().unique()),
+            'brand': lambda x: list(x.dropna().unique()) if 'brand' in supply_filtered.columns else []
+        }).reset_index()
+        
+        # Merge supply enrichment
+        products_with_supply = products_with_supply.merge(
+            supply_enrichment,
+            on='pt_code',
+            how='left',
+            suffixes=('', '_supply')
+        )
+        
+        # Combine legal_entity and brand from both sources
+        if 'legal_entity_demand' in products_with_supply.columns and 'legal_entity_supply' in products_with_supply.columns:
+            products_with_supply['legal_entity'] = products_with_supply.apply(
+                lambda row: list(set(
+                    (row['legal_entity_demand'] if isinstance(row['legal_entity_demand'], list) else []) +
+                    (row['legal_entity_supply'] if isinstance(row['legal_entity_supply'], list) else [])
+                )), axis=1
+            )
+            products_with_supply.drop(['legal_entity_demand', 'legal_entity_supply'], axis=1, inplace=True)
+        
+        if 'brand_demand' in products_with_supply.columns and 'brand_supply' in products_with_supply.columns:
+            products_with_supply['brand'] = products_with_supply.apply(
+                lambda row: list(set(
+                    (row['brand_demand'] if isinstance(row['brand_demand'], list) else []) +
+                    (row['brand_supply'] if isinstance(row['brand_supply'], list) else [])
+                )), axis=1
+            )
+            products_with_supply.drop(['brand_demand', 'brand_supply'], axis=1, inplace=True)
+    
+    # Debug: Check enriched data
+    if st.session_state.get('debug_mode', False):
+        with st.expander("🐛 Debug Info"):
+            st.write(f"**Total GAP products:** {len(gap_data)}")
+            st.write(f"**Products with both demand & supply:** {len(products_with_supply)}")
+            st.write(f"**Available columns:** {products_with_supply.columns.tolist()}")
+            
+            # Show sample of enriched data
+            if not products_with_supply.empty:
+                sample = products_with_supply.head(3)
+                st.write("**Sample enriched data:**")
+                for col in ['pt_code', 'legal_entity', 'customer', 'brand']:
+                    if col in sample.columns:
+                        st.write(f"- {col}: {sample[col].tolist()}")
+    
+    # Basic filter options and pagination settings
+    col1, col2, col3 = st.columns([1, 1, 1])
+    
     with col1:
+        # Show products filter
         filter_type = st.radio(
             "Show products:",
             options=['All', 'Shortage Only', 'Available Only'],
-            index=0
+            index=0,  # Default to 'All'
+            key="alloc_filter_type"
         )
     
-    # Apply filter
-    if filter_type == 'Shortage Only':
-        product_summary = product_summary[product_summary['gap_quantity'] < 0]
-    elif filter_type == 'Available Only':
-        product_summary = product_summary[product_summary['gap_quantity'] >= 0]
+    with col2:
+        # Smart filters toggle
+        use_smart_filters = st.checkbox(
+            "🔧 Enable Smart Filters",
+            value=True,
+            key="alloc_smart_filters",
+            help="Enable cascading filters like in Demand Analysis"
+        )
     
-    # Sort by absolute gap
+    with col3:
+        # Pagination settings
+        items_per_page = st.selectbox(
+            "Items per page:",
+            options=[10, 20, 50, 100],
+            index=1,  # Default to 20
+            key="alloc_items_per_page"
+        )
+    
+    # Start with base data (products with supply)
+    filtered_data = products_with_supply.copy()
+    
+    # Smart Filters Section - Now we have the enriched data
+    if use_smart_filters and not filtered_data.empty:
+        with st.expander("📎 Smart Filters", expanded=True):
+            # Prepare data for smart filters
+            # We need to expand the list values to individual rows for filtering
+            expanded_data = []
+            
+            for _, row in filtered_data.iterrows():
+                base_row = {
+                    'pt_code': row['pt_code'],
+                    'product_name': row.get('product_name', ''),
+                    'gap_quantity': row.get('gap_quantity', 0),
+                    'total_demand_qty': row.get('total_demand_qty', 0),
+                    'total_available': row.get('total_available', 0),
+                    'fulfillment_percentage': row.get('fulfillment_percentage', 0)
+                }
+                
+                # Get list values or empty lists
+                entities = row.get('legal_entity', []) if isinstance(row.get('legal_entity'), list) else []
+                customers = row.get('customer', []) if isinstance(row.get('customer'), list) else []
+                brands = row.get('brand', []) if isinstance(row.get('brand'), list) else []
+                
+                # Create expanded rows
+                if entities:
+                    for entity in entities:
+                        for customer in (customers if customers else [None]):
+                            for brand in (brands if brands else [None]):
+                                expanded_row = base_row.copy()
+                                expanded_row['legal_entity'] = entity
+                                expanded_row['customer'] = customer
+                                expanded_row['brand'] = brand
+                                expanded_data.append(expanded_row)
+                else:
+                    # No entities, still need to include the product
+                    expanded_row = base_row.copy()
+                    expanded_row['legal_entity'] = None
+                    expanded_row['customer'] = customers[0] if customers else None
+                    expanded_row['brand'] = brands[0] if brands else None
+                    expanded_data.append(expanded_row)
+            
+            # Create expanded dataframe for filtering
+            if expanded_data:
+                filter_df = pd.DataFrame(expanded_data)
+            else:
+                filter_df = filtered_data
+            
+            # Get current selections from session state
+            selected_entities = st.session_state.get('alloc_entity_selection', [])
+            selected_customers = st.session_state.get('alloc_customer_selection', [])
+            selected_brands = st.session_state.get('alloc_brand_selection', [])
+            selected_products = st.session_state.get('alloc_product_selection', [])
+            
+            # Apply cascading logic
+            cascade_df = filter_df.copy()
+            
+            # Row 1: Entity, Customer, Brand
+            filter_col1, filter_col2, filter_col3 = st.columns(3)
+            
+            # Entity Filter
+            with filter_col1:
+                if 'legal_entity' in cascade_df.columns:
+                    entity_options = sorted(cascade_df['legal_entity'].dropna().unique())
+                    if entity_options:
+                        selected_entities = st.multiselect(
+                            "Legal Entity",
+                            options=entity_options,
+                            default=selected_entities if selected_entities else [],
+                            key="alloc_entity_selection",
+                            placeholder="Choose legal entities..."
+                        )
+                        
+                        # Apply entity filter for cascading
+                        if selected_entities:
+                            cascade_df = cascade_df[cascade_df['legal_entity'].isin(selected_entities)]
+            
+            # Customer Filter (cascaded)
+            with filter_col2:
+                if 'customer' in cascade_df.columns:
+                    customer_options = sorted(cascade_df['customer'].dropna().unique())
+                    # Filter previous selection to only valid options
+                    valid_customers = [c for c in selected_customers if c in customer_options]
+                    
+                    if customer_options:
+                        selected_customers = st.multiselect(
+                            "Customer",
+                            options=customer_options,
+                            default=valid_customers,
+                            key="alloc_customer_selection",
+                            placeholder="Choose customers..."
+                        )
+                        
+                        # Apply customer filter for cascading
+                        if selected_customers:
+                            cascade_df = cascade_df[cascade_df['customer'].isin(selected_customers)]
+            
+            # Brand Filter (cascaded)
+            with filter_col3:
+                if 'brand' in cascade_df.columns:
+                    brand_options = sorted(cascade_df['brand'].dropna().unique())
+                    valid_brands = [b for b in selected_brands if b in brand_options]
+                    
+                    if brand_options:
+                        selected_brands = st.multiselect(
+                            "Brand",
+                            options=brand_options,
+                            default=valid_brands,
+                            key="alloc_brand_selection",
+                            placeholder="Choose brands..."
+                        )
+                        
+                        # Apply brand filter
+                        if selected_brands:
+                            cascade_df = cascade_df[cascade_df['brand'].isin(selected_brands)]
+            
+            # Row 2: Product search
+            st.markdown("")  # Add spacing
+            
+            if 'pt_code' in cascade_df.columns:
+                # Create product options with PT code and name
+                product_df = cascade_df[['pt_code', 'product_name']].drop_duplicates()
+                product_options = []
+                for _, row in product_df.iterrows():
+                    pt_code = str(row['pt_code'])
+                    product_name = str(row['product_name'])[:50] if pd.notna(row['product_name']) else ""
+                    product_options.append(f"{pt_code} - {product_name}")
+                
+                product_options = sorted(product_options)
+                
+                # Filter previous selection to only valid options
+                valid_products = [p for p in selected_products if p in product_options]
+                
+                selected_products = st.multiselect(
+                    "Product (PT Code - Name)",
+                    options=product_options,
+                    default=valid_products,
+                    key="alloc_product_selection",
+                    placeholder="Type to search products...",
+                    help="Search by PT Code or Product Name"
+                )
+            
+            # Show filter summary
+            active_filters = []
+            if selected_entities:
+                active_filters.append(f"{len(selected_entities)} entities")
+            if selected_customers:
+                active_filters.append(f"{len(selected_customers)} customers")
+            if selected_brands:
+                active_filters.append(f"{len(selected_brands)} brands")
+            if selected_products:
+                active_filters.append(f"{len(selected_products)} products")
+            
+            if active_filters:
+                col_summary1, col_summary2 = st.columns([3, 1])
+                with col_summary1:
+                    st.caption(f"🔍 Active filters: {', '.join(active_filters)}")
+                with col_summary2:
+                    if st.button("🔄 Clear All", key="clear_smart_filters"):
+                        st.session_state['alloc_entity_selection'] = []
+                        st.session_state['alloc_customer_selection'] = []
+                        st.session_state['alloc_brand_selection'] = []
+                        st.session_state['alloc_product_selection'] = []
+                        st.rerun()
+            
+            # Apply filters to get final filtered products
+            if selected_entities or selected_customers or selected_brands or selected_products:
+                # Get unique pt_codes from filtered expanded data
+                filtered_pt_codes = set()
+                
+                # Apply all filters to expanded data
+                temp_df = filter_df.copy()
+                if selected_entities:
+                    temp_df = temp_df[temp_df['legal_entity'].isin(selected_entities)]
+                if selected_customers:
+                    temp_df = temp_df[temp_df['customer'].isin(selected_customers)]
+                if selected_brands:
+                    temp_df = temp_df[temp_df['brand'].isin(selected_brands)]
+                if selected_products:
+                    selected_pt_codes = [p.split(' - ')[0] for p in selected_products]
+                    temp_df = temp_df[temp_df['pt_code'].isin(selected_pt_codes)]
+                
+                filtered_pt_codes = set(temp_df['pt_code'].unique())
+                
+                # Filter original data by pt_codes
+                filtered_data = products_with_supply[products_with_supply['pt_code'].isin(filtered_pt_codes)]
+    
+    # Apply basic filter AFTER smart filters
+    if filter_type == 'Shortage Only':
+        filtered_data = filtered_data[filtered_data['gap_quantity'] < 0]
+    elif filter_type == 'Available Only':
+        filtered_data = filtered_data[filtered_data['gap_quantity'] >= 0]
+    
+    # Check if we have data after all filters
+    if filtered_data.empty:
+        st.info("No products found matching the selected filters.")
+        
+        # Provide helpful message based on filter type
+        if filter_type == 'Shortage Only':
+            st.caption("💡 Try selecting 'All' or 'Available Only' - there might not be any shortage products.")
+        elif use_smart_filters and any([
+            st.session_state.get('alloc_entity_selection', []),
+            st.session_state.get('alloc_customer_selection', []),
+            st.session_state.get('alloc_brand_selection', []),
+            st.session_state.get('alloc_product_selection', [])
+        ]):
+            st.caption("💡 Try clearing some smart filters to see more products.")
+        
+        return
+    
+    # Group by product to get summary
+    product_summary = filtered_data.groupby(['pt_code', 'product_name']).agg({
+        'gap_quantity': 'sum',
+        'total_demand_qty': 'sum',
+        'total_available': 'sum',
+        'fulfillment_percentage': 'mean'  # Average fulfillment
+    }).reset_index()
+    
+    # Add status column
+    product_summary['status'] = product_summary['gap_quantity'].apply(
+        lambda x: '🔴 Shortage' if x < 0 else '🟢 Available'
+    )
+    product_summary['gap_abs'] = product_summary['gap_quantity'].abs()
+    
+    # Sort by absolute gap (largest shortage/surplus first)
     product_summary = product_summary.sort_values('gap_abs', ascending=False)
     
-    if product_summary.empty:
-        st.info(f"No products found for filter: {filter_type}")
-        return
+    # Pagination setup
+    total_products = len(product_summary)
+    total_pages = max(1, (total_products + items_per_page - 1) // items_per_page)
+    
+    # Initialize page number
+    if 'alloc_current_page' not in st.session_state:
+        st.session_state['alloc_current_page'] = 1
+    
+    # Ensure current page is valid
+    st.session_state['alloc_current_page'] = min(st.session_state['alloc_current_page'], total_pages)
+    st.session_state['alloc_current_page'] = max(st.session_state['alloc_current_page'], 1)
+    
+    # Show summary before pagination
+    st.markdown("---")
+    col_sum1, col_sum2, col_sum3 = st.columns(3)
+    with col_sum1:
+        st.metric("Total Products", total_products)
+    with col_sum2:
+        shortage_count = len(product_summary[product_summary['gap_quantity'] < 0])
+        st.metric("Shortage Products", shortage_count)
+    with col_sum3:
+        available_count = len(product_summary[product_summary['gap_quantity'] >= 0])
+        st.metric("Available Products", available_count)
+    
+    # Pagination controls
+    st.markdown("---")
+    page_col1, page_col2, page_col3, page_col4, page_col5 = st.columns([1, 1, 2, 1, 1])
+    
+    with page_col1:
+        if st.button("⏮️ First", disabled=st.session_state['alloc_current_page'] == 1):
+            st.session_state['alloc_current_page'] = 1
+            st.rerun()
+    
+    with page_col2:
+        if st.button("◀️ Previous", disabled=st.session_state['alloc_current_page'] == 1):
+            st.session_state['alloc_current_page'] -= 1
+            st.rerun()
+    
+    with page_col3:
+        st.markdown(f"<div style='text-align: center'><b>Page {st.session_state['alloc_current_page']} of {total_pages}</b></div>", unsafe_allow_html=True)
+        st.caption(f"<div style='text-align: center'>Total: {total_products} products</div>", unsafe_allow_html=True)
+    
+    with page_col4:
+        if st.button("Next ▶️", disabled=st.session_state['alloc_current_page'] >= total_pages):
+            st.session_state['alloc_current_page'] += 1
+            st.rerun()
+    
+    with page_col5:
+        if st.button("Last ⏭️", disabled=st.session_state['alloc_current_page'] >= total_pages):
+            st.session_state['alloc_current_page'] = total_pages
+            st.rerun()
+    
+    # Get current page data
+    start_idx = (st.session_state['alloc_current_page'] - 1) * items_per_page
+    end_idx = min(start_idx + items_per_page, total_products)
+    page_products = product_summary.iloc[start_idx:end_idx]
     
     # Display selection table
     st.markdown("##### Select Products for Allocation")
     
-    # Select all checkbox
-    select_all = st.checkbox("Select All Products", value=False)
+    # Select all on current page
+    select_all_page = st.checkbox(
+        f"Select All on Current Page ({len(page_products)} items)", 
+        value=False,
+        key=f"select_all_page_{st.session_state['alloc_current_page']}"
+    )
     
-    selected_products = []
+    # Get previously selected products
+    if 'selected_allocation_products' not in st.session_state:
+        st.session_state['selected_allocation_products'] = []
     
-    for idx, row in product_summary.iterrows():
+    selected_products = st.session_state['selected_allocation_products'].copy()
+    
+    # Display products with better layout
+    st.markdown("---")
+    
+    # Header row
+    header_col1, header_col2, header_col3, header_col4, header_col5, header_col6 = st.columns([0.5, 2, 1, 1.5, 1.5, 1.5])
+    with header_col1:
+        st.markdown("**Select**")
+    with header_col2:
+        st.markdown("**Product**")
+    with header_col3:
+        st.markdown("**Status**")
+    with header_col4:
+        st.markdown("**Gap**")
+    with header_col5:
+        st.markdown("**Demand**")
+    with header_col6:
+        st.markdown("**Supply**")
+    
+    st.markdown("---")
+    
+    # Display products
+    for idx, row in page_products.iterrows():
         col1, col2, col3, col4, col5, col6 = st.columns([0.5, 2, 1, 1.5, 1.5, 1.5])
         
         with col1:
+            is_selected = row['pt_code'] in selected_products
+            
             selected = st.checkbox(
                 "",
-                value=select_all or row['pt_code'] in st.session_state.get('selected_allocation_products', []),
-                key=f"select_{row['pt_code']}"
+                value=select_all_page or is_selected,
+                key=f"select_{row['pt_code']}_{st.session_state['alloc_current_page']}"
             )
-            if selected:
+            
+            if selected and row['pt_code'] not in selected_products:
                 selected_products.append(row['pt_code'])
+            elif not selected and row['pt_code'] in selected_products:
+                selected_products.remove(row['pt_code'])
         
         with col2:
             st.write(f"**{row['pt_code']}**")
-            st.caption(row['product_name'])
+            st.caption(row.get('product_name', '')[:50] + ('...' if len(row.get('product_name', '')) > 50 else ''))
         
         with col3:
             st.write(row['status'])
         
         with col4:
             if row['gap_quantity'] < 0:
-                st.metric("Shortage", format_number(row['gap_abs']))
+                st.metric("Shortage", format_number(row['gap_abs']), label_visibility="collapsed")
             else:
-                st.metric("Surplus", format_number(row['gap_abs']))
+                st.metric("Surplus", format_number(row['gap_abs']), label_visibility="collapsed")
         
         with col5:
-            st.metric("Demand", format_number(row['total_demand_qty']))
+            st.metric("Demand", format_number(row.get('total_demand_qty', 0)), label_visibility="collapsed")
         
         with col6:
-            st.metric("Supply", format_number(row['total_available']))
+            st.metric("Supply", format_number(row.get('total_available', 0)), label_visibility="collapsed")
     
-    # Show summary
+    # Update session state
+    st.session_state['selected_allocation_products'] = selected_products
+    
+    # Show selection summary
+    st.markdown("---")
     if selected_products:
-        st.info(f"Selected {len(selected_products)} products for allocation")
+        summary_col1, summary_col2 = st.columns([3, 1])
+        with summary_col1:
+            st.success(f"✅ Selected {len(selected_products)} products for allocation")
+            
+            # Calculate totals for selected products
+            selected_data = filtered_data[filtered_data['pt_code'].isin(selected_products)]
+            if not selected_data.empty:
+                total_demand = selected_data['total_demand_qty'].sum()
+                total_supply = selected_data['total_available'].sum()
+                total_gap = selected_data['gap_quantity'].sum()
+                
+                # Calculate average fulfillment with zero division handling
+                avg_fulfillment = np.where(
+                    total_demand > 0,
+                    (total_supply / total_demand) * 100,
+                    0
+                )
+                
+                st.caption(
+                    f"Total Demand: {format_number(total_demand)} | "
+                    f"Total Supply: {format_number(total_supply)} | "
+                    f"Net Gap: {format_number(total_gap)} | "
+                    f"Avg Fulfillment: {avg_fulfillment:.1f}%"
+                )
+        
+        with summary_col2:
+            if st.button("🗑️ Clear Selection"):
+                st.session_state['selected_allocation_products'] = []
+                st.rerun()
+    else:
+        st.warning("⚠️ Please select at least one product to continue")
     
     # Next button
     st.markdown("---")
-    col1, col2, col3 = st.columns([2, 1, 2])
-    with col2:
+    next_col1, next_col2, next_col3 = st.columns([2, 1, 2])
+    with next_col2:
         if st.button("Next ➡️", type="primary", use_container_width=True, 
                      disabled=len(selected_products) == 0):
-            st.session_state['selected_allocation_products'] = selected_products
             st.session_state['allocation_step'] = 2
+            # Clear pagination state when moving to next step
+            if 'alloc_current_page' in st.session_state:
+                del st.session_state['alloc_current_page']
             st.rerun()
-    
-    if len(selected_products) == 0:
-        st.warning("Please select at least one product to continue")
 
 def show_step2_choose_method():
     """Step 2: Choose allocation method and type"""
@@ -504,154 +968,168 @@ def show_step4_map_supply():
     # Get allocation results from previous calculation
     allocation_results = st.session_state.get('temp_allocation_results')
     if allocation_results is None:
-        # Need to calculate first
-        method = st.session_state['draft_allocation'].get('method', 'FCFS')
-        parameters = st.session_state['draft_allocation'].get('parameters', {})
-        selected_products = st.session_state.get('selected_allocation_products', [])
-        
-        demand_data = get_from_session_state('demand_filtered', pd.DataFrame())
-        supply_data = get_from_session_state('supply_filtered', pd.DataFrame())
-        
-        filtered_demand = demand_data[demand_data['pt_code'].isin(selected_products)].copy()
-        filtered_supply = supply_data[supply_data['pt_code'].isin(selected_products)].copy()
-        
-        allocation_results = AllocationMethods.calculate_allocation(
-            demand_df=filtered_demand,
-            supply_df=filtered_supply,
-            method=method,
-            parameters=parameters
-        )
-        st.session_state['temp_allocation_results'] = allocation_results
+        st.error("Allocation results not found. Please go back to previous step.")
+        return
     
-    # Get available supply details
+    # Get supply data from session state (from GAP Analysis)
+    supply_filtered = st.session_state.get('supply_filtered', pd.DataFrame())
+    
+    if supply_filtered.empty:
+        st.error("No supply data found. Please run GAP Analysis first.")
+        return
+    
+    # Get unique products and entities from allocation results
     product_codes = allocation_results['pt_code'].unique().tolist()
     legal_entities = allocation_results['legal_entity'].unique().tolist()
     
+    # Get available supply using the corrected function
     available_supply = allocation_manager.get_available_supply_for_hard_allocation(
         product_codes, legal_entities
     )
     
     if available_supply.empty:
         st.error("No available supply found for HARD allocation")
+        # Allow user to go back
+        if st.button("← Go Back to Previous Step"):
+            st.session_state['allocation_step'] = 3
+            st.rerun()
         return
+    
+    # Show info about data source
+    st.info(f"""
+        📊 Using supply data from GAP Analysis:
+        - Total supply items: {len(supply_filtered)}
+        - Filtered for selected products: {len(available_supply)}
+        - Time adjustments applied: {st.session_state.get('time_adjustments', {}).get('supply_arrival_offset', 0)} days
+    """)
     
     # Initialize supply mapping in session state
     if 'supply_mapping' not in st.session_state:
         st.session_state['supply_mapping'] = {}
     
-    # Group by product for easier mapping
-    products = allocation_results['pt_code'].unique()
+    # Group allocations by product for easier mapping
+    allocation_by_product = allocation_results.groupby('pt_code')
     
-    for product in products:
-        st.markdown(f"##### {product}")
+    # For MIXED allocation, allow selection of which items are HARD
+    if allocation_type == 'MIXED':
+        st.markdown("##### Select items for HARD allocation")
+        st.info("Items not selected will use SOFT allocation (flexible supply)")
         
-        # Get demands for this product
-        product_demands = allocation_results[
-            (allocation_results['pt_code'] == product) & 
-            (allocation_results['allocated_qty'] > 0)
-        ]
+        hard_allocation_items = []
+        for _, row in allocation_results.iterrows():
+            key = f"hard_{row['demand_line_id']}"
+            if st.checkbox(
+                f"{row['pt_code']} - {row['customer']} ({row['allocated_qty']:.0f} units)",
+                key=key,
+                value=key in st.session_state.get('selected_hard_items', [])
+            ):
+                hard_allocation_items.append(row['demand_line_id'])
         
-        # Get available supply for this product
-        product_supply = available_supply[available_supply['pt_code'] == product]
+        st.session_state['selected_hard_items'] = hard_allocation_items
         
-        if product_supply.empty:
-            st.warning(f"No available supply for {product}")
-            continue
+        # Filter to show only selected items for mapping
+        if hard_allocation_items:
+            allocation_to_map = allocation_results[
+                allocation_results['demand_line_id'].isin(hard_allocation_items)
+            ]
+        else:
+            st.warning("No items selected for HARD allocation")
+            allocation_to_map = pd.DataFrame()
+    else:
+        # For pure HARD allocation, map all items
+        allocation_to_map = allocation_results
+    
+    if not allocation_to_map.empty:
+        st.markdown("##### Map Supply Sources")
         
-        # Display mapping interface
-        col1, col2 = st.columns([1, 1])
-        
-        with col1:
-            st.markdown("**Demand Orders**")
-            for idx, demand in product_demands.iterrows():
-                demand_key = f"{demand.get('demand_line_id', idx)}"
+        # Create mapping interface
+        for pt_code, product_allocations in allocation_to_map.groupby('pt_code'):
+            with st.expander(f"📦 {pt_code}", expanded=True):
+                # Get available supply for this product
+                product_supply = available_supply[available_supply['pt_code'] == pt_code]
                 
-                # Check if MIXED type and this product should be HARD
-                if allocation_type == 'MIXED':
-                    is_hard = st.checkbox(
-                        f"🔒 Hard allocation for {demand['customer']}",
-                        key=f"hard_{demand_key}",
-                        value=demand_key in st.session_state['supply_mapping']
+                if product_supply.empty:
+                    st.warning(f"No supply available for {pt_code}")
+                    continue
+                
+                # Show supply summary
+                col1, col2 = st.columns([1, 2])
+                with col1:
+                    st.metric("Available Supply", f"{product_supply['available_qty'].sum():.0f}")
+                    st.metric("Allocation Needed", f"{product_allocations['allocated_qty'].sum():.0f}")
+                
+                with col2:
+                    # Supply breakdown by source
+                    supply_by_source = product_supply.groupby('source_type')['available_qty'].sum()
+                    for source, qty in supply_by_source.items():
+                        st.write(f"- {source}: {qty:.0f} units")
+                
+                # Map each allocation line
+                for _, alloc_row in product_allocations.iterrows():
+                    st.markdown(f"**Customer: {alloc_row['customer']} - {alloc_row['allocated_qty']:.0f} units**")
+                    
+                    # Create supply options
+                    supply_options = []
+                    for _, supply_row in product_supply.iterrows():
+                        option_text = (
+                            f"{supply_row['source_type']} - "
+                            f"{supply_row['reference']} - "
+                            f"{supply_row['available_qty']:.0f} units"
+                        )
+                        if 'expected_date' in supply_row and pd.notna(supply_row['expected_date']):
+                            option_text += f" (ETA: {supply_row['expected_date'].strftime('%Y-%m-%d')})"
+                        
+                        supply_options.append({
+                            'text': option_text,
+                            'value': f"{supply_row['source_type']}_{supply_row['source_id']}",
+                            'source_type': supply_row['source_type'],
+                            'source_id': supply_row['source_id']
+                        })
+                    
+                    # Supply selection
+                    selected_key = st.selectbox(
+                        "Select Supply Source",
+                        options=[opt['value'] for opt in supply_options],
+                        format_func=lambda x: next(opt['text'] for opt in supply_options if opt['value'] == x),
+                        key=f"supply_{alloc_row['demand_line_id']}"
                     )
-                    if not is_hard:
-                        if demand_key in st.session_state['supply_mapping']:
-                            del st.session_state['supply_mapping'][demand_key]
-                        continue
-                
-                st.info(f"""
-                **Customer**: {demand['customer']}  
-                **ETD**: {demand['etd']}  
-                **Quantity**: {demand['allocated_qty']:.0f}
-                """)
-                
-                # Supply selection
-                supply_options = []
-                for _, supply in product_supply.iterrows():
-                    option_text = (
-                        f"{supply['source_type']} - {supply['reference']} "
-                        f"({supply['available_qty']:.0f} available)"
-                    )
-                    if supply['origin_country']:
-                        option_text += f" - Origin: {supply['origin_country']}"
-                    if supply['expected_date']:
-                        option_text += f" - ETA: {supply['expected_date']}"
-                    supply_options.append({
-                        'text': option_text,
-                        'value': f"{supply['source_type']}|{supply['source_id']}"
-                    })
-                
-                selected_supply = st.selectbox(
-                    "Select supply source:",
-                    options=[opt['value'] for opt in supply_options],
-                    format_func=lambda x: next(opt['text'] for opt in supply_options if opt['value'] == x),
-                    key=f"supply_{demand_key}"
-                )
-                
-                if selected_supply:
-                    source_type, source_id = selected_supply.split('|')
-                    st.session_state['supply_mapping'][demand_key] = {
-                        'source_type': source_type,
-                        'source_id': int(source_id),
-                        'demand_line_id': demand_key,
-                        'product': product,
-                        'quantity': demand['allocated_qty']
-                    }
-        
-        with col2:
-            st.markdown("**Available Supply**")
-            
-            # Show supply summary
-            supply_summary = product_supply.groupby('source_type').agg({
-                'available_qty': 'sum'
-            }).reset_index()
-            
-            for _, row in supply_summary.iterrows():
-                st.metric(row['source_type'], f"{row['available_qty']:.0f} units")
-            
-            # Show supply details
-            with st.expander("View Supply Details"):
-                display_cols = ['source_type', 'reference', 'available_qty', 
-                              'origin_country', 'expected_date']
-                st.dataframe(
-                    product_supply[display_cols],
-                    use_container_width=True
-                )
+                    
+                    # Store mapping
+                    if selected_key:
+                        selected_supply = next(opt for opt in supply_options if opt['value'] == selected_key)
+                        st.session_state['supply_mapping'][str(alloc_row['demand_line_id'])] = {
+                            'source_type': selected_supply['source_type'],
+                            'source_id': selected_supply['source_id']
+                        }
+                    
+                    st.divider()
     
     # Validation
-    mapped_count = len(st.session_state['supply_mapping'])
-    total_hard_demands = len(allocation_results[allocation_results['allocated_qty'] > 0])
-    
-    if allocation_type == 'HARD' and mapped_count < total_hard_demands:
-        st.warning(f"⚠️ Only {mapped_count} of {total_hard_demands} demands have been mapped to supply")
+    if allocation_type == 'HARD' or (allocation_type == 'MIXED' and st.session_state.get('selected_hard_items')):
+        mapped_count = len(st.session_state.get('supply_mapping', {}))
+        required_count = len(allocation_to_map) if allocation_type == 'HARD' else len(st.session_state.get('selected_hard_items', []))
+        
+        if mapped_count < required_count:
+            st.warning(f"Please map all allocations. Mapped: {mapped_count}/{required_count}")
     
     # Next button
     st.markdown("---")
     col1, col2, col3 = st.columns([2, 1, 2])
     with col2:
-        can_proceed = (allocation_type == 'MIXED') or (mapped_count == total_hard_demands)
+        # Check if all required mappings are done
+        can_proceed = True
+        if allocation_type == 'HARD':
+            can_proceed = len(st.session_state.get('supply_mapping', {})) >= len(allocation_to_map)
+        elif allocation_type == 'MIXED' and st.session_state.get('selected_hard_items'):
+            can_proceed = all(
+                str(item_id) in st.session_state.get('supply_mapping', {})
+                for item_id in st.session_state.get('selected_hard_items', [])
+            )
+        
         if st.button("Next ➡️", type="primary", use_container_width=True, disabled=not can_proceed):
             st.session_state['allocation_step'] = 5
             st.rerun()
+
 
 def show_step4_preview():
     """Step 4: Preview allocation results (for SOFT allocation)"""
@@ -904,24 +1382,64 @@ def show_step6_confirm_with_mapping():
     """Step 6: Confirm allocation with supply mapping (for HARD allocation)"""
     show_step5_confirm()  # Reuse existing confirm logic
 
+
 def save_allocation(status):
     """Save allocation plan to database"""
     try:
         draft = st.session_state.get('draft_allocation', {})
         results = draft.get('results', pd.DataFrame())
         
-        # Get time adjustments and filters from session state
-        time_adjustments = get_from_session_state('time_adjustments', {})
-        filters = {
-            'entities': get_from_session_state('selected_entities', []),
-            'products': get_from_session_state('selected_products', []),
-            'date_range': {
-                'start': get_from_session_state('date_from', datetime.now()).strftime('%Y-%m-%d'),
-                'end': get_from_session_state('date_to', datetime.now() + timedelta(days=30)).strftime('%Y-%m-%d')
+        if results.empty:
+            st.error("No allocation results to save")
+            return
+        
+        # Get complete GAP Analysis context from session state
+        gap_analysis_data = st.session_state.get('gap_analysis_result', pd.DataFrame())
+        
+        gap_context = {
+            'snapshot_datetime': datetime.now().isoformat(),
+            'gap_analysis': {
+                'run_date': st.session_state.get('gap_analysis_run_date', datetime.now()).isoformat() if 'gap_analysis_run_date' in st.session_state else datetime.now().isoformat(),
+                'total_products': len(gap_analysis_data['pt_code'].unique()) if not gap_analysis_data.empty else 0,
+                'shortage_products': len(gap_analysis_data[gap_analysis_data['gap_quantity'] < 0]) if not gap_analysis_data.empty else 0,
+                'surplus_products': len(gap_analysis_data[gap_analysis_data['gap_quantity'] > 0]) if not gap_analysis_data.empty else 0,
+                'total_gap_value': float(gap_analysis_data['gap_quantity'].sum()) if not gap_analysis_data.empty else 0,
+                'fulfillment_rate': float((gap_analysis_data['total_available'] / gap_analysis_data['total_demand_qty']).mean() * 100) if not gap_analysis_data.empty and (gap_analysis_data['total_demand_qty'] > 0).any() else 0
+            },
+            'time_adjustments': st.session_state.get('time_adjustments', {
+                'etd_offset_days': 0,
+                'supply_arrival_offset': 0,
+                'wh_transfer_lead_time': 2,
+                'transportation_time': 3
+            }),
+            'filters': {
+                'entities': st.session_state.get('selected_entities', []),
+                'products': st.session_state.get('selected_products', []),
+                'brands': st.session_state.get('selected_brands', []),
+                'customers': st.session_state.get('selected_customers', []),
+                'date_range': {
+                    'start': st.session_state.get('date_from', datetime.now()).strftime('%Y-%m-%d') if 'date_from' in st.session_state else datetime.now().strftime('%Y-%m-%d'),
+                    'end': st.session_state.get('date_to', datetime.now() + timedelta(days=30)).strftime('%Y-%m-%d') if 'date_to' in st.session_state else (datetime.now() + timedelta(days=30)).strftime('%Y-%m-%d')
+                }
+            },
+            'data_sources': {
+                'demand_sources': st.session_state.get('selected_demand_sources', ['OC']),
+                'supply_sources': st.session_state.get('selected_supply_sources', ['Inventory']),
+                'include_converted_forecasts': st.session_state.get('include_converted_forecasts', False),
+                'exclude_expired_inventory': st.session_state.get('exclude_expired_inventory', True)
+            },
+            'allocation_info': {
+                'method': draft.get('method', 'MANUAL'),
+                'type': draft.get('allocation_type', 'SOFT'),
+                'parameters': draft.get('parameters', {}),
+                'selected_products': st.session_state.get('selected_allocation_products', []),
+                'total_orders': len(results),
+                'total_allocated': float(results['allocated_qty'].sum()),
+                'avg_fulfillment': float(results['fulfillment_rate'].mean())
             }
         }
         
-        # Create allocation plan
+        # Create allocation plan data
         plan_data = {
             'allocation_method': draft.get('method', 'MANUAL'),
             'allocation_type': draft.get('allocation_type', 'SOFT'),
@@ -930,36 +1448,100 @@ def save_allocation(status):
             'notes': draft.get('parameters', {}).get('notes', ''),
             'approved_by': st.session_state.get('username', 'System') if status == 'APPROVED' else None,
             'approved_date': datetime.now() if status == 'APPROVED' else None,
-            'time_adjustments': time_adjustments,
-            'filters': filters
+            'allocation_context': gap_context  # Pass as dict, will be converted to JSON in create_allocation_plan
         }
         
-        # Get supply mapping if exists
+        # Get supply mapping if exists (for HARD allocation)
         supply_mapping = st.session_state.get('supply_mapping', {})
         
-        # Save to database
-        allocation_id = allocation_manager.create_allocation_plan(plan_data, results, supply_mapping)
+        # Add allocation mode counts to context
+        if draft.get('allocation_type') in ['HARD', 'MIXED']:
+            allocation_modes = {
+                'SOFT': len(results) - len(supply_mapping),
+                'HARD': len(supply_mapping)
+            }
+            gap_context['allocation_info']['allocation_modes'] = allocation_modes
+        
+        # Log the save action
+        logger.info(f"Saving allocation plan with status: {status}")
+        logger.info(f"Total items: {len(results)}, Total allocated: {results['allocated_qty'].sum()}")
+        if supply_mapping:
+            logger.info(f"HARD allocations: {len(supply_mapping)}")
+        
+        # Save to database - Pass supply_mapping
+        allocation_id = allocation_manager.create_allocation_plan(
+            plan_data, 
+            results, 
+            supply_mapping  # This was missing!
+        )
         
         if allocation_id:
             st.success(f"✅ Allocation plan saved successfully! ID: {allocation_id}")
             
-            # Clear session state
-            st.session_state['allocation_mode'] = 'list'
-            st.session_state['allocation_step'] = 1
-            st.session_state['draft_allocation'] = {}  # Reset to empty dict instead of None
-            st.session_state['selected_allocation_products'] = []
-            st.session_state['supply_mapping'] = {}
-            st.session_state['temp_allocation_results'] = None
+            # Log success metrics
+            logger.info(f"Successfully created allocation plan ID: {allocation_id}")
             
-            # Redirect to view
+            # Send notification if approved
+            if status == 'APPROVED':
+                st.info("📧 Notification sent to relevant stakeholders")
+            
+            # Clear allocation-specific session state
+            allocation_keys = [
+                'allocation_mode',
+                'allocation_step', 
+                'draft_allocation',
+                'selected_allocation_products',
+                'supply_mapping',
+                'temp_allocation_results',
+                'selected_hard_items'  # Add this
+            ]
+            
+            for key in allocation_keys:
+                if key in st.session_state:
+                    del st.session_state[key]
+            
+            # Reset to initial values
             st.session_state['allocation_mode'] = 'view'
+            st.session_state['allocation_step'] = 1
+            st.session_state['draft_allocation'] = {}
+            st.session_state['selected_allocation_products'] = []
             st.session_state['selected_allocation_id'] = allocation_id
-            st.rerun()
+            
+            # Show success message with options
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                if st.button("📋 View Plan", type="primary"):
+                    st.rerun()
+            with col2:
+                if st.button("➕ Create Another"):
+                    st.session_state['allocation_mode'] = 'create'
+                    st.session_state['selected_allocation_id'] = None
+                    st.rerun()
+            with col3:
+                if st.button("📊 Back to GAP Analysis"):
+                    st.switch_page("pages/3_📊_GAP_Analysis.py")
+            
         else:
-            st.error("Failed to save allocation plan")
+            st.error("❌ Failed to save allocation plan. Please check the logs.")
+            logger.error("Failed to create allocation plan")
             
     except Exception as e:
-        st.error(f"Error saving allocation: {str(e)}")
+        st.error(f"❌ Error saving allocation: {str(e)}")
+        logger.error(f"Error in save_allocation: {str(e)}", exc_info=True)
+        
+        # Show debug info if in debug mode
+        if st.session_state.get('debug_mode', False):
+            with st.expander("🐛 Debug Information"):
+                st.write("**Error Details:**")
+                st.code(str(e))
+                st.write("**Draft Allocation:**")
+                st.json(st.session_state.get('draft_allocation', {}))
+                st.write("**Results DataFrame:**")
+                if 'results' in locals() and not results.empty:
+                    st.dataframe(results.head())
+                st.write("**Supply Mapping:**")
+                st.json(st.session_state.get('supply_mapping', {}))
+
 
 def export_allocation_results(results_df):
     """Export allocation results to Excel"""
@@ -973,7 +1555,7 @@ def export_allocation_results(results_df):
     )
 
 def show_view_allocation():
-    """View allocation plan details"""
+    """View allocation plan details with cancellation support"""
     allocation_id = st.session_state.get('selected_allocation_id')
     
     if not allocation_id:
@@ -1023,12 +1605,31 @@ def show_view_allocation():
             st.write("**Approved date:**", plan['approved_date'].strftime('%Y-%m-%d'))
     
     with col5:
-        total_allocated = details['allocated_qty'].sum()
+        # Calculate with cancellation if available
+        if 'effective_allocated_qty' in details.columns:
+            total_allocated = details['effective_allocated_qty'].sum()
+        else:
+            total_allocated = details['allocated_qty'].sum()
         total_delivered = details['delivered_qty'].sum()
+        
         st.metric("Total Allocated", format_number(total_allocated))
         if plan['status'] == 'EXECUTED':
             st.metric("Delivered", format_number(total_delivered), 
                      f"{total_delivered/total_allocated*100:.1f}%")
+    
+    # Show cancellation summary if exists
+    if 'cancellation_summary' in plan and plan['cancellation_summary'].get('total_cancellations', 0) > 0:
+        with st.expander("🚫 Cancellation Summary", expanded=False):
+            cancel_summary = plan['cancellation_summary']
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Total Cancellations", cancel_summary['total_cancellations'])
+            with col2:
+                st.metric("Active", cancel_summary['active_cancellations'])
+            with col3:
+                st.metric("Reversed", cancel_summary['reversed_cancellations'])
+            with col4:
+                st.metric("Cancelled Qty", format_number(cancel_summary['total_cancelled_qty']))
     
     # Show snapshot context if available
     if plan.get('snapshot_context'):
@@ -1064,65 +1665,262 @@ def show_view_allocation():
     st.markdown("---")
     st.markdown("#### Allocation Details")
     
-    # Summary by product
-    product_summary = details.groupby(['pt_code', 'product_name']).agg({
-        'requested_qty': 'sum',
-        'allocated_qty': 'sum',
-        'delivered_qty': 'sum'
-    }).reset_index()
+    # Tabs for different views
+    tab1, tab2, tab3, tab4 = st.tabs(["📊 Summary", "📋 Details", "🚫 Cancellations", "📈 Analytics"])
     
-    col1, col2 = st.columns(2)
+    with tab1:
+        # Summary by product
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("##### By Product")
+            product_summary = details.groupby(['pt_code', 'product_name']).agg({
+                'requested_qty': 'sum',
+                'allocated_qty': 'sum',
+                'delivered_qty': 'sum',
+                'cancelled_qty': 'sum' if 'cancelled_qty' in details.columns else lambda x: 0,
+                'effective_allocated_qty': 'sum' if 'effective_allocated_qty' in details.columns else lambda x: details['allocated_qty'].sum()
+            }).reset_index()
+            
+            fig1 = AllocationComponents.create_allocation_summary_chart(product_summary, 'product')
+            st.plotly_chart(fig1, use_container_width=True)
+        
+        with col2:
+            st.markdown("##### By Customer")
+            customer_summary = details.groupby('customer_name').agg({
+                'requested_qty': 'sum',
+                'allocated_qty': 'sum',
+                'delivered_qty': 'sum',
+                'cancelled_qty': 'sum' if 'cancelled_qty' in details.columns else lambda x: 0,
+                'effective_allocated_qty': 'sum' if 'effective_allocated_qty' in details.columns else lambda x: details['allocated_qty'].sum()
+            }).reset_index()
+            
+            fig2 = AllocationComponents.create_allocation_summary_chart(customer_summary, 'customer')
+            st.plotly_chart(fig2, use_container_width=True)
     
-    with col1:
-        st.markdown("##### By Product")
-        fig1 = AllocationComponents.create_allocation_summary_chart(product_summary, 'product')
-        st.plotly_chart(fig1, use_container_width=True)
+    with tab2:
+        # Details table with cancellation actions
+        st.markdown("##### Detail Lines")
+        
+        # Filter options
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            filter_status = st.selectbox(
+                "Filter by Status",
+                options=['All', 'Allocated', 'Partial Delivered', 'Delivered', 'Cancelled'],
+                index=0
+            )
+        
+        with col2:
+            if st.checkbox("Show cancellable only", value=False):
+                if 'cancellable_qty' in details.columns:
+                    details = details[details['cancellable_qty'] > 0]
+        
+        with col3:
+            search_term = st.text_input("Search", placeholder="Product or Customer")
+        
+        # Apply filters
+        if filter_status != 'All':
+            status_map = {
+                'Allocated': 'ALLOCATED',
+                'Partial Delivered': 'PARTIAL_DELIVERED',
+                'Delivered': 'DELIVERED',
+                'Cancelled': 'CANCELLED'
+            }
+            details = details[details['status'] == status_map.get(filter_status, filter_status)]
+        
+        if search_term:
+            mask = (
+                details['pt_code'].str.contains(search_term, case=False) |
+                details['customer_name'].str.contains(search_term, case=False)
+            )
+            details = details[mask]
+        
+        # Display details with actions
+        if not details.empty:
+            # Add computed columns
+            details['fulfillment_status'] = details.apply(
+                lambda x: '✅ Delivered' if x['delivered_qty'] >= x.get('effective_allocated_qty', x['allocated_qty'])
+                else '🔄 Partial' if x['delivered_qty'] > 0 
+                else '⏳ Pending', axis=1
+            )
+            
+            # Bulk actions if plan is active
+            if plan['status'] in ['APPROVED', 'EXECUTED'] and 'cancellable_qty' in details.columns:
+                cancellable_details = details[details['cancellable_qty'] > 0]
+                
+                if not cancellable_details.empty:
+                    with st.expander("🎯 Bulk Actions", expanded=False):
+                        selected_ids = st.multiselect(
+                            "Select items for bulk action:",
+                            options=cancellable_details['id'].tolist(),
+                            format_func=lambda x: f"{cancellable_details[cancellable_details['id']==x]['pt_code'].iloc[0]} - {cancellable_details[cancellable_details['id']==x]['customer_name'].iloc[0]}"
+                        )
+                        
+                        if selected_ids:
+                            col1, col2 = st.columns(2)
+                            with col1:
+                                if st.button("🚫 Bulk Cancel Selected", type="secondary"):
+                                    st.session_state['show_bulk_cancel'] = True
+                                    st.session_state['selected_cancel_ids'] = selected_ids
+            
+            # Display each detail row
+            for idx, row in details.iterrows():
+                with st.container():
+                    col1, col2, col3, col4, col5 = st.columns([3, 2, 1, 1, 1])
+                    
+                    with col1:
+                        st.write(f"**{row['pt_code']}** - {row['product_name']}")
+                        st.caption(f"Customer: {row['customer_name']}")
+                        if 'allocation_mode' in row:
+                            mode_icon = '🔒' if row['allocation_mode'] == 'HARD' else '🌊'
+                            st.caption(f"Mode: {mode_icon} {row['allocation_mode']}")
+                    
+                    with col2:
+                        subcol1, subcol2 = st.columns(2)
+                        with subcol1:
+                            st.metric("Requested", format_number(row['requested_qty']))
+                        with subcol2:
+                            effective_alloc = row.get('effective_allocated_qty', row['allocated_qty'])
+                            st.metric("Allocated", format_number(effective_alloc))
+                            if 'cancelled_qty' in row and row['cancelled_qty'] > 0:
+                                st.caption(f"Cancelled: {format_number(row['cancelled_qty'])}")
+                    
+                    with col3:
+                        st.metric("Delivered", format_number(row['delivered_qty']))
+                        st.caption(row['fulfillment_status'])
+                    
+                    with col4:
+                        st.write(f"**ETD:** {row['allocated_etd']}")
+                        if 'cancellable_qty' in row and row['cancellable_qty'] > 0:
+                            st.caption(f"Cancellable: {format_number(row['cancellable_qty'])}")
+                    
+                    with col5:
+                        # Action buttons
+                        if plan['status'] in ['APPROVED', 'EXECUTED']:
+                            if 'cancellable_qty' in row and row['cancellable_qty'] > 0:
+                                if st.button("🚫", key=f"cancel_{row['id']}", 
+                                           help=f"Cancel {row['cancellable_qty']} units"):
+                                    st.session_state[f'show_cancel_{row["id"]}'] = True
+                            
+                            if row['delivered_qty'] < row.get('effective_allocated_qty', row['allocated_qty']):
+                                if st.button("🚚", key=f"deliver_{row['id']}", 
+                                           help="Mark as delivered"):
+                                    st.info("Delivery function to be implemented")
+                    
+                    # Show cancel dialog if triggered
+                    if st.session_state.get(f'show_cancel_{row["id"]}', False):
+                        show_cancellation_dialog(row['id'], row.to_dict())
+                    
+                    st.divider()
+        else:
+            st.info("No details to display")
     
-    with col2:
-        st.markdown("##### By Customer")
-        customer_summary = details.groupby('customer_name').agg({
-            'requested_qty': 'sum',
-            'allocated_qty': 'sum',
-            'delivered_qty': 'sum'
-        }).reset_index()
-        fig2 = AllocationComponents.create_allocation_summary_chart(customer_summary, 'customer')
-        st.plotly_chart(fig2, use_container_width=True)
+    with tab3:
+        # Cancellation history
+        show_cancellation_history(allocation_id)
     
-    # Details table with allocation mode
-    st.markdown("##### Detail Lines")
-    
-    # Add fulfillment status and format allocation mode
-    details['fulfillment_status'] = details.apply(
-        lambda x: '✅ Delivered' if x['delivered_qty'] >= x['allocated_qty'] 
-        else '🔄 Partial' if x['delivered_qty'] > 0 
-        else '⏳ Pending', axis=1
-    )
-    
-    # Format allocation mode if exists
-    if 'allocation_mode' in details.columns:
-        details['mode'] = details['allocation_mode'].apply(
-            lambda x: '🔒 HARD' if x == 'HARD' else '🌊 SOFT'
-        )
-        display_columns = ['pt_code', 'product_name', 'customer_name', 'mode', 'allocated_etd',
-                          'requested_qty', 'allocated_qty', 'delivered_qty', 'fulfillment_status']
-    else:
-        display_columns = ['pt_code', 'product_name', 'customer_name', 'allocated_etd',
-                          'requested_qty', 'allocated_qty', 'delivered_qty', 'fulfillment_status']
-    
-    # Add supply reference for HARD allocations
-    if 'supply_reference' in details.columns:
-        details['supply_ref'] = details['supply_reference'].fillna('')
-        display_columns.insert(4, 'supply_ref')
-    
-    st.dataframe(
-        details[display_columns],
-        use_container_width=True,
-        height=400
-    )
+    with tab4:
+        # Analytics
+        st.markdown("##### Allocation Performance")
+        
+        # Performance metrics
+        col1, col2, col3, col4 = st.columns(4)
+        
+        total_requested = details['requested_qty'].sum()
+        total_allocated_orig = details['allocated_qty'].sum()
+        total_cancelled = details['cancelled_qty'].sum() if 'cancelled_qty' in details.columns else 0
+        total_delivered = details['delivered_qty'].sum()
+        
+        with col1:
+            allocation_rate = (total_allocated_orig / total_requested * 100) if total_requested > 0 else 0
+            st.metric("Allocation Rate", f"{allocation_rate:.1f}%", 
+                     help="Original allocation vs requested")
+        
+        with col2:
+            if total_cancelled > 0:
+                cancel_rate = (total_cancelled / total_allocated_orig * 100) if total_allocated_orig > 0 else 0
+                st.metric("Cancellation Rate", f"{cancel_rate:.1f}%", 
+                         delta=f"-{format_number(total_cancelled)} units", delta_color="inverse")
+        
+        with col3:
+            effective_allocated = total_allocated_orig - total_cancelled
+            delivery_rate = (total_delivered / effective_allocated * 100) if effective_allocated > 0 else 0
+            st.metric("Delivery Rate", f"{delivery_rate:.1f}%",
+                     help="Delivered vs effective allocated")
+        
+        with col4:
+            pending = effective_allocated - total_delivered
+            st.metric("Pending Delivery", format_number(pending))
+        
+        # Timeline chart
+        if 'allocated_etd' in details.columns:
+            timeline_fig = AllocationComponents.show_allocation_timeline(details)
+            if timeline_fig:
+                st.plotly_chart(timeline_fig, use_container_width=True)
     
     # Export button
+    st.markdown("---")
     if st.button("📤 Export Details"):
         export_allocation_details(plan, details)
+    
+    # Handle bulk cancel dialog
+    if st.session_state.get('show_bulk_cancel', False):
+        show_bulk_cancel_dialog()
+
+def show_bulk_cancel_dialog():
+    """Show bulk cancellation dialog"""
+    selected_ids = st.session_state.get('selected_cancel_ids', [])
+    
+    if not selected_ids:
+        st.error("No items selected")
+        return
+    
+    with st.form("bulk_cancel_form"):
+        st.markdown("### 🚫 Bulk Cancel Allocations")
+        st.info(f"Cancelling {len(selected_ids)} allocation(s)")
+        
+        reason_category = st.selectbox(
+            "Reason Category",
+            options=['CUSTOMER_REQUEST', 'SUPPLY_ISSUE', 'QUALITY_ISSUE', 'BUSINESS_DECISION', 'OTHER'],
+            format_func=lambda x: x.replace('_', ' ').title()
+        )
+        
+        reason = st.text_area(
+            "Detailed Reason (applies to all)",
+            placeholder="Please provide reason for bulk cancellation...",
+            height=100
+        )
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.form_submit_button("Confirm Bulk Cancel", type="primary"):
+                if reason:
+                    success_count, errors = allocation_manager.bulk_cancel_details(
+                        selected_ids, reason, reason_category
+                    )
+                    
+                    if success_count > 0:
+                        st.success(f"Successfully cancelled {success_count} items")
+                    
+                    if errors:
+                        st.error("Errors occurred:")
+                        for error in errors:
+                            st.write(f"- {error}")
+                    
+                    # Clean up session state
+                    del st.session_state['show_bulk_cancel']
+                    del st.session_state['selected_cancel_ids']
+                    st.rerun()
+                else:
+                    st.error("Please provide a reason")
+        
+        with col2:
+            if st.form_submit_button("Cancel"):
+                del st.session_state['show_bulk_cancel']
+                del st.session_state['selected_cancel_ids']
+                st.rerun()
+
 
 def export_allocation_details(plan, details):
     """Export allocation plan with details"""
@@ -1201,6 +1999,139 @@ def show_edit_allocation():
         st.session_state['allocation_mode'] = 'list'
         st.rerun()
 
+def show_cancellation_history(plan_id: int):
+    """Show cancellation history for a plan"""
+    st.markdown("### 📜 Cancellation History")
+    
+    history_df = allocation_manager.cancellation_manager.get_cancellation_history(plan_id=plan_id)
+    
+    if history_df.empty:
+        st.info("No cancellations recorded")
+        return
+    
+    # Summary metrics
+    col1, col2, col3, col4 = st.columns(4)
+    
+    active_cancellations = history_df[history_df['status'] == 'ACTIVE']
+    reversed_cancellations = history_df[history_df['status'] == 'REVERSED']
+    
+    with col1:
+        st.metric("Total Cancellations", len(history_df))
+    with col2:
+        st.metric("Active", len(active_cancellations))
+    with col3:
+        st.metric("Reversed", len(reversed_cancellations))
+    with col4:
+        st.metric("Total Cancelled Qty", f"{active_cancellations['cancelled_qty'].sum():,.0f}")
+    
+    # History table
+    for idx, row in history_df.iterrows():
+        with st.container():
+            col1, col2, col3, col4 = st.columns([2, 2, 1, 1])
+            
+            with col1:
+                st.write(f"**{row['pt_code']}** - {row['customer_name']}")
+                st.caption(f"Cancelled: {row['cancelled_qty']:,.0f} units")
+            
+            with col2:
+                status_color = "🟢" if row['status'] == 'ACTIVE' else "🔴"
+                st.write(f"{status_color} {row['status']}")
+                st.caption(f"Date: {row['cancelled_date'].strftime('%Y-%m-%d %H:%M')}")
+            
+            with col3:
+                st.write(f"**Reason:** {row['reason_category']}")
+                with st.expander("Details"):
+                    st.write(row['reason'])
+            
+            with col4:
+                if row['status'] == 'ACTIVE' and row['delivered_qty'] == 0:
+                    if st.button("↩️ Reverse", key=f"reverse_{row['id']}"):
+                        # Show reversal form
+                        with st.form(f"reverse_form_{row['id']}"):
+                            reversal_reason = st.text_input("Reversal Reason")
+                            if st.form_submit_button("Confirm Reverse"):
+                                success, msg = allocation_manager.cancellation_manager.reverse_cancellation(
+                                    row['id'], 
+                                    st.session_state.get('user_id', 1),
+                                    reversal_reason
+                                )
+                                if success:
+                                    st.success(msg)
+                                    st.rerun()
+                                else:
+                                    st.error(msg)
+            
+            if row['status'] == 'REVERSED':
+                st.info(f"Reversed by {row['reversed_by']} on {row['reversed_date'].strftime('%Y-%m-%d')}")
+                st.caption(f"Reversal reason: {row['reversal_reason']}")
+            
+            st.divider()
+
+# Thêm function để show cancellation dialog
+def show_cancellation_dialog(detail_id: int, detail_info: Dict):
+    """Show cancellation dialog"""
+    with st.form(f"cancel_form_{detail_id}"):
+        st.markdown("### 🚫 Cancel Allocation")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            st.write(f"**Product:** {detail_info['pt_code']} - {detail_info['product_name']}")
+            st.write(f"**Customer:** {detail_info['customer_name']}")
+        
+        with col2:
+            st.metric("Allocated", f"{detail_info['allocated_qty']:,.0f}")
+            st.metric("Delivered", f"{detail_info['delivered_qty']:,.0f}")
+            st.metric("Available to Cancel", f"{detail_info['cancellable_qty']:,.0f}")
+        
+        # Cancellation inputs
+        cancel_qty = st.number_input(
+            "Quantity to Cancel",
+            min_value=0.0,
+            max_value=float(detail_info['cancellable_qty']),
+            value=float(detail_info['cancellable_qty']),
+            step=1.0
+        )
+        
+        reason_category = st.selectbox(
+            "Reason Category",
+            options=['CUSTOMER_REQUEST', 'SUPPLY_ISSUE', 'QUALITY_ISSUE', 'BUSINESS_DECISION', 'OTHER'],
+            format_func=lambda x: x.replace('_', ' ').title()
+        )
+        
+        reason = st.text_area(
+            "Detailed Reason",
+            placeholder="Please provide detailed reason for cancellation...",
+            height=100
+        )
+        
+        st.warning("⚠️ This action cannot be undone after delivery starts")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            submitted = st.form_submit_button("Confirm Cancel", type="primary")
+        with col2:
+            cancelled = st.form_submit_button("Close")
+        
+        if submitted and reason:
+            # Process cancellation
+            success, message = allocation_manager.cancellation_manager.cancel_quantity(
+                detail_id=detail_id,
+                quantity=cancel_qty,
+                reason=reason,
+                reason_category=reason_category,
+                user_id=st.session_state.get('user_id', 1)
+            )
+            
+            if success:
+                st.success(message)
+                st.rerun()
+            else:
+                st.error(message)
+        elif submitted and not reason:
+            st.error("Please provide a reason for cancellation")
+
+
+
 # ==== Main Execution ====
 # === Page Config ===
 st.set_page_config(
@@ -1236,11 +2167,15 @@ ALLOCATION_TYPES = {
     'MIXED': '🔀 Mixed - Combination of soft and hard'
 }
 
+# Update ALLOCATION_STATUS_COLORS constant
 ALLOCATION_STATUS_COLORS = {
-    'DRAFT': 'gray',
-    'APPROVED': 'green',
-    'EXECUTED': 'blue',
-    'CANCELLED': 'red'
+    'ALL_DRAFT': 'gray',
+    'IN_PROGRESS': 'blue', 
+    'ALL_DELIVERED': 'green',
+    'ALL_CANCELLED': 'red',
+    'MIXED_DRAFT': 'orange',
+    'MIXED': 'violet',
+    'EMPTY': 'gray'
 }
 
 # === Initialize Components ===
