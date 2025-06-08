@@ -136,26 +136,18 @@ def show_no_products_message():
 
 
 def show_filter_options():
-    """Show basic filter options and return selected values"""
-    col1, col2, col3 = st.columns([1, 1, 1])
+    """Show filter options header only"""
+    col1, col2 = st.columns([3, 1])
     
     with col1:
-        filter_type = st.radio(
-            "Show products:",
-            options=['All', 'Shortage Only', 'Available Only'],
-            index=0,
-            key="alloc_filter_type"
-        )
-    
-    with col2:
         use_smart_filters = st.checkbox(
             "🔧 Enable Smart Filters",
             value=True,
             key="alloc_smart_filters",
-            help="Enable cascading filters like in Demand Analysis"
+            help="Enable advanced filtering options"
         )
     
-    with col3:
+    with col2:
         items_per_page = st.selectbox(
             "Items per page:",
             options=[10, 20, 50, 100],
@@ -163,12 +155,45 @@ def show_filter_options():
             key="alloc_items_per_page"
         )
     
-    return filter_type, use_smart_filters, items_per_page
+    return use_smart_filters, items_per_page
 
 
-def apply_smart_filters(filtered_data, products_with_supply):
-    """Apply smart filters to data"""
+# Update function signature
+def apply_smart_filters(filtered_data: pd.DataFrame, 
+                       products_with_supply: pd.DataFrame) -> Tuple[pd.DataFrame, str]:
+    """
+    Apply smart filters to data - all inside expander
+    
+    Returns:
+        Tuple[pd.DataFrame, str]: (filtered_data, filter_type)
+    """
+    
+    
+    filter_type = 'All'  # Default
+    
     with st.expander("📎 Smart Filters", expanded=True):
+        # Product type filter at the top
+        # st.markdown("##### Filter Products")
+        filter_type = st.radio(
+            "Show products:",
+            options=['All', 'Shortage Only', 'Available Only'],
+            index=0,
+            key="alloc_filter_type",
+            horizontal=True
+        )
+        
+        # Apply basic filter first
+        filtered_data = apply_basic_filter(filtered_data, filter_type)
+        
+        if filtered_data.empty:
+            st.info("No products found for selected filter type.")
+            return filtered_data, filter_type
+        
+        # st.markdown("---")  # Divider
+        
+        # Advanced filters section
+        # st.markdown("##### Advanced Filters")
+        
         # Prepare expanded data for filtering
         expanded_data = prepare_expanded_data(filtered_data)
         
@@ -178,7 +203,7 @@ def apply_smart_filters(filtered_data, products_with_supply):
             filter_df = filtered_data
         
         # Apply cascading filters
-        cascade_df, selected_filters = apply_cascading_filters(filter_df)  # Sửa lại dòng này
+        cascade_df, selected_filters = apply_cascading_filters(filter_df)
         
         # Show filter summary
         show_filter_summary(selected_filters)
@@ -187,7 +212,8 @@ def apply_smart_filters(filtered_data, products_with_supply):
         if any(selected_filters.values()):
             filtered_data = filter_by_selections(products_with_supply, filter_df, selected_filters)
     
-    return filtered_data
+    return filtered_data, filter_type
+
 
 def prepare_expanded_data(filtered_data):
     """Prepare expanded data for smart filtering"""
@@ -398,15 +424,20 @@ def show_no_filtered_data_message(filter_type, use_smart_filters):
     """Show message when no data matches filters"""
     st.info("No products found matching the selected filters.")
     
+    # More specific hints based on filter type
     if filter_type == 'Shortage Only':
         st.caption("💡 Try selecting 'All' or 'Available Only' - there might not be any shortage products.")
-    elif use_smart_filters and any([
+    elif filter_type == 'Available Only':
+        st.caption("💡 Try selecting 'All' or 'Shortage Only' - there might not be any available products.")
+    
+    # Check if smart filters are too restrictive
+    if use_smart_filters and any([
         st.session_state.get('alloc_entity_selection', []),
         st.session_state.get('alloc_customer_selection', []),
         st.session_state.get('alloc_brand_selection', []),
         st.session_state.get('alloc_product_selection', [])
     ]):
-        st.caption("💡 Try clearing some smart filters to see more products.")
+        st.caption("💡 Try clearing some advanced filters to see more products.")
 
 
 def prepare_product_summary(filtered_data):

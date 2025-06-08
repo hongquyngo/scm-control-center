@@ -243,7 +243,6 @@ def show_create_allocation_wizard():
     elif st.session_state['allocation_step'] == 6:
         show_step6_confirm_with_mapping()
 
-
 def show_step1_select_products():
     """Step 1: Select products for allocation with pagination and smart filters"""
     st.markdown("#### 📦 Select Products for Allocation")
@@ -260,16 +259,17 @@ def show_step1_select_products():
         show_no_products_message()
         return
     
-    # Show filter options
-    filter_type, use_smart_filters, items_per_page = show_filter_options()
+    # Show filter options (checkbox and items per page only)
+    use_smart_filters, items_per_page = show_filter_options()
     
-    # Apply smart filters if enabled
+    # Start with all products
     filtered_data = products_with_supply.copy()
-    if use_smart_filters and not filtered_data.empty:
-        filtered_data = apply_smart_filters(filtered_data, products_with_supply)
+    filter_type = 'All'  # Default
     
-    # Apply basic filter
-    filtered_data = apply_basic_filter(filtered_data, filter_type)
+    # Apply filters based on settings
+    if use_smart_filters:
+        # apply_smart_filters now returns both filtered_data and filter_type
+        filtered_data, filter_type = apply_smart_filters(filtered_data, products_with_supply)
     
     # Check if we have data after filters
     if filtered_data.empty:
