@@ -9,7 +9,6 @@ from sqlalchemy import text
 from typing import Dict, List, Optional, Tuple
 import logging
 
-
 from utils.db import get_db_engine
 
 logger = logging.getLogger(__name__)
@@ -23,27 +22,19 @@ class AllocationCancellationManager:
     
     def cancel_quantity(self, detail_id: int, quantity: float, 
                        reason: str, reason_category: str, user_id: int) -> Tuple[bool, str]:
-        """
-        Cancel allocated quantity with audit trail
-        
-        Returns:
-            Tuple[bool, str]: (success, message)
-        """
+        """Cancel allocated quantity with audit trail"""
         conn = self.engine.connect()
         trans = conn.begin()
         
         try:
-            # Get current allocation detail with cancellation info
+            # Get current state from view
             detail_query = text("""
                 SELECT 
-                    ad.*,
-                    ap.allocation_number,
-                    COALESCE(SUM(CASE WHEN ac.status = 'ACTIVE' THEN ac.cancelled_qty ELSE 0 END), 0) as total_cancelled
-                FROM allocation_details ad
-                JOIN allocation_plans ap ON ad.allocation_plan_id = ap.id
-                LEFT JOIN allocation_cancellations ac ON ad.id = ac.allocation_detail_id
-                WHERE ad.id = :detail_id
-                GROUP BY ad.id
+                    ads.*,
+                    ap.allocation_number
+                FROM allocation_delivery_status_view ads
+                JOIN allocation_plans ap ON ads.allocation_plan_id = ap.id
+                WHERE ads.id = :detail_id
             """)
             
             result = conn.execute(detail_query, {'detail_id': detail_id})
@@ -52,20 +43,30 @@ class AllocationCancellationManager:
             if not detail:
                 return False, "Allocation detail not found"
             
-            # Calculate cancellable quantity
-            cancellable = float(detail['allocated_qty']) - float(detail['delivered_qty']) - float(detail['total_cancelled'])
+            # Check if can be cancelled
+            if detail['detail_status'] != 'ALLOCATED':
+                return False, f"Cannot cancel {detail['detail_status']} allocation"
+            
+            # Use computed cancellable quantity from view
+            cancellable = float(detail['remaining_qty'])
             
             if quantity > cancellable:
-                return False, f"Cannot cancel {quantity:.2f}. Only {cancellable:.2f} available to cancel"
+                return False, f"Cannot cancel {quantity:.2f}. Only {cancellable:.2f} available"
             
             if quantity <= 0:
                 return False, "Cancel quantity must be greater than 0"
             
-            # Insert cancellation record
+            # Get user name for audit - Fixed to use employees table with concat
+            user_query = text("SELECT CONCAT(COALESCE(first_name, ''), ' ', COALESCE(last_name, '')) as full_name FROM employees WHERE id = :user_id AND delete_flag = 0")
+            user_result = conn.execute(user_query, {'user_id': user_id})
+            user_row = user_result.fetchone()
+            cancelled_by_name = user_row['full_name'].strip() if user_row and user_row['full_name'] else f'User {user_id}'
+            
+            # Insert cancellation record - REMOVED cancelled_by_name field that doesn't exist
             cancel_insert = text("""
                 INSERT INTO allocation_cancellations 
                 (allocation_detail_id, allocation_plan_id, cancelled_qty, 
-                 reason, reason_category, cancelled_by_user_id, status)
+                reason, reason_category, cancelled_by_user_id, status)
                 VALUES (:detail_id, :plan_id, :qty, :reason, :category, :user_id, 'ACTIVE')
             """)
             
@@ -78,28 +79,18 @@ class AllocationCancellationManager:
                 'user_id': user_id
             })
             
-            # Update detail status if needed
-            new_effective_qty = float(detail['allocated_qty']) - float(detail['total_cancelled']) - quantity
-            
-            if new_effective_qty <= 0:
-                # Fully cancelled
-                status_update = text("""
-                    UPDATE allocation_details 
-                    SET status = 'CANCELLED' 
-                    WHERE id = :detail_id
-                """)
-                conn.execute(status_update, {'detail_id': detail_id})
-                status_msg = "Allocation fully cancelled"
-            elif float(detail['delivered_qty']) > 0 and new_effective_qty > float(detail['delivered_qty']):
-                # Partial cancelled but still has undelivered
-                status_msg = "Partial cancellation applied"
-            else:
-                status_msg = "Cancellation applied"
-            
             trans.commit()
             
-            logger.info(f"Cancelled {quantity} for allocation detail {detail_id}")
-            return True, f"{status_msg}. Cancelled quantity: {quantity:.2f}"
+            # Determine message based on impact
+            new_remaining = cancellable - quantity
+            
+            if new_remaining <= 0:
+                status_msg = "Allocation fully cancelled"
+            else:
+                status_msg = f"Cancellation applied. Remaining: {new_remaining:.2f}"
+            
+            logger.info(f"Cancelled {quantity} for allocation detail {detail_id} by {cancelled_by_name}")
+            return True, status_msg
             
         except Exception as e:
             trans.rollback()
@@ -107,7 +98,7 @@ class AllocationCancellationManager:
             return False, f"Error: {str(e)}"
         finally:
             conn.close()
-    
+
     def get_cancellable_quantity(self, detail_id: int) -> float:
         """Get quantity available for cancellation"""
         try:
@@ -119,7 +110,7 @@ class AllocationCancellationManager:
                 FROM allocation_details ad
                 LEFT JOIN allocation_cancellations ac ON ad.id = ac.allocation_detail_id
                 WHERE ad.id = :detail_id
-                GROUP BY ad.id
+                GROUP BY ad.id, ad.allocated_qty, ad.delivered_qty
             """)
             
             with self.engine.connect() as conn:
@@ -158,7 +149,13 @@ class AllocationCancellationManager:
             if float(cancellation['delivered_qty']) > 0:
                 return False, "Cannot reverse - some quantity already delivered"
             
-            # Reverse the cancellation
+            # Get user name for audit
+            user_query = text("SELECT CONCAT(COALESCE(first_name, ''), ' ', COALESCE(last_name, '')) as full_name FROM employees WHERE id = :user_id AND delete_flag = 0")
+            user_result = conn.execute(user_query, {'user_id': user_id})
+            user_row = user_result.fetchone()
+            reversed_by_name = user_row['full_name'].strip() if user_row and user_row['full_name'] else f'User {user_id}'
+            
+            # Reverse the cancellation - Fixed field name
             reverse_update = text("""
                 UPDATE allocation_cancellations
                 SET status = 'REVERSED',
@@ -185,7 +182,7 @@ class AllocationCancellationManager:
             
             trans.commit()
             
-            logger.info(f"Reversed cancellation {cancellation_id}")
+            logger.info(f"Reversed cancellation {cancellation_id} by {reversed_by_name}")
             return True, f"Cancellation reversed. Restored quantity: {cancellation['cancelled_qty']:.2f}"
             
         except Exception as e:
@@ -199,6 +196,7 @@ class AllocationCancellationManager:
                                detail_id: Optional[int] = None) -> pd.DataFrame:
         """Get cancellation history for a plan or detail"""
         try:
+            # Fixed table references and join
             query = """
                 SELECT 
                     ac.*,
@@ -206,12 +204,12 @@ class AllocationCancellationManager:
                     ad.customer_name,
                     ad.allocated_qty as original_allocated,
                     ad.delivered_qty,
-                    u1.name as cancelled_by,
-                    u2.name as reversed_by
+                    CONCAT(COALESCE(e1.first_name, ''), ' ', COALESCE(e1.last_name, '')) as cancelled_by,
+                    CONCAT(COALESCE(e2.first_name, ''), ' ', COALESCE(e2.last_name, '')) as reversed_by
                 FROM allocation_cancellations ac
                 JOIN allocation_details ad ON ac.allocation_detail_id = ad.id
-                LEFT JOIN users u1 ON ac.cancelled_by_user_id = u1.id
-                LEFT JOIN users u2 ON ac.reversed_by_user_id = u2.id
+                LEFT JOIN employees e1 ON ac.cancelled_by_user_id = e1.id AND e1.delete_flag = 0
+                LEFT JOIN employees e2 ON ac.reversed_by_user_id = e2.id AND e2.delete_flag = 0
                 WHERE 1=1
             """
             
@@ -262,8 +260,9 @@ class AllocationCancellationManager:
                 if not detail:
                     return False, "Allocation detail not found"
                 
-                if detail['status'] == 'DELIVERED':
-                    return False, "Cannot cancel delivered allocation"
+                # Only ALLOCATED status can be cancelled
+                if detail['status'] != 'ALLOCATED':
+                    return False, f"Cannot cancel allocation with status: {detail['status']}"
                 
                 cancellable = float(detail['allocated_qty']) - float(detail['delivered_qty']) - float(detail['total_cancelled'])
                 
@@ -289,7 +288,7 @@ class AllocationCancellationManager:
                     COUNT(DISTINCT CASE WHEN ac.status = 'REVERSED' THEN ac.id END) as reversed_cancellations,
                     COALESCE(SUM(CASE WHEN ac.status = 'ACTIVE' THEN ac.cancelled_qty ELSE 0 END), 0) as total_cancelled_qty,
                     COUNT(DISTINCT ac.allocation_detail_id) as affected_lines,
-                    COUNT(DISTINCT ad.customer_id) as affected_customers,
+                    COUNT(DISTINCT ad.customer_name) as affected_customers,
                     COUNT(DISTINCT ad.pt_code) as affected_products
                 FROM allocation_cancellations ac
                 JOIN allocation_details ad ON ac.allocation_detail_id = ad.id
@@ -302,13 +301,13 @@ class AllocationCancellationManager:
                 
                 if row:
                     return {
-                        'total_cancellations': row['total_cancellations'],
-                        'active_cancellations': row['active_cancellations'],
-                        'reversed_cancellations': row['reversed_cancellations'],
+                        'total_cancellations': int(row['total_cancellations']),
+                        'active_cancellations': int(row['active_cancellations']),
+                        'reversed_cancellations': int(row['reversed_cancellations']),
                         'total_cancelled_qty': float(row['total_cancelled_qty']),
-                        'affected_lines': row['affected_lines'],
-                        'affected_customers': row['affected_customers'],
-                        'affected_products': row['affected_products']
+                        'affected_lines': int(row['affected_lines']),
+                        'affected_customers': int(row['affected_customers']),
+                        'affected_products': int(row['affected_products'])
                     }
                 
                 return {

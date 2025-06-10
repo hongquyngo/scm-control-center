@@ -162,24 +162,7 @@ class DataManager:
     def load_customer_master(_self):
         """Load customer master data"""
         engine = get_db_engine()
-        query = """
-        SELECT 
-            c.id as customer_id,
-            c.english_name as customer_name,
-            c.company_code as customer_code,
-            c.registration_code,
-            c.local_name,
-            tnc.limit_credit as credit_limit,
-            cur.code as credit_limit_currency,
-            pt.name as payment_term_days
-        FROM companies c
-        JOIN companies_company_types cct ON c.id = cct.companies_id
-        JOIN company_types ct ON cct.company_type_id = ct.id
-        JOIN term_and_conditions tnc ON c.customer_term_condition_id = tnc.id
-        JOIN payment_terms pt ON tnc.payment_term_id = pt.id
-        JOIN currencies cur ON tnc.credit_currency_id = cur.id
-        WHERE c.delete_flag = 0
-        AND ct.name = 'Customer'
+        query = """SELECT * FROM prostechvn.customer_master_view;
         """
         return pd.read_sql(text(query), engine)
 
@@ -1003,46 +986,25 @@ class DataManager:
 
     @st.cache_data(ttl=300)  # 5 minutes cache
     def load_active_allocations(_self):
-        """Load active allocation details for demand matching"""
+        """Load active allocation details from view for demand matching"""
         try:
             engine = get_db_engine()
             query = text("""
                 SELECT 
-                    ad.demand_type,
-                    ad.demand_reference_id,
-                    ad.pt_code,
-                    ad.customer_id,
-                    ad.customer_name,
-                    ad.legal_entity_id,
-                    ad.legal_entity_name,
-                    ad.requested_qty,
-                    ad.allocated_qty,
-                    ad.delivered_qty,
-                    ad.etd,
-                    ad.allocated_etd,
-                    ad.status as allocation_status,
-                    ap.allocation_number,
-                    ap.allocation_method,
-                    ap.allocation_type,
-                    ap.status as plan_status,
-                    ap.allocation_date
-                FROM allocation_details ad
-                JOIN allocation_plans ap ON ad.allocation_plan_id = ap.id
-                WHERE ap.status IN ('APPROVED', 'EXECUTED')
-                AND ad.status != 'CANCELLED'
+                    *
+                FROM active_allocations_view
+                WHERE undelivered_qty > 0
             """)
             
             df = pd.read_sql(query, engine)
             
-            # Calculate undelivered quantity
-            df['undelivered_qty'] = df['allocated_qty'] - df['delivered_qty']
+            logger.info(f"Loaded {len(df)} active allocations with undelivered quantity")
             
             return df
             
         except Exception as e:
             logger.error(f"Error loading allocations: {str(e)}")
             return pd.DataFrame()
-
 
     def enhance_demand_with_allocations(self, demand_df: pd.DataFrame) -> pd.DataFrame:
         """Enhance demand data with allocation information

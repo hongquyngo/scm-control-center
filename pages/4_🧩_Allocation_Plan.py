@@ -52,29 +52,147 @@ logger = logging.getLogger(__name__)
 
 # === Functions Implementation ===
 
-
 def show_allocation_list():
-    """Display list of allocation plans with filters"""
-    st.markdown("### 📋 Allocation Plans")
+    """Display allocation management with tabs"""
+    st.markdown("### 📋 Allocation Management")
     
+    # Create tabs
+    tab1, tab2 = st.tabs(["🔥 Active Allocations", "📋 All Plans"])
+    
+    with tab1:
+        show_active_allocations()
+        
+    with tab2:
+        show_all_allocation_plans()
+
+def show_active_allocations():
+    """Display active allocations list"""
     # Filters
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        # Update status options theo database thực tế
         status_filter = st.multiselect(
-            "Status", 
+            "Delivery Status", 
+            options=['ALLOCATED', 'PARTIAL_DELIVERED', 'DELIVERED', 'CANCELLED'],
+            default=['ALLOCATED', 'PARTIAL_DELIVERED']
+        )
+    
+    with col2:
+        date_from = st.date_input("ETD From", value=datetime.now() - timedelta(days=7))
+    
+    with col3:
+        date_to = st.date_input("ETD To", value=datetime.now() + timedelta(days=30))
+    
+    with col4:
+        search_text = st.text_input("Search", placeholder="Product, Customer, Allocation #")
+    
+    # Load active allocations
+    allocations = allocation_manager.get_active_allocations(
+        status_filter=status_filter,
+        date_from=date_from,
+        date_to=date_to,
+        search_text=search_text
+    )
+    
+    if allocations.empty:
+        st.info("No active allocations found")
+        return
+    
+    # Summary metrics
+    col1, col2, col3, col4, col5 = st.columns(5)
+    
+    with col1:
+        st.metric("Total Items", len(allocations))
+    with col2:
+        allocated_count = len(allocations[allocations['delivery_status'] == 'ALLOCATED'])
+        st.metric("Pending", allocated_count)
+    with col3:
+        partial_count = len(allocations[allocations['delivery_status'] == 'PARTIAL_DELIVERED'])
+        st.metric("In Progress", partial_count)
+    with col4:
+        delivered_count = len(allocations[allocations['delivery_status'] == 'DELIVERED'])
+        st.metric("Delivered", delivered_count)
+    with col5:
+        total_undelivered = allocations['undelivered_qty'].sum()
+        st.metric("Undelivered Qty", format_number(total_undelivered))
+    
+    # Group by allocation plan for display
+    plan_groups = allocations.groupby(['allocation_number', 'allocation_date', 'creator_name', 'allocation_plan_id'])
+    
+    for (allocation_number, allocation_date, creator_name, plan_id), group in plan_groups:
+        with st.expander(f"📦 {allocation_number} - {allocation_date.strftime('%Y-%m-%d')} by {creator_name}", expanded=False):
+            # Plan summary
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.write(f"**Method:** {group.iloc[0]['allocation_method']}")
+                st.write(f"**Items:** {len(group)}")
+            with col2:
+                st.write(f"**Total Allocated:** {format_number(group['total_allocated_qty'].sum())}")
+                st.write(f"**Delivered:** {format_number(group['total_delivered_qty'].sum())}")
+            with col3:
+                avg_fulfillment = group['avg_fulfillment_rate'].mean()
+                st.write(f"**Fulfillment:** {avg_fulfillment:.1f}%")
+                st.write(f"**Undelivered:** {format_number(group['undelivered_qty'].sum())}")
+            with col4:
+                if st.button("👁️ View Plan", key=f"view_active_{plan_id}"):
+                    st.session_state['allocation_mode'] = 'view'
+                    st.session_state['selected_allocation_id'] = plan_id
+                    st.rerun()
+            
+            # Show allocation details
+            display_cols = ['pt_code', 'customer_name', 'allocated_etd', 
+                           'total_allocated_qty', 'total_delivered_qty', 
+                           'undelivered_qty', 'delivery_status']
+            
+            display_df = group[display_cols].copy()
+            display_df['allocated_etd'] = pd.to_datetime(display_df['allocated_etd']).dt.strftime('%Y-%m-%d')
+            
+            # Format quantities
+            for col in ['total_allocated_qty', 'total_delivered_qty', 'undelivered_qty']:
+                display_df[col] = display_df[col].apply(format_number)
+            
+            # Status color coding
+            status_colors = {
+                'ALLOCATED': '🔵',
+                'PARTIAL_DELIVERED': '🟡',
+                'DELIVERED': '🟢',
+                'CANCELLED': '🔴'
+            }
+            display_df['delivery_status'] = display_df['delivery_status'].apply(
+                lambda x: f"{status_colors.get(x, '')} {x}"
+            )
+            
+            # Rename columns for display
+            display_df = display_df.rename(columns={
+                'pt_code': 'Product',
+                'customer_name': 'Customer',
+                'allocated_etd': 'ETD',
+                'total_allocated_qty': 'Allocated',
+                'total_delivered_qty': 'Delivered',
+                'undelivered_qty': 'Pending',
+                'delivery_status': 'Status'
+            })
+            
+            st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+def show_all_allocation_plans():
+    """Display all allocation plans"""
+    # Filters
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        status_filter = st.multiselect(
+            "Plan Status", 
             options=['DRAFT', 'ALLOCATED', 'PARTIAL_DELIVERED', 'DELIVERED', 'CANCELLED'],
             default=['DRAFT', 'ALLOCATED', 'PARTIAL_DELIVERED']
         )
     
     with col2:
-        date_from = st.date_input("From Date", value=datetime.now() - timedelta(days=30))
+        date_from = st.date_input("Created From", value=datetime.now() - timedelta(days=30), key="plan_date_from")
     
     with col3:
-        date_to = st.date_input("To Date", value=datetime.now())
+        date_to = st.date_input("Created To", value=datetime.now(), key="plan_date_to")
     
     with col4:
-        search_text = st.text_input("Search", placeholder="Allocation number or notes")
+        search_text = st.text_input("Search", placeholder="Allocation number or notes", key="plan_search")
     
     # Load allocation plans
     allocations = allocation_manager.get_allocation_plans(
@@ -88,10 +206,9 @@ def show_allocation_list():
         st.info("No allocation plans found")
         return
     
-    # Summary metrics với display_status mới
+    # Summary metrics
     col1, col2, col3, col4, col5 = st.columns(5)
     
-    # Count by display_status (computed in view)
     with col1:
         st.metric("Total Plans", len(allocations))
     with col2:
@@ -154,7 +271,7 @@ def show_allocation_list():
                     st.caption(f"Fulfillment: {row.get('fulfillment_rate', 0):.1f}%")
             
             with col4:
-                if st.button("👁️ View", key=f"view_{row['id']}"):
+                if st.button("👁️ View", key=f"view_plan_{row['id']}"):
                     st.session_state['allocation_mode'] = 'view'
                     st.session_state['selected_allocation_id'] = row['id']
                     st.rerun()
@@ -375,7 +492,7 @@ def show_step3_set_parameters():
     """Step 3: Set allocation parameters based on method"""
     st.markdown("#### ⚙️ Set Allocation Parameters")
     
-    method = st.session_state['draft_allocation'].get('method', 'FIFO')
+    method = st.session_state['draft_allocation'].get('method', 'FCFS')
     
     # Get demand details for selected products
     gap_data = get_from_session_state('gap_analysis_result', pd.DataFrame())
@@ -471,7 +588,7 @@ def show_step3_set_parameters():
             allocation_type = st.session_state['draft_allocation'].get('allocation_type', 'SOFT')
             if allocation_type in ['HARD', 'MIXED']:
                 # Calculate allocation first for HARD mapping
-                method = st.session_state['draft_allocation'].get('method', 'FIFO')
+                method = st.session_state['draft_allocation'].get('method', 'FCFS')
                 parameters = st.session_state['draft_allocation'].get('parameters', {})
                 selected_products = st.session_state.get('selected_allocation_products', [])
                 
@@ -619,21 +736,29 @@ def show_step4_map_supply():
                             'source_id': supply_row['source_id']
                         })
                     
-                    # Supply selection
+                    # Supply selection with better error handling
                     selected_key = st.selectbox(
                         "Select Supply Source",
                         options=[opt['value'] for opt in supply_options],
-                        format_func=lambda x: next(opt['text'] for opt in supply_options if opt['value'] == x),
+                        format_func=lambda x: next((opt['text'] for opt in supply_options if opt['value'] == x), ''),
                         key=f"supply_{alloc_row['demand_line_id']}"
                     )
                     
-                    # Store mapping
+                    # Store mapping with error handling
                     if selected_key:
-                        selected_supply = next(opt for opt in supply_options if opt['value'] == selected_key)
-                        st.session_state['supply_mapping'][str(alloc_row['demand_line_id'])] = {
-                            'source_type': selected_supply['source_type'],
-                            'source_id': selected_supply['source_id']
-                        }
+                        # Safe iteration with default
+                        selected_supply = next(
+                            (opt for opt in supply_options if opt['value'] == selected_key), 
+                            None
+                        )
+                        
+                        if selected_supply:
+                            st.session_state['supply_mapping'][str(alloc_row['demand_line_id'])] = {
+                                'source_type': selected_supply['source_type'],
+                                'source_id': selected_supply['source_id']
+                            }
+                        else:
+                            logger.warning(f"Could not find supply option for key: {selected_key}")
                     
                     st.divider()
     
@@ -917,8 +1042,25 @@ def show_step6_confirm_with_mapping():
 
 
 def save_allocation(status):
-    """Save allocation plan to database"""
+    """Save allocation plan to database
+    
+    Args:
+        status: 'DRAFT' or 'APPROVED' - determines initial detail status
+        
+    Note: Plan table no longer has status field, status is managed at detail level
+    """
     try:
+        # Helper function to safely convert numeric values
+        def safe_float(value):
+            """Convert to float safely, handling NaN and inf"""
+            try:
+                if pd.isna(value) or (isinstance(value, float) and (np.isnan(value) or np.isinf(value))):
+                    return 0.0
+                return float(value)
+            except:
+                return 0.0
+        
+        # Get draft data from session state
         draft = st.session_state.get('draft_allocation', {})
         results = draft.get('results', pd.DataFrame())
         
@@ -926,9 +1068,32 @@ def save_allocation(status):
             st.error("No allocation results to save")
             return
         
-        # Get complete GAP Analysis context from session state
+        # Get supply mapping for HARD allocations
+        supply_mapping = st.session_state.get('supply_mapping', {})
+        
+        # Validate HARD allocation supply mapping if applicable
+        allocation_type = draft.get('allocation_type', 'SOFT')
+        if allocation_type in ['HARD', 'MIXED'] and supply_mapping:
+            logger.info("Validating HARD allocation supply mapping...")
+            is_valid, validation_errors = allocation_manager.validate_hard_allocation_supply(
+                supply_mapping, results
+            )
+            
+            if not is_valid:
+                st.error("❌ Supply validation failed:")
+                for error in validation_errors:
+                    st.error(f"• {error}")
+                
+                # Show option to go back and fix
+                if st.button("← Go back to fix mappings", key="fix_mappings_btn"):
+                    st.session_state['allocation_step'] = 4  # Go back to mapping step
+                    st.rerun()
+                return
+        
+        # Get GAP Analysis data for context
         gap_analysis_data = st.session_state.get('gap_analysis_result', pd.DataFrame())
         
+        # Build comprehensive allocation context
         gap_context = {
             'snapshot_datetime': datetime.now().isoformat(),
             'gap_analysis': {
@@ -936,8 +1101,8 @@ def save_allocation(status):
                 'total_products': len(gap_analysis_data['pt_code'].unique()) if not gap_analysis_data.empty else 0,
                 'shortage_products': len(gap_analysis_data[gap_analysis_data['gap_quantity'] < 0]) if not gap_analysis_data.empty else 0,
                 'surplus_products': len(gap_analysis_data[gap_analysis_data['gap_quantity'] > 0]) if not gap_analysis_data.empty else 0,
-                'total_gap_value': float(gap_analysis_data['gap_quantity'].sum()) if not gap_analysis_data.empty else 0,
-                'fulfillment_rate': float((gap_analysis_data['total_available'] / gap_analysis_data['total_demand_qty']).mean() * 100) if not gap_analysis_data.empty and (gap_analysis_data['total_demand_qty'] > 0).any() else 0
+                'total_gap_value': safe_float(gap_analysis_data['gap_quantity'].sum()) if not gap_analysis_data.empty else 0,
+                'fulfillment_rate': safe_float((gap_analysis_data['total_available'] / gap_analysis_data['total_demand_qty']).mean() * 100) if not gap_analysis_data.empty and (gap_analysis_data['total_demand_qty'] > 0).any() else 0
             },
             'time_adjustments': st.session_state.get('time_adjustments', {
                 'etd_offset_days': 0,
@@ -967,58 +1132,92 @@ def save_allocation(status):
                 'parameters': draft.get('parameters', {}),
                 'selected_products': st.session_state.get('selected_allocation_products', []),
                 'total_orders': len(results),
-                'total_allocated': float(results['allocated_qty'].sum()),
-                'avg_fulfillment': float(results['fulfillment_rate'].mean())
+                'total_allocated': safe_float(results['allocated_qty'].sum()),
+                'avg_fulfillment': safe_float(results['fulfillment_rate'].mean()) if 'fulfillment_rate' in results.columns else 0
             }
         }
         
-        # Create allocation plan data
-        plan_data = {
-            'allocation_method': draft.get('method', 'MANUAL'),
-            'allocation_type': draft.get('allocation_type', 'SOFT'),
-            'status': status,
-            'creator_id': st.session_state.get('user_id', 1),
-            'notes': draft.get('parameters', {}).get('notes', ''),
-            'approved_by': st.session_state.get('username', 'System') if status == 'APPROVED' else None,
-            'approved_date': datetime.now() if status == 'APPROVED' else None,
-            'allocation_context': gap_context  # Pass as dict, will be converted to JSON in create_allocation_plan
-        }
+        # Store allocation method and type in context (since not in plan table anymore)
+        gap_context['allocation_method'] = draft.get('method', 'MANUAL')
+        gap_context['allocation_type'] = draft.get('allocation_type', 'SOFT')
         
-        # Get supply mapping if exists (for HARD allocation)
-        supply_mapping = st.session_state.get('supply_mapping', {})
-        
-        # Add allocation mode counts to context
+        # Add allocation mode breakdown to context
         if draft.get('allocation_type') in ['HARD', 'MIXED']:
+            hard_count = len(supply_mapping)
+            soft_count = len(results) - hard_count
             allocation_modes = {
-                'SOFT': len(results) - len(supply_mapping),
-                'HARD': len(supply_mapping)
+                'SOFT': soft_count,
+                'HARD': hard_count
             }
             gap_context['allocation_info']['allocation_modes'] = allocation_modes
+            
+            logger.info(f"Allocation mode breakdown - SOFT: {soft_count}, HARD: {hard_count}")
         
-        # Log the save action
-        logger.info(f"Saving allocation plan with status: {status}")
-        logger.info(f"Total items: {len(results)}, Total allocated: {results['allocated_qty'].sum()}")
+        # Create plan data - use SCM system user (id=1) as default
+        plan_data = {
+            'creator_id': st.session_state.get('user_id', 1),  # Default to 1 (SCM system user)
+            'notes': draft.get('parameters', {}).get('notes', ''),
+            'allocation_context': gap_context,
+            'status': status  # Used to determine initial detail status (DRAFT or APPROVED)
+        }
+        
+        # Log save action
+        logger.info(f"Saving allocation plan with initial status: {status}")
+        logger.info(f"Total items: {len(results)}, Total allocated: {safe_float(results['allocated_qty'].sum())}")
+        logger.info(f"Creator ID: {plan_data['creator_id']}")
+        
         if supply_mapping:
             logger.info(f"HARD allocations: {len(supply_mapping)}")
         
-        # Save to database - Pass supply_mapping
+        # Progress indicator
+        progress_placeholder = st.empty()
+        progress_placeholder.info("💾 Saving allocation plan...")
+        
+        # Save to database
         allocation_id = allocation_manager.create_allocation_plan(
             plan_data, 
             results, 
-            supply_mapping  # This was missing!
+            supply_mapping
         )
         
         if allocation_id:
-            st.success(f"✅ Allocation plan saved successfully! ID: {allocation_id}")
-            
-            # Log success metrics
+            progress_placeholder.success(f"✅ Allocation plan saved successfully! ID: {allocation_id}")
             logger.info(f"Successfully created allocation plan ID: {allocation_id}")
             
-            # Send notification if approved
+            # If APPROVED, update all details from DRAFT to ALLOCATED
             if status == 'APPROVED':
-                st.info("📧 Notification sent to relevant stakeholders")
+                with st.spinner("📝 Updating allocation status..."):
+                    success = allocation_manager.bulk_update_allocation_status(
+                        allocation_id, 'ALLOCATED'
+                    )
+                    if success:
+                        st.info("✅ All items marked as ALLOCATED and ready for delivery")
+                        logger.info(f"Updated all details to ALLOCATED status for plan {allocation_id}")
+                    else:
+                        st.warning("⚠️ Plan created but failed to update status to ALLOCATED")
             
-            # Clear allocation-specific session state
+            # Show summary info
+            with st.expander("📊 Allocation Summary", expanded=True):
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Allocation Number", allocation_id)
+                    st.metric("Total Products", len(results['pt_code'].unique()))
+                with col2:
+                    st.metric("Total Orders", len(results))
+                    st.metric("Total Quantity", format_number(results['allocated_qty'].sum()))
+                with col3:
+                    st.metric("Method", draft.get('method', 'MANUAL'))
+                    st.metric("Type", draft.get('allocation_type', 'SOFT'))
+                    
+                # Show HARD allocation breakdown if applicable
+                if supply_mapping:
+                    st.markdown("##### 🔒 HARD Allocation Details")
+                    hard_summary = results[results['demand_line_id'].astype(str).isin(supply_mapping.keys())]
+                    st.write(f"- HARD allocated items: {len(hard_summary)}")
+                    st.write(f"- Total HARD quantity: {format_number(hard_summary['allocated_qty'].sum())}")
+                    st.write(f"- Products with HARD allocation: {hard_summary['pt_code'].nunique()}")
+            
+            # Clear ALL allocation-specific session state
             allocation_keys = [
                 'allocation_mode',
                 'allocation_step', 
@@ -1026,54 +1225,134 @@ def save_allocation(status):
                 'selected_allocation_products',
                 'supply_mapping',
                 'temp_allocation_results',
-                'selected_hard_items'  # Add this
+                'selected_hard_items',
+                'alloc_current_page',  
+                'allocation_filter_mode',  
+                'allocation_items_per_page',
+                # Smart filter states
+                'alloc_smart_filters',
+                'alloc_filter_type',
+                'alloc_entity_selection',
+                'alloc_customer_selection', 
+                'alloc_brand_selection',
+                'alloc_product_selection',
+                # Bulk action states
+                'show_bulk_cancel',
+                'selected_cancel_ids'
             ]
             
+            # Clear all allocation-related session state
             for key in allocation_keys:
                 if key in st.session_state:
                     del st.session_state[key]
             
-            # Reset to initial values
+            # Also clear any dynamic keys that might have been created
+            keys_to_remove = []
+            for key in st.session_state.keys():
+                if key.startswith(('select_', 'priority_', 'hard_', 'supply_', 'cancel_', 'reverse_')):
+                    keys_to_remove.append(key)
+            
+            for key in keys_to_remove:
+                del st.session_state[key]
+            
+            # Reset to view mode with new allocation
             st.session_state['allocation_mode'] = 'view'
             st.session_state['allocation_step'] = 1
             st.session_state['draft_allocation'] = {}
             st.session_state['selected_allocation_products'] = []
             st.session_state['selected_allocation_id'] = allocation_id
             
-            # Show success message with options
+            # Show action buttons
+            st.markdown("---")
+            st.markdown("### 🎯 What's Next?")
+            
             col1, col2, col3 = st.columns(3)
+            
             with col1:
-                if st.button("📋 View Plan", type="primary"):
+                st.markdown("#### 📋 View Your Plan")
+                st.write("Review allocation details and make adjustments if needed")
+                if st.button("View Plan", type="primary", use_container_width=True, key="btn_view_plan"):
                     st.rerun()
+            
             with col2:
-                if st.button("➕ Create Another"):
+                st.markdown("#### ➕ Create Another")
+                st.write("Start a new allocation with different products or methods")
+                if st.button("Create Another", use_container_width=True, key="btn_create_another"):
                     st.session_state['allocation_mode'] = 'create'
                     st.session_state['selected_allocation_id'] = None
                     st.rerun()
+            
             with col3:
-                if st.button("📊 Back to GAP Analysis"):
+                st.markdown("#### 📊 Back to Analysis")
+                st.write("Return to GAP Analysis to review supply-demand balance")
+                if st.button("GAP Analysis", use_container_width=True, key="btn_gap_analysis"):
                     st.switch_page("pages/3_📊_GAP_Analysis.py")
             
         else:
-            st.error("❌ Failed to save allocation plan. Please check the logs.")
-            logger.error("Failed to create allocation plan")
+            progress_placeholder.error("❌ Failed to save allocation plan")
+            st.error("Failed to create allocation plan. Please check the logs for details.")
+            logger.error("Failed to create allocation plan - create_allocation_plan returned None")
+            
+            # Show retry button
+            if st.button("🔄 Retry", type="primary"):
+                st.rerun()
             
     except Exception as e:
         st.error(f"❌ Error saving allocation: {str(e)}")
         logger.error(f"Error in save_allocation: {str(e)}", exc_info=True)
         
-        # Show debug info if in debug mode
+        # Show debug information if debug mode is on
         if st.session_state.get('debug_mode', False):
-            with st.expander("🐛 Debug Information"):
+            with st.expander("🐛 Debug Information", expanded=True):
                 st.write("**Error Details:**")
                 st.code(str(e))
+                
+                st.write("**Stack Trace:**")
+                import traceback
+                st.code(traceback.format_exc())
+                
                 st.write("**Draft Allocation:**")
-                st.json(st.session_state.get('draft_allocation', {}))
-                st.write("**Results DataFrame:**")
+                draft_info = st.session_state.get('draft_allocation', {})
+                # Remove results DataFrame from display to avoid clutter
+                draft_display = {k: v for k, v in draft_info.items() if k != 'results'}
+                st.json(draft_display)
+                
+                st.write("**Results DataFrame Info:**")
                 if 'results' in locals() and not results.empty:
+                    st.write(f"- Shape: {results.shape}")
+                    st.write(f"- Columns: {list(results.columns)}")
+                    st.write("- First 5 rows:")
                     st.dataframe(results.head())
+                    
+                    # Check for problematic values
+                    st.write("**Data Quality Check:**")
+                    numeric_cols = results.select_dtypes(include=[np.number]).columns
+                    for col in numeric_cols:
+                        nan_count = results[col].isna().sum()
+                        inf_count = np.isinf(results[col].fillna(0)).sum()
+                        if nan_count > 0 or inf_count > 0:
+                            st.write(f"- {col}: {nan_count} NaN, {inf_count} Inf values")
+                
                 st.write("**Supply Mapping:**")
-                st.json(st.session_state.get('supply_mapping', {}))
+                if st.session_state.get('supply_mapping'):
+                    st.json(st.session_state.get('supply_mapping', {}))
+                else:
+                    st.write("No supply mapping (SOFT allocation)")
+                
+                st.write("**Session State Keys (allocation-related):**")
+                alloc_keys = sorted([k for k in st.session_state.keys() if 'alloc' in k.lower()])
+                for key in alloc_keys:
+                    value = st.session_state[key]
+                    if isinstance(value, pd.DataFrame):
+                        st.write(f"- {key}: DataFrame with shape {value.shape}")
+                    elif isinstance(value, dict):
+                        st.write(f"- {key}: Dict with {len(value)} keys")
+                    else:
+                        st.write(f"- {key}: {type(value).__name__}")
+            
+            # Show retry button even in debug mode
+            if st.button("🔄 Retry Save", type="primary", key="retry_debug"):
+                st.rerun()
 
 
 def export_allocation_results(results_df):
@@ -1663,8 +1942,6 @@ def show_cancellation_dialog(detail_id: int, detail_info: Dict):
         elif submitted and not reason:
             st.error("Please provide a reason for cancellation")
 
-
-
 # ==== Main Execution ====
 # === Page Config ===
 st.set_page_config(
@@ -1718,6 +1995,36 @@ def get_allocation_manager():
 
 allocation_manager = get_allocation_manager()
 
+# === Debug Mode Toggle ===
+col_debug1, col_debug2 = st.columns([6, 1])
+with col_debug2:
+    debug_mode = st.checkbox("🐛 Debug Mode", value=False, key="debug_mode")
+
+if debug_mode:
+    st.info("🐛 Debug Mode is ON - Additional information will be displayed")
+    
+    # Show current allocation state
+    with st.expander("🔍 Current Session State (Allocation)", expanded=False):
+        col1, col2 = st.columns(2)
+        with col1:
+            st.write("**Mode & Step:**")
+            st.write(f"- allocation_mode: {st.session_state.get('allocation_mode', 'N/A')}")
+            st.write(f"- allocation_step: {st.session_state.get('allocation_step', 'N/A')}")
+            st.write(f"- selected_allocation_id: {st.session_state.get('selected_allocation_id', 'N/A')}")
+        
+        with col2:
+            st.write("**Data State:**")
+            draft = st.session_state.get('draft_allocation', {})
+            st.write(f"- draft_allocation keys: {list(draft.keys()) if draft else 'Empty'}")
+            st.write(f"- selected products: {len(st.session_state.get('selected_allocation_products', []))} items")
+            
+            # Check if we have GAP data
+            gap_data = st.session_state.get('gap_analysis_result')
+            if gap_data is not None and hasattr(gap_data, 'shape'):
+                st.write(f"- GAP data available: {gap_data.shape}")
+            else:
+                st.write("- GAP data: Not available")
+
 # === Header ===
 DisplayComponents.show_page_header(
     title="Allocation Plan Management",
@@ -1725,6 +2032,11 @@ DisplayComponents.show_page_header(
     prev_page="pages/3_📊_GAP_Analysis.py",
     next_page="pages/5_📌_PO_Suggestions.py"
 )
+
+# === Additional Debug Info ===
+if debug_mode:
+    # Show timestamp for debugging
+    st.caption(f"🕐 Page loaded at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
 
 # === Mode Selection ===
 col1, col2, col3, col4 = st.columns(4)
