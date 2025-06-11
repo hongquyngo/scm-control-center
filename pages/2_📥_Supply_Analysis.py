@@ -4,11 +4,10 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime, date
 import logging
-from typing import Tuple, Dict, Any, Optional, List
+from typing import Tuple, Dict, List
 
 # Import refactored modules
 from utils.data_manager import DataManager
-from utils.filters import FilterManager
 from utils.display_components import DisplayComponents
 from utils.formatters import format_number, format_currency, format_percentage, check_missing_dates
 from utils.helpers import (

@@ -3,8 +3,6 @@ Allocation Cancellation Manager - Handles partial cancellation and reversal
 """
 
 import pandas as pd
-import numpy as np
-from datetime import datetime
 from sqlalchemy import text
 from typing import Dict, List, Optional, Tuple
 import logging
@@ -279,19 +277,22 @@ class AllocationCancellationManager:
             return False, f"Validation error: {str(e)}"
     
     def get_plan_cancellation_summary(self, plan_id: int) -> Dict:
-        """Get cancellation summary for a plan"""
+        """Get cancellation summary for a plan
+        
+        Args:
+            plan_id: Allocation plan ID
+            
+        Returns:
+            Dict with cancellation summary statistics
+        """
         try:
             query = text("""
                 SELECT 
                     COUNT(DISTINCT ac.id) as total_cancellations,
                     COUNT(DISTINCT CASE WHEN ac.status = 'ACTIVE' THEN ac.id END) as active_cancellations,
                     COUNT(DISTINCT CASE WHEN ac.status = 'REVERSED' THEN ac.id END) as reversed_cancellations,
-                    COALESCE(SUM(CASE WHEN ac.status = 'ACTIVE' THEN ac.cancelled_qty ELSE 0 END), 0) as total_cancelled_qty,
-                    COUNT(DISTINCT ac.allocation_detail_id) as affected_lines,
-                    COUNT(DISTINCT ad.customer_name) as affected_customers,
-                    COUNT(DISTINCT ad.pt_code) as affected_products
+                    COALESCE(SUM(CASE WHEN ac.status = 'ACTIVE' THEN ac.cancelled_qty ELSE 0 END), 0) as total_cancelled_qty
                 FROM allocation_cancellations ac
-                JOIN allocation_details ad ON ac.allocation_detail_id = ad.id
                 WHERE ac.allocation_plan_id = :plan_id
             """)
             
@@ -300,30 +301,32 @@ class AllocationCancellationManager:
                 row = result.fetchone()
                 
                 if row:
+                    # Fix: Access by index for tuple/Row result
                     return {
-                        'total_cancellations': int(row['total_cancellations']),
-                        'active_cancellations': int(row['active_cancellations']),
-                        'reversed_cancellations': int(row['reversed_cancellations']),
-                        'total_cancelled_qty': float(row['total_cancelled_qty']),
-                        'affected_lines': int(row['affected_lines']),
-                        'affected_customers': int(row['affected_customers']),
-                        'affected_products': int(row['affected_products'])
+                        'total_cancellations': int(row[0] or 0),
+                        'active_cancellations': int(row[1] or 0),
+                        'reversed_cancellations': int(row[2] or 0),
+                        'total_cancelled_qty': float(row[3] or 0)
                     }
                 
-                return {
-                    'total_cancellations': 0,
-                    'active_cancellations': 0,
-                    'reversed_cancellations': 0,
-                    'total_cancelled_qty': 0,
-                    'affected_lines': 0,
-                    'affected_customers': 0,
-                    'affected_products': 0
-                }
-                
+            # Default values if no data
+            return {
+                'total_cancellations': 0,
+                'active_cancellations': 0,
+                'reversed_cancellations': 0,
+                'total_cancelled_qty': 0.0
+            }
+            
         except Exception as e:
             logger.error(f"Error getting cancellation summary: {str(e)}")
-            return {}
-    
+            # Return default values on error
+            return {
+                'total_cancellations': 0,
+                'active_cancellations': 0,
+                'reversed_cancellations': 0,
+                'total_cancelled_qty': 0.0
+            }
+
     def bulk_cancel(self, detail_ids: List[int], reason: str, 
                    reason_category: str, user_id: int) -> Tuple[int, List[str]]:
         """Bulk cancel multiple allocation details"""

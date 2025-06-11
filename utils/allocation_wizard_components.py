@@ -3,8 +3,7 @@
 
 import streamlit as st
 import pandas as pd
-import numpy as np
-from typing import Tuple, Dict, List, Any
+from typing import Tuple
 
 from utils.helpers import get_from_session_state
 from utils.formatters import format_number

@@ -2,26 +2,20 @@
 
 import streamlit as st
 import pandas as pd
-from datetime import datetime, timedelta
-import numpy as np
-from sqlalchemy import text
+from datetime import datetime
 import logging
 
 # Import refactored modules
 from utils.data_manager import DataManager
-from utils.filters import FilterManager
 from utils.display_components import DisplayComponents
 from utils.formatters import (
     format_number, format_currency, format_percentage,
-    check_missing_dates, check_past_dates
+    check_missing_dates
 )
 from utils.helpers import (
-    convert_df_to_excel,
     export_multiple_sheets,
     convert_to_period,
-    sort_period_columns,
     save_to_session_state,
-    get_from_session_state,
     is_past_period,
     parse_week_period,
     parse_month_period,

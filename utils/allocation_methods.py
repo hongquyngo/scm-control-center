@@ -3,8 +3,7 @@ Allocation Methods - Implementation of different allocation algorithms
 """
 
 import pandas as pd
-import numpy as np
-from typing import Dict, List, Optional
+from typing import Dict, List
 import logging
 
 logger = logging.getLogger(__name__)

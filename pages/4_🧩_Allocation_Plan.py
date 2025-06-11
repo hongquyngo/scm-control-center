@@ -5,20 +5,17 @@ import numpy as np
 from sqlalchemy import text
 import plotly.express as px
 import plotly.graph_objects as go
-from typing import Tuple, List, Dict, Any, Optional
+from typing import Dict
 import logging
 
 # Import modules
-from utils.smart_filter_manager import SmartFilterManager
-from utils.data_manager import DataManager
 from utils.display_components import DisplayComponents
-from utils.formatters import format_number, format_currency, format_percentage
+from utils.formatters import format_number
 from utils.helpers import (
-    save_to_session_state, get_from_session_state,
+     get_from_session_state,
     convert_df_to_excel, export_multiple_sheets
 )
 from utils.session_state import initialize_session_state
-from utils.db import get_db_engine
 
 # Import allocation specific modules
 from utils.allocation_manager import AllocationManager
@@ -34,7 +31,6 @@ from utils.allocation_wizard_components import (
     show_no_products_message,
     show_filter_options,
     apply_smart_filters,
-    apply_basic_filter,
     show_no_filtered_data_message,
     prepare_product_summary,
     show_summary_metrics,
@@ -43,7 +39,6 @@ from utils.allocation_wizard_components import (
     show_product_selection,
     show_step1_next_button
 )
-
 
 
 # Configure logging
@@ -1366,114 +1361,154 @@ def export_allocation_results(results_df):
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 
+
 def show_view_allocation():
     """View allocation plan details with cancellation support"""
     allocation_id = st.session_state.get('selected_allocation_id')
     
     if not allocation_id:
         st.error("No allocation selected")
+        if st.button("← Back to List"):
+            st.session_state['allocation_mode'] = 'list'
+            st.rerun()
         return
     
     # Load allocation details
     plan, details = allocation_manager.get_allocation_details(allocation_id)
     
     if plan is None:
-        st.error("Allocation not found")
+        st.error(f"Allocation plan {allocation_id} not found")
+        if st.button("← Back to List"):
+            st.session_state['allocation_mode'] = 'list'
+            st.rerun()
         return
     
     # Header
     col1, col2 = st.columns([3, 1])
     with col1:
-        st.markdown(f"### 📋 {plan['allocation_number']}")
+        st.markdown(f"### 📋 {plan.get('allocation_number', 'Unknown')}")
     with col2:
         if st.button("← Back to List"):
             st.session_state['allocation_mode'] = 'list'
             st.rerun()
     
-    # Plan info with allocation type
+    # Plan info with safe gets
     col1, col2, col3, col4, col5 = st.columns(5)
     
     with col1:
-        st.write("**Date:**", plan['allocation_date'].strftime('%Y-%m-%d %H:%M'))
-        st.write("**Method:**", plan['allocation_method'])
+        # Format date safely
+        allocation_date = plan.get('allocation_date')
+        if allocation_date:
+            if isinstance(allocation_date, str):
+                date_str = allocation_date
+            else:
+                date_str = allocation_date.strftime('%Y-%m-%d %H:%M')
+        else:
+            date_str = 'Unknown'
+            
+        st.write("**Date:**", date_str)
+        st.write("**Method:**", plan.get('allocation_method', 'Manual'))
     
     with col2:
-        status_color = ALLOCATION_STATUS_COLORS.get(plan['status'], 'gray')
-        st.markdown(f"**Status:** :{status_color}[{plan['status']}]")
+        # Get status from plan data - use display_status from view
+        status = plan.get('display_status', 'Unknown')
+        status_color = ALLOCATION_STATUS_COLORS.get(status, 'gray')
+        
+        # User-friendly status display
+        status_display = {
+            'ALL_DRAFT': 'Draft',
+            'IN_PROGRESS': 'In Progress',
+            'ALL_DELIVERED': 'Delivered',
+            'ALL_CANCELLED': 'Cancelled',
+            'MIXED_DRAFT': 'Mixed (Draft)',
+            'MIXED': 'Mixed Status',
+            'EMPTY': 'Empty'
+        }.get(status, status)
+        
+        st.markdown(f"**Status:** :{status_color}[{status_display}]")
         st.write("**Created by:**", plan.get('creator_name', 'System'))
     
     with col3:
         allocation_type = plan.get('allocation_type', 'SOFT')
         type_icon = {'SOFT': '🌊', 'HARD': '🔒', 'MIXED': '🔀'}.get(allocation_type, '❓')
         st.write(f"**Type:** {type_icon} {allocation_type}")
-        if 'allocation_mode' in details.columns:
+        
+        # Count HARD allocations if column exists
+        if not details.empty and 'allocation_mode' in details.columns:
             hard_count = len(details[details['allocation_mode'] == 'HARD'])
             if hard_count > 0:
                 st.write(f"**HARD allocations:** {hard_count}")
     
     with col4:
-        if plan['approved_by']:
+        # Additional info if available
+        if plan.get('approved_by'):
             st.write("**Approved by:**", plan['approved_by'])
-            st.write("**Approved date:**", plan['approved_date'].strftime('%Y-%m-%d'))
+            if plan.get('approved_date'):
+                approved_date_str = plan['approved_date'].strftime('%Y-%m-%d')
+                st.write("**Approved:**", approved_date_str)
     
     with col5:
-        # Calculate with cancellation if available
-        if 'effective_allocated_qty' in details.columns:
-            total_allocated = details['effective_allocated_qty'].sum()
+        # Calculate metrics with safe defaults
+        if not details.empty:
+            if 'effective_allocated_qty' in details.columns:
+                total_allocated = details['effective_allocated_qty'].sum()
+            else:
+                total_allocated = details.get('allocated_qty', 0).sum()
+            
+            total_delivered = details.get('delivered_qty', 0).sum()
+            
+            st.metric("Total Allocated", format_number(total_allocated))
+            
+            if status in ['IN_PROGRESS', 'ALL_DELIVERED', 'MIXED']:
+                delivery_pct = (total_delivered / total_allocated * 100) if total_allocated > 0 else 0
+                st.metric("Delivered", format_number(total_delivered), 
+                         f"{delivery_pct:.1f}%")
         else:
-            total_allocated = details['allocated_qty'].sum()
-        total_delivered = details['delivered_qty'].sum()
-        
-        st.metric("Total Allocated", format_number(total_allocated))
-        if plan['status'] == 'EXECUTED':
-            st.metric("Delivered", format_number(total_delivered), 
-                     f"{total_delivered/total_allocated*100:.1f}%")
+            st.metric("Total Allocated", "0")
     
     # Show cancellation summary if exists
-    if 'cancellation_summary' in plan and plan['cancellation_summary'].get('total_cancellations', 0) > 0:
+    cancellation_summary = plan.get('cancellation_summary', {})
+    if cancellation_summary.get('total_cancellations', 0) > 0:
         with st.expander("🚫 Cancellation Summary", expanded=False):
-            cancel_summary = plan['cancellation_summary']
             col1, col2, col3, col4 = st.columns(4)
             with col1:
-                st.metric("Total Cancellations", cancel_summary['total_cancellations'])
+                st.metric("Total Cancellations", cancellation_summary.get('total_cancellations', 0))
             with col2:
-                st.metric("Active", cancel_summary['active_cancellations'])
+                st.metric("Active", cancellation_summary.get('active_cancellations', 0))
             with col3:
-                st.metric("Reversed", cancel_summary['reversed_cancellations'])
+                st.metric("Reversed", cancellation_summary.get('reversed_cancellations', 0))
             with col4:
-                st.metric("Cancelled Qty", format_number(cancel_summary['total_cancelled_qty']))
+                st.metric("Cancelled Qty", format_number(cancellation_summary.get('total_cancelled_qty', 0)))
     
     # Show snapshot context if available
-    if plan.get('snapshot_context'):
-        with st.expander("📸 Snapshot Context"):
-            snapshot = plan['snapshot_context']
+    if plan.get('allocation_context'):
+        try:
+            import json
+            context = plan['allocation_context']
+            if isinstance(context, str):
+                context = json.loads(context)
             
-            col1, col2 = st.columns(2)
-            with col1:
-                st.write("**Snapshot Time:**", snapshot.get('snapshot_datetime', 'N/A'))
-                if snapshot.get('time_adjustments'):
-                    st.write("**Time Adjustments:**", snapshot['time_adjustments'].get('mode', 'None'))
-                if snapshot.get('filters'):
-                    st.write("**Filters Applied:**")
-                    filters = snapshot['filters']
-                    if filters.get('entities'):
-                        st.write(f"- Entities: {', '.join(filters['entities'])}")
-                    if filters.get('products'):
-                        st.write(f"- Products: {len(filters['products'])} selected")
-            
-            with col2:
-                if snapshot.get('summary'):
-                    summary = snapshot['summary']
-                    st.write("**Summary:**")
-                    st.write(f"- Total Products: {summary.get('total_products', 0)}")
-                    st.write(f"- Shortage Products: {summary.get('shortage_products', 0)}")
-                    st.write(f"- Fulfillment Rate: {summary.get('fulfillment_rate', 0):.1f}%")
-                    if summary.get('allocation_modes'):
-                        st.write("**Allocation Modes:**")
-                        for mode, count in summary['allocation_modes'].items():
-                            st.write(f"- {mode}: {count} orders")
+            with st.expander("📸 Snapshot Context", expanded=False):
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.write("**Snapshot Time:**", context.get('snapshot_datetime', 'N/A'))
+                    if context.get('time_adjustments'):
+                        adjustments = context['time_adjustments']
+                        st.write("**Time Adjustments:**")
+                        st.write(f"- ETD Offset: {adjustments.get('etd_offset_days', 0)} days")
+                        st.write(f"- Supply Offset: {adjustments.get('supply_arrival_offset', 0)} days")
+                    
+                with col2:
+                    if context.get('gap_analysis'):
+                        gap_info = context['gap_analysis']
+                        st.write("**GAP Analysis Info:**")
+                        st.write(f"- Total Products: {gap_info.get('total_products', 0)}")
+                        st.write(f"- Shortage Products: {gap_info.get('shortage_products', 0)}")
+                        st.write(f"- Fulfillment Rate: {gap_info.get('fulfillment_rate', 0):.1f}%")
+        except Exception as e:
+            logger.error(f"Error parsing allocation context: {str(e)}")
     
-    # Allocation details
+    # Allocation details section
     st.markdown("---")
     st.markdown("#### Allocation Details")
     
@@ -1486,30 +1521,45 @@ def show_view_allocation():
         
         with col1:
             st.markdown("##### By Product")
-            product_summary = details.groupby(['pt_code', 'product_name']).agg({
-                'requested_qty': 'sum',
-                'allocated_qty': 'sum',
-                'delivered_qty': 'sum',
-                'cancelled_qty': 'sum' if 'cancelled_qty' in details.columns else lambda x: 0,
-                'effective_allocated_qty': 'sum' if 'effective_allocated_qty' in details.columns else lambda x: details['allocated_qty'].sum()
-            }).reset_index()
-            
-            fig1 = AllocationComponents.create_allocation_summary_chart(product_summary, 'product')
-            st.plotly_chart(fig1, use_container_width=True)
-        
-        with col2:
-            st.markdown("##### By Customer")
-            customer_summary = details.groupby('customer_name').agg({
-                'requested_qty': 'sum',
-                'allocated_qty': 'sum',
-                'delivered_qty': 'sum',
-                'cancelled_qty': 'sum' if 'cancelled_qty' in details.columns else lambda x: 0,
-                'effective_allocated_qty': 'sum' if 'effective_allocated_qty' in details.columns else lambda x: details['allocated_qty'].sum()
-            }).reset_index()
-            
-            fig2 = AllocationComponents.create_allocation_summary_chart(customer_summary, 'customer')
-            st.plotly_chart(fig2, use_container_width=True)
-    
+            if not details.empty:
+                # Build aggregation dict based on available columns
+                agg_dict = {}
+                
+                # Check and add columns if they exist
+                if 'original_allocated_qty' in details.columns:
+                    agg_dict['original_allocated_qty'] = 'sum'
+                elif 'allocated_qty' in details.columns:
+                    agg_dict['allocated_qty'] = 'sum'
+                    
+                if 'allocated_qty' in details.columns:
+                    agg_dict['allocated_qty'] = 'sum'
+                    
+                if 'delivered_qty' in details.columns:
+                    agg_dict['delivered_qty'] = 'sum'
+                    
+                if 'cancelled_qty' in details.columns:
+                    agg_dict['cancelled_qty'] = 'sum'
+                
+                # Only proceed if we have columns to aggregate
+                if agg_dict:
+                    product_summary = details.groupby(['pt_code', 'product_name']).agg(agg_dict).reset_index()
+                    
+                    # Ensure we have required columns for chart
+                    if 'original_allocated_qty' in product_summary.columns:
+                        product_summary['requested_qty'] = product_summary['original_allocated_qty']
+                    elif 'allocated_qty' in product_summary.columns:
+                        product_summary['requested_qty'] = product_summary['allocated_qty']
+                    else:
+                        product_summary['requested_qty'] = 0
+                    
+                    # Create summary chart
+                    fig1 = AllocationComponents.create_allocation_summary_chart(product_summary, 'product')
+                    st.plotly_chart(fig1, use_container_width=True)
+                else:
+                    st.info("No numeric data to summarize")
+            else:
+                st.info("No details to display")
+
     with tab2:
         # Details table with cancellation actions
         st.markdown("##### Detail Lines")
@@ -1520,18 +1570,21 @@ def show_view_allocation():
             filter_status = st.selectbox(
                 "Filter by Status",
                 options=['All', 'Allocated', 'Partial Delivered', 'Delivered', 'Cancelled'],
-                index=0
+                index=0,
+                key="detail_filter_status"
             )
         
         with col2:
-            if st.checkbox("Show cancellable only", value=False):
+            if st.checkbox("Show cancellable only", value=False, key="show_cancellable"):
                 if 'cancellable_qty' in details.columns:
                     details = details[details['cancellable_qty'] > 0]
         
         with col3:
-            search_term = st.text_input("Search", placeholder="Product or Customer")
+            search_term = st.text_input("Search", placeholder="Product or Customer", key="detail_search")
         
         # Apply filters
+        filtered_details = details.copy()
+        
         if filter_status != 'All':
             status_map = {
                 'Allocated': 'ALLOCATED',
@@ -1539,34 +1592,36 @@ def show_view_allocation():
                 'Delivered': 'DELIVERED',
                 'Cancelled': 'CANCELLED'
             }
-            details = details[details['status'] == status_map.get(filter_status, filter_status)]
+            if 'status' in filtered_details.columns:
+                filtered_details = filtered_details[filtered_details['status'] == status_map.get(filter_status, filter_status)]
         
         if search_term:
             mask = (
-                details['pt_code'].str.contains(search_term, case=False) |
-                details['customer_name'].str.contains(search_term, case=False)
+                filtered_details['pt_code'].str.contains(search_term, case=False, na=False) |
+                filtered_details['customer_name'].str.contains(search_term, case=False, na=False)
             )
-            details = details[mask]
+            filtered_details = filtered_details[mask]
         
         # Display details with actions
-        if not details.empty:
+        if not filtered_details.empty:
             # Add computed columns
-            details['fulfillment_status'] = details.apply(
-                lambda x: '✅ Delivered' if x['delivered_qty'] >= x.get('effective_allocated_qty', x['allocated_qty'])
-                else '🔄 Partial' if x['delivered_qty'] > 0 
+            filtered_details['fulfillment_status'] = filtered_details.apply(
+                lambda x: '✅ Delivered' if x.get('delivered_qty', 0) >= x.get('effective_allocated_qty', x.get('allocated_qty', 0))
+                else '🔄 Partial' if x.get('delivered_qty', 0) > 0 
                 else '⏳ Pending', axis=1
             )
             
             # Bulk actions if plan is active
-            if plan['status'] in ['APPROVED', 'EXECUTED'] and 'cancellable_qty' in details.columns:
-                cancellable_details = details[details['cancellable_qty'] > 0]
+            if plan.get('display_status') in ['IN_PROGRESS', 'MIXED'] and 'cancellable_qty' in filtered_details.columns:
+                cancellable_details = filtered_details[filtered_details['cancellable_qty'] > 0]
                 
                 if not cancellable_details.empty:
                     with st.expander("🎯 Bulk Actions", expanded=False):
                         selected_ids = st.multiselect(
                             "Select items for bulk action:",
                             options=cancellable_details['id'].tolist(),
-                            format_func=lambda x: f"{cancellable_details[cancellable_details['id']==x]['pt_code'].iloc[0]} - {cancellable_details[cancellable_details['id']==x]['customer_name'].iloc[0]}"
+                            format_func=lambda x: f"{cancellable_details[cancellable_details['id']==x]['pt_code'].iloc[0]} - {cancellable_details[cancellable_details['id']==x]['customer_name'].iloc[0]}",
+                            key="bulk_select_items"
                         )
                         
                         if selected_ids:
@@ -1577,13 +1632,13 @@ def show_view_allocation():
                                     st.session_state['selected_cancel_ids'] = selected_ids
             
             # Display each detail row
-            for idx, row in details.iterrows():
+            for idx, row in filtered_details.iterrows():
                 with st.container():
                     col1, col2, col3, col4, col5 = st.columns([3, 2, 1, 1, 1])
                     
                     with col1:
-                        st.write(f"**{row['pt_code']}** - {row['product_name']}")
-                        st.caption(f"Customer: {row['customer_name']}")
+                        st.write(f"**{row.get('pt_code', '')}** - {row.get('product_name', '')}")
+                        st.caption(f"Customer: {row.get('customer_name', '')}")
                         if 'allocation_mode' in row:
                             mode_icon = '🔒' if row['allocation_mode'] == 'HARD' else '🌊'
                             st.caption(f"Mode: {mode_icon} {row['allocation_mode']}")
@@ -1591,31 +1646,37 @@ def show_view_allocation():
                     with col2:
                         subcol1, subcol2 = st.columns(2)
                         with subcol1:
-                            st.metric("Requested", format_number(row['requested_qty']))
+                            st.metric("Requested", format_number(row.get('requested_qty', 0)))
                         with subcol2:
-                            effective_alloc = row.get('effective_allocated_qty', row['allocated_qty'])
+                            effective_alloc = row.get('effective_allocated_qty', row.get('allocated_qty', 0))
                             st.metric("Allocated", format_number(effective_alloc))
-                            if 'cancelled_qty' in row and row['cancelled_qty'] > 0:
+                            if 'cancelled_qty' in row and row.get('cancelled_qty', 0) > 0:
                                 st.caption(f"Cancelled: {format_number(row['cancelled_qty'])}")
                     
                     with col3:
-                        st.metric("Delivered", format_number(row['delivered_qty']))
-                        st.caption(row['fulfillment_status'])
+                        st.metric("Delivered", format_number(row.get('delivered_qty', 0)))
+                        st.caption(row.get('fulfillment_status', ''))
                     
                     with col4:
-                        st.write(f"**ETD:** {row['allocated_etd']}")
-                        if 'cancellable_qty' in row and row['cancellable_qty'] > 0:
+                        etd = row.get('allocated_etd')
+                        if etd:
+                            if isinstance(etd, str):
+                                st.write(f"**ETD:** {etd}")
+                            else:
+                                st.write(f"**ETD:** {etd.strftime('%Y-%m-%d')}")
+                        
+                        if 'cancellable_qty' in row and row.get('cancellable_qty', 0) > 0:
                             st.caption(f"Cancellable: {format_number(row['cancellable_qty'])}")
                     
                     with col5:
-                        # Action buttons
-                        if plan['status'] in ['APPROVED', 'EXECUTED']:
-                            if 'cancellable_qty' in row and row['cancellable_qty'] > 0:
+                        # Action buttons based on status
+                        if plan.get('display_status') in ['IN_PROGRESS', 'MIXED']:
+                            if 'cancellable_qty' in row and row.get('cancellable_qty', 0) > 0:
                                 if st.button("🚫", key=f"cancel_{row['id']}", 
                                            help=f"Cancel {row['cancellable_qty']} units"):
                                     st.session_state[f'show_cancel_{row["id"]}'] = True
                             
-                            if row['delivered_qty'] < row.get('effective_allocated_qty', row['allocated_qty']):
+                            if row.get('delivered_qty', 0) < row.get('effective_allocated_qty', row.get('allocated_qty', 0)):
                                 if st.button("🚚", key=f"deliver_{row['id']}", 
                                            help="Mark as delivered"):
                                     st.info("Delivery function to be implemented")
@@ -1631,54 +1692,54 @@ def show_view_allocation():
     with tab3:
         # Cancellation history
         show_cancellation_history(allocation_id)
-    
+
     with tab4:
         # Analytics
         st.markdown("##### Allocation Performance")
         
-        # Performance metrics
-        col1, col2, col3, col4 = st.columns(4)
-        
-        total_requested = details['requested_qty'].sum()
-        total_allocated_orig = details['allocated_qty'].sum()
-        total_cancelled = details['cancelled_qty'].sum() if 'cancelled_qty' in details.columns else 0
-        total_delivered = details['delivered_qty'].sum()
-        
-        with col1:
-            allocation_rate = (total_allocated_orig / total_requested * 100) if total_requested > 0 else 0
-            st.metric("Allocation Rate", f"{allocation_rate:.1f}%", 
-                     help="Original allocation vs requested")
-        
-        with col2:
-            if total_cancelled > 0:
-                cancel_rate = (total_cancelled / total_allocated_orig * 100) if total_allocated_orig > 0 else 0
-                st.metric("Cancellation Rate", f"{cancel_rate:.1f}%", 
-                         delta=f"-{format_number(total_cancelled)} units", delta_color="inverse")
-        
-        with col3:
-            effective_allocated = total_allocated_orig - total_cancelled
-            delivery_rate = (total_delivered / effective_allocated * 100) if effective_allocated > 0 else 0
-            st.metric("Delivery Rate", f"{delivery_rate:.1f}%",
-                     help="Delivered vs effective allocated")
-        
-        with col4:
-            pending = effective_allocated - total_delivered
-            st.metric("Pending Delivery", format_number(pending))
-        
-        # Timeline chart
-        if 'allocated_etd' in details.columns:
-            timeline_fig = AllocationComponents.show_allocation_timeline(details)
-            if timeline_fig:
-                st.plotly_chart(timeline_fig, use_container_width=True)
-    
+        if not details.empty:
+            # Performance metrics - FIX column names
+            col1, col2, col3, col4 = st.columns(4)
+            
+            # Use original_allocated_qty instead of requested_qty
+            total_requested = details.get('original_allocated_qty', 0).sum()
+            total_allocated_orig = details.get('original_allocated_qty', 0).sum()
+            total_cancelled = details.get('cancelled_qty', 0).sum()
+            total_delivered = details.get('delivered_qty', 0).sum()
+            
+            # Current effective allocated
+            total_allocated_effective = details.get('allocated_qty', 0).sum()
+            
+            with col1:
+                # Since we don't have requested_qty, show original allocation
+                st.metric("Original Allocated", format_number(total_allocated_orig))
+            
+            with col2:
+                if total_cancelled > 0:
+                    cancel_rate = (total_cancelled / total_allocated_orig * 100) if total_allocated_orig > 0 else 0
+                    st.metric("Cancellation Rate", f"{cancel_rate:.1f}%", 
+                            delta=f"-{format_number(total_cancelled)} units", delta_color="inverse")
+                else:
+                    st.metric("Cancellation Rate", "0%")
+            
+            with col3:
+                delivery_rate = (total_delivered / total_allocated_effective * 100) if total_allocated_effective > 0 else 0
+                st.metric("Delivery Rate", f"{delivery_rate:.1f}%",
+                        help="Delivered vs effective allocated")
+            
+            with col4:
+                pending = total_allocated_effective - total_delivered
+                st.metric("Pending Delivery", format_number(pending))   
+ 
     # Export button
     st.markdown("---")
-    if st.button("📤 Export Details"):
+    if st.button("📤 Export Details", key="export_allocation_details"):
         export_allocation_details(plan, details)
     
     # Handle bulk cancel dialog
     if st.session_state.get('show_bulk_cancel', False):
         show_bulk_cancel_dialog()
+
 
 def show_bulk_cancel_dialog():
     """Show bulk cancellation dialog"""

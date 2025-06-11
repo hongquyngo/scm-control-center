@@ -3,13 +3,12 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta
-from typing import Dict, Optional, List, Any, Tuple
+from typing import Dict, List, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
 from sqlalchemy import text
 
 from .db import get_db_engine
-from .settings_manager import SettingsManager
 from utils.adjustments.time_adjustment_integration import TimeAdjustmentIntegration
 
 logger = logging.getLogger(__name__)

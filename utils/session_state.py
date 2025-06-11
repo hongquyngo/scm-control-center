@@ -1,7 +1,7 @@
 # utils/session_state.py - Session State Initialization
 
 import streamlit as st
-from typing import Any, Dict
+from typing import Any
 
 def initialize_session_state():
     """Initialize all required session state variables"""

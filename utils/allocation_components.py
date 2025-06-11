@@ -6,11 +6,8 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-from typing import Dict, List, Optional
-import numpy as np
 
-from utils.formatters import format_number, format_percentage, format_currency
-
+from utils.formatters import format_number
 
 class AllocationComponents:
     """Reusable UI components for allocation module"""

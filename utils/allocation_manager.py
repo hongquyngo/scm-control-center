@@ -3,7 +3,6 @@ Allocation Manager - Core allocation plan management
 """
 import streamlit as st
 import pandas as pd
-import numpy as np
 from datetime import datetime
 from sqlalchemy import text
 from typing import List, Dict, Optional, Tuple
@@ -23,11 +22,20 @@ class AllocationManager:
         self.engine = get_db_engine()
         self.cancellation_manager = AllocationCancellationManager()  # Add this
     
-
     def get_active_allocations(self, status_filter: List[str] = None,
                             date_from: datetime = None, date_to: datetime = None,
                             search_text: str = None) -> pd.DataFrame:
-        """Get active allocations with enhanced information"""
+        """Get active allocations for display
+        
+        Args:
+            status_filter: List of delivery statuses to filter by
+            date_from: Start date for allocated_etd filter
+            date_to: End date for allocated_etd filter
+            search_text: Text to search in pt_code, customer_name, or allocation_number
+            
+        Returns:
+            pd.DataFrame: Active allocations with details
+        """
         try:
             query = """
                 SELECT * FROM active_allocations_view
@@ -38,10 +46,10 @@ class AllocationManager:
             
             # Status filter
             if status_filter:
-                placeholders = ', '.join([f':status_{i}' for i in range(len(status_filter))])
+                placeholders = ', '.join([f':status{i}' for i in range(len(status_filter))])
                 query += f" AND delivery_status IN ({placeholders})"
                 for i, status in enumerate(status_filter):
-                    params[f'status_{i}'] = status
+                    params[f'status{i}'] = status
             
             # Date filter on ETD
             if date_from:
@@ -73,30 +81,35 @@ class AllocationManager:
             return pd.DataFrame()
 
     def get_allocation_plans(self, status_filter: List[str] = None, 
-                        date_from: datetime = None, date_to: datetime = None,
-                        search_text: str = None) -> pd.DataFrame:
-        """Get allocation plans using v_allocation_plans_summary view"""
+                            date_from: datetime = None, date_to: datetime = None,
+                            search_text: str = None) -> pd.DataFrame:
+        """Get allocation plans using v_allocation_plans_summary view
+        
+        Args:
+            status_filter: List of statuses to filter by
+            date_from: Start date for allocation_date filter
+            date_to: End date for allocation_date filter  
+            search_text: Text to search in allocation_number or notes
+            
+        Returns:
+            pd.DataFrame: Allocation plans with summary information
+        """
         try:
-            # Base query - extract allocation_method and allocation_type from JSON
+            # Base query
             query = """
                 SELECT 
-                    ap.*,
                     vaps.*,
-                    u.name as creator_name,
-                    -- Extract from JSON context
-                    JSON_UNQUOTE(JSON_EXTRACT(ap.allocation_context, '$.allocation_method')) as allocation_method,
-                    JSON_UNQUOTE(JSON_EXTRACT(ap.allocation_context, '$.allocation_type')) as allocation_type
-                FROM allocation_plans ap
-                JOIN v_allocation_plans_summary vaps ON ap.id = vaps.id
-                LEFT JOIN users u ON ap.creator_id = u.id
+                    CONCAT(COALESCE(e.first_name, ''), ' ', COALESCE(e.last_name, '')) as creator_name,
+                    JSON_UNQUOTE(JSON_EXTRACT(vaps.allocation_context, '$.allocation_method')) as allocation_method
+                FROM v_allocation_plans_summary vaps
+                LEFT JOIN employees e ON vaps.creator_id = e.id
                 WHERE 1=1
             """
             
             params = {}
             
-            # Filter by display_status (computed) thay vì plan status
+            # Status filter
             if status_filter:
-                # Map UI status to display_status values
                 status_mapping = {
                     'DRAFT': ['ALL_DRAFT', 'MIXED_DRAFT'],
                     'ALLOCATED': ['IN_PROGRESS'],
@@ -109,38 +122,37 @@ class AllocationManager:
                 for status in status_filter:
                     display_statuses.extend(status_mapping.get(status, [status]))
                 
+                # Remove duplicates
+                display_statuses = list(set(display_statuses))
+                
                 if display_statuses:
-                    # Fix SQL injection issue - use proper parameterized query
-                    placeholders = ','.join(['%s'] * len(display_statuses))
+                    # Create parameterized placeholders
+                    placeholders = ', '.join([f':status{i}' for i in range(len(display_statuses))])
                     query += f" AND vaps.display_status IN ({placeholders})"
-                    # SQLAlchemy will handle the list properly
-                    params = display_statuses
+                    
+                    # Add each status as individual parameter
+                    for i, status in enumerate(display_statuses):
+                        params[f'status{i}'] = status
             
+            # Date filters
             if date_from:
-                query += " AND DATE(ap.allocation_date) >= %(date_from)s"
-                if not isinstance(params, list):
-                    params['date_from'] = date_from
-            
+                query += " AND DATE(vaps.allocation_date) >= :date_from"
+                params['date_from'] = date_from
+                
             if date_to:
-                query += " AND DATE(ap.allocation_date) <= %(date_to)s"
-                if not isinstance(params, list):
-                    params['date_to'] = date_to
-            
+                query += " AND DATE(vaps.allocation_date) <= :date_to"
+                params['date_to'] = date_to
+                
+            # Search filter
             if search_text:
-                query += """ AND (ap.allocation_number LIKE %(search_text)s 
-                            OR ap.notes LIKE %(search_text)s)"""
-                if not isinstance(params, list):
-                    params['search_text'] = f"%{search_text}%"
+                query += """ AND (vaps.allocation_number LIKE :search_text 
+                            OR vaps.notes LIKE :search_text)"""
+                params['search_text'] = f"%{search_text}%"
             
-            query += " ORDER BY ap.allocation_date DESC"
+            query += " ORDER BY vaps.allocation_date DESC"
             
-            # Execute query with proper parameter handling
-            if isinstance(params, list):
-                # For IN clause with list
-                df = pd.read_sql(query, self.engine, params=params)
-            else:
-                # For named parameters
-                df = pd.read_sql(text(query), self.engine, params=params)
+            # Execute with text() and dict params
+            df = pd.read_sql(text(query), self.engine, params=params)
             
             return df
             
@@ -149,13 +161,34 @@ class AllocationManager:
             return pd.DataFrame()
 
     def get_allocation_details(self, allocation_id: int) -> Tuple[Dict, pd.DataFrame]:
-        """Get allocation plan and its details with computed status"""
+        """Get allocation plan and its details with computed status
+        
+        Args:
+            allocation_id: ID of the allocation plan
+            
+        Returns:
+            Tuple[Dict, pd.DataFrame]: Plan dict and details DataFrame
+        """
         try:
-            # Get plan header
+            # Get plan header with JSON extraction
             plan_query = """
-                SELECT ap.*, u.name as creator_name
+                SELECT 
+                    ap.*, 
+                    CONCAT(COALESCE(e.first_name, ''), ' ', COALESCE(e.last_name, '')) as creator_name,
+                    -- Extract allocation_method from multiple possible JSON paths
+                    COALESCE(
+                        JSON_UNQUOTE(JSON_EXTRACT(ap.allocation_context, '$.allocation_method')),
+                        JSON_UNQUOTE(JSON_EXTRACT(ap.allocation_context, '$.allocation_info.method')),
+                        'Manual'
+                    ) as allocation_method,
+                    -- Extract allocation_type from multiple possible JSON paths
+                    COALESCE(
+                        JSON_UNQUOTE(JSON_EXTRACT(ap.allocation_context, '$.allocation_type')),
+                        JSON_UNQUOTE(JSON_EXTRACT(ap.allocation_context, '$.allocation_info.type')),
+                        'SOFT'
+                    ) as allocation_type
                 FROM allocation_plans ap
-                LEFT JOIN users u ON ap.creator_id = u.id
+                LEFT JOIN employees e ON ap.creator_id = e.id
                 WHERE ap.id = :allocation_id
             """
             
@@ -163,17 +196,24 @@ class AllocationManager:
                                 params={'allocation_id': allocation_id})
             
             if plan_df.empty:
+                logger.warning(f"No allocation plan found with ID: {allocation_id}")
                 return None, pd.DataFrame()
             
             plan = plan_df.iloc[0].to_dict()
+            
+            # Ensure allocation_method and allocation_type are not NULL/NaN
+            if pd.isna(plan.get('allocation_method')) or plan.get('allocation_method') == 'null':
+                plan['allocation_method'] = 'Manual'
+            if pd.isna(plan.get('allocation_type')) or plan.get('allocation_type') == 'null':
+                plan['allocation_type'] = 'SOFT'
             
             # Get details with computed status from view
             details_query = """
                 SELECT 
                     ads.*,
-                    p.product_name,
+                    p.name as product_name,
                     p.package_size,
-                    p.standard_uom,
+                    p.uom as standard_uom,
                     -- Use computed effective_status instead of stored status
                     ads.effective_status as status,
                     -- For backward compatibility
@@ -190,6 +230,9 @@ class AllocationManager:
             
             # Add cancellation summary to plan
             plan['cancellation_summary'] = self.cancellation_manager.get_plan_cancellation_summary(allocation_id)
+            
+            # Log successful retrieval
+            logger.info(f"Retrieved allocation plan {allocation_id} with {len(details_df)} details")
             
             return plan, details_df
             
@@ -278,7 +321,16 @@ class AllocationManager:
 
     def create_allocation_plan(self, plan_data: Dict, allocation_details: pd.DataFrame, 
                             supply_mapping: Dict = None) -> Optional[int]:
-        """Create new allocation plan with details and supply mapping for HARD allocation"""
+        """Create new allocation plan with details and supply mapping for HARD allocation
+        
+        Args:
+            plan_data: Plan header information
+            allocation_details: DataFrame with allocation line details
+            supply_mapping: Dict mapping demand_line_id to supply source (for HARD allocation)
+            
+        Returns:
+            Optional[int]: Allocation plan ID if successful, None otherwise
+        """
         conn = self.engine.connect()
         trans = conn.begin()
         
@@ -311,13 +363,15 @@ class AllocationManager:
                         return float(obj)
                     elif isinstance(obj, np.integer):
                         return int(obj)
+                    elif pd.isna(obj):
+                        return None
                     else:
                         return obj
                 
                 cleaned_context = clean_for_json(plan_data['allocation_context'])
                 allocation_context_json = json.dumps(cleaned_context)
             
-            # Insert allocation plan
+            # Insert allocation plan header
             plan_insert = text("""
                 INSERT INTO allocation_plans 
                 (allocation_number, allocation_date, creator_id, created_date, 
@@ -337,24 +391,26 @@ class AllocationManager:
             allocation_plan_id = result.lastrowid
             logger.info(f"Created allocation plan header with ID {allocation_plan_id}")
             
-            # Pre-load product mapping
-            product_map = {}
+            # Get product mapping from cached data
+            product_map = self._get_product_mapping()
+            
+            if not product_map:
+                raise ValueError("Product master data not available - please refresh data from main dashboard")
+            
+            # Validate that all required products exist
+            missing_products = []
             if not allocation_details.empty and 'pt_code' in allocation_details.columns:
-                pt_codes = allocation_details['pt_code'].dropna().unique().tolist()
-                if pt_codes:
-                    # Use pandas read_sql to get proper DataFrame
-                    product_query = """
-                        SELECT id, pt_code 
-                        FROM products 
-                        WHERE pt_code IN %s
-                    """
-                    product_df = pd.read_sql(
-                        product_query, 
-                        conn,
-                        params=[tuple(pt_codes)]
-                    )
-                    product_map = dict(zip(product_df['pt_code'], product_df['id']))
-                    logger.info(f"Loaded {len(product_map)} product mappings")
+                for pt_code in allocation_details['pt_code'].dropna().unique():
+                    pt_code_str = str(pt_code).strip()
+                    if pt_code_str not in product_map:
+                        missing_products.append(pt_code_str)
+                
+                if missing_products:
+                    logger.error(f"Products not found in master: {missing_products}")
+                    raise ValueError(f"Products not found in master data: {', '.join(missing_products[:5])}" + 
+                                (f" and {len(missing_products) - 5} more" if len(missing_products) > 5 else ""))
+            
+            logger.info("All products validated against master data")
             
             # Insert allocation details
             details_inserted = 0
@@ -390,13 +446,14 @@ class AllocationManager:
                         except:
                             pass
                     
-                    # Get product_id from pt_code using pre-loaded map
+                    # Get product_id from pt_code using cached map
                     pt_code = row_dict.get('pt_code')
                     product_id = None
                     
                     if pt_code and pd.notna(pt_code):
                         pt_code_str = str(pt_code).strip()
                         product_id = product_map.get(pt_code_str)
+                        
                         if not product_id:
                             logger.error(f"Product not found for pt_code: {pt_code_str}")
                             failed_rows.append(f"Row {idx}: Product {pt_code_str} not found")
@@ -409,7 +466,7 @@ class AllocationManager:
                     # Determine initial status based on plan status
                     detail_status = 'DRAFT' if plan_data.get('status', 'DRAFT') == 'DRAFT' else 'ALLOCATED'
                     
-                    # Clean values before insert
+                    # Helper function to clean values
                     def clean_value(val):
                         if pd.isna(val):
                             return None
@@ -417,7 +474,7 @@ class AllocationManager:
                             return None
                         return val
                     
-                    # Get dates and ensure proper format
+                    # Process dates
                     etd_value = row_dict.get('etd')
                     allocated_etd_value = row_dict.get('allocated_etd', etd_value)
                     
@@ -426,7 +483,6 @@ class AllocationManager:
                         if isinstance(etd_value, pd.Timestamp):
                             etd_value = etd_value.strftime('%Y-%m-%d')
                         elif isinstance(etd_value, str):
-                            # Parse and reformat to ensure YYYY-MM-DD
                             try:
                                 etd_value = pd.to_datetime(etd_value).strftime('%Y-%m-%d')
                             except:
@@ -451,6 +507,7 @@ class AllocationManager:
                     ) or 0)
                     allocated_qty = float(clean_value(row_dict.get('allocated_qty', 0)) or 0)
                     
+                    # Insert detail record
                     detail_insert = text("""
                         INSERT INTO allocation_details
                         (allocation_plan_id, allocation_mode, status,
@@ -501,10 +558,13 @@ class AllocationManager:
                     failed_rows.append(f"Row {idx}: {str(detail_error)}")
                     continue
             
+            # Check if any details were inserted
             if details_inserted == 0:
                 raise ValueError("No allocation details were inserted successfully")
             
+            # Commit transaction
             trans.commit()
+            
             logger.info(f"Created allocation plan {allocation_number} with ID {allocation_plan_id}")
             logger.info(f"Successfully inserted {details_inserted}/{len(allocation_details)} detail rows")
             
@@ -534,6 +594,33 @@ class AllocationManager:
             return None
         finally:
             conn.close()
+
+    def _get_product_mapping(self) -> Dict[str, int]:
+        """Get product mapping from cached data
+        
+        Returns:
+            Dict[str, int]: Mapping of pt_code to product_id
+        """
+        try:
+            # Get from DataManager cache
+            from utils.data_manager import DataManager
+            data_manager = DataManager()
+            
+            # This will use cached data if available (TTL=3600s)
+            products_df = data_manager.load_product_master()
+            
+            if not products_df.empty:
+                # Create mapping: pt_code -> product_id
+                product_map = dict(zip(products_df['pt_code'], products_df['product_id']))
+                logger.info(f"Retrieved {len(product_map)} products from cache")
+                return product_map
+            else:
+                logger.warning("No products found in cache")
+                return {}
+                
+        except Exception as e:
+            logger.error(f"Error getting product mapping: {str(e)}")
+            return {}
 
     def update_allocation_plan(self, allocation_id: int, updates: Dict) -> bool:
         """Update allocation plan"""
@@ -727,6 +814,9 @@ class AllocationManager:
             logger.error(f"Error getting active allocations summary: {str(e)}")
             return pd.DataFrame()
 
+
+
+
     def get_allocation_performance_metrics(self, date_from: datetime = None, 
                                          date_to: datetime = None) -> Dict:
         """Get allocation performance metrics"""
@@ -800,22 +890,29 @@ class AllocationManager:
         except Exception as e:
             logger.error(f"Error executing allocation: {str(e)}")
             return False
-    
+
     def bulk_update_allocation_status(self, allocation_id: int, new_status: str) -> bool:
         """Update all DRAFT details in a plan to new status
         
-        Note: Chỉ update từ DRAFT -> ALLOCATED
-        Các status khác (PARTIAL_DELIVERED, DELIVERED, CANCELLED) là computed
+        Note: Only updates from DRAFT -> ALLOCATED
+        Other statuses are computed based on delivery/cancellation
+        
+        Args:
+            allocation_id: Plan ID
+            new_status: New status (only 'ALLOCATED' is valid)
+            
+        Returns:
+            bool: Success status
         """
         conn = self.engine.connect()
         trans = conn.begin()
         
         try:
-            # Chỉ cho phép update DRAFT -> ALLOCATED
+            # Validate status transition
             if new_status not in ['ALLOCATED']:
                 logger.warning(f"Invalid status update requested: {new_status}")
                 return False
-                
+            
             # Update all draft details to allocated
             update_query = text("""
                 UPDATE allocation_details
@@ -831,15 +928,26 @@ class AllocationManager:
             
             trans.commit()
             
-            logger.info(f"Updated {result.rowcount} details to {new_status} for plan {allocation_id}")
-            return result.rowcount > 0
+            updated_count = result.rowcount
+            logger.info(f"Updated {updated_count} details to {new_status} for plan {allocation_id}")
+            
+            return updated_count > 0
             
         except Exception as e:
             trans.rollback()
-            logger.error(f"Error updating allocation status: {str(e)}")
+            error_msg = str(e)
+            
+            # Check for permission error
+            if "command denied" in error_msg.lower():
+                logger.error(f"Permission denied: User does not have UPDATE permission on allocation_details")
+                st.error("⚠️ Permission Error: Cannot update allocation status. Please contact administrator.")
+            else:
+                logger.error(f"Error updating allocation status: {error_msg}")
+                
             return False
         finally:
             conn.close()
+
 
     def validate_hard_allocation_supply(self, supply_mapping: Dict, 
                                     allocation_details: pd.DataFrame) -> Tuple[bool, List[str]]:

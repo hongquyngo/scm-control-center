@@ -2,17 +2,14 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime, date
 import logging
-from typing import Tuple, List, Dict, Any, Optional
+from typing import Tuple, List
 
 # Import refactored modules
 from utils.data_manager import DataManager
-from utils.filters import FilterManager
 from utils.display_components import DisplayComponents
-from utils.formatters import format_number, format_currency, check_missing_dates , format_percentage
+from utils.formatters import format_number, format_currency, check_missing_dates 
 from utils.helpers import (
-    convert_df_to_excel, 
     convert_to_period, 
-    sort_period_columns,
     save_to_session_state,
     is_past_period,
     parse_week_period,

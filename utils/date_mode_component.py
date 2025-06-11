@@ -2,7 +2,7 @@
 
 import streamlit as st
 import pandas as pd
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Tuple
 import logging
 
 logger = logging.getLogger(__name__)
