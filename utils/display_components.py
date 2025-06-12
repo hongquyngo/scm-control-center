@@ -12,12 +12,14 @@ from .helpers import convert_df_to_excel
 
 class DisplayComponents:
     """Reusable display components for all pages"""
-    
+
     @staticmethod
     def show_page_header(title: str, icon: str, 
                         prev_page: Optional[str] = None, 
-                        next_page: Optional[str] = None):
-        """Show standardized page header with navigation"""
+                        next_page: Optional[str] = None,
+                        show_user: bool = True):
+        """Show standardized page header with navigation and user info"""
+        # Navigation row
         col1, col2, col3 = st.columns([1, 4, 1])
         
         with col1:
@@ -28,6 +30,23 @@ class DisplayComponents:
         
         with col2:
             st.title(f"{icon} {title}")
+            
+            # Show user info if authenticated and enabled
+            if show_user:
+                try:
+                    from .auth import AuthManager
+                    auth_manager = AuthManager()
+                    if auth_manager.check_session():
+                        user_name = auth_manager.get_user_display_name()
+                        user_role = st.session_state.get('user_role', 'user')
+                        
+                        # Get appropriate action word based on page title
+                        action_word = DisplayComponents._get_page_action_word(title)
+                        
+                        st.caption(f"{action_word} as: **{user_name}** ({user_role})")
+                except:
+                    # If auth module not available, skip
+                    pass
         
         with col3:
             if next_page:
@@ -35,14 +54,47 @@ class DisplayComponents:
                 if st.button(f"{page_name} →"):
                     st.switch_page(next_page)
         
-        # Dashboard button
-        if st.button("🏠 Dashboard", use_container_width=False):
-            st.switch_page("main.py")
+        # Dashboard button row
+        col1, col2, col3 = st.columns([1, 4, 1])
+        with col1:
+            if st.button("🏠 Dashboard", use_container_width=False):
+                st.switch_page("main.py")
         
         st.markdown("---")
-    
 
-    # Update trong utils/display_components.py
+    @staticmethod
+    def _get_page_action_word(title: str) -> str:
+        """Get appropriate action word based on page title"""
+        title_lower = title.lower()
+        
+        # Map keywords to action words
+        action_map = {
+            'analysis': 'Analyzing',
+            'analyze': 'Analyzing',
+            'gap': 'Analyzing',
+            'demand': 'Viewing',
+            'supply': 'Viewing',
+            'allocation': 'Managing',
+            'allocate': 'Managing',
+            'po suggestion': 'Generating',
+            'purchase': 'Managing',
+            'setting': 'Configuring',
+            'adjustment': 'Configuring',
+            'report': 'Generating',
+            'dashboard': 'Monitoring',
+            'inventory': 'Reviewing',
+            'forecast': 'Reviewing',
+            'plan': 'Planning',
+            'overview': 'Viewing'
+        }
+        
+        # Check for keywords in title
+        for keyword, action in action_map.items():
+            if keyword in title_lower:
+                return action
+        
+        # Default action word
+        return 'Working'
 
     @staticmethod
     def show_data_quality_warnings(df: pd.DataFrame, date_columns: Union[str, List[str]], 

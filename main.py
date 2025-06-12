@@ -1,4 +1,15 @@
 import streamlit as st
+from utils.auth import AuthManager
+
+# === Authentication Check ===
+# Initialize auth manager
+auth_manager = AuthManager()
+
+# Check if user is authenticated
+if not auth_manager.check_session():
+    st.switch_page("pages/0_🔐_Login.py")  # Updated path
+    st.stop()
+
 import pandas as pd
 from datetime import datetime
 
@@ -8,6 +19,9 @@ from utils.settings_manager import SettingsManager
 from utils.formatters import format_number, format_currency, format_percentage
 from utils.helpers import save_to_session_state
 from utils.session_state import initialize_session_state
+
+
+
 
 # === Page Config ===
 st.set_page_config(
@@ -34,8 +48,34 @@ def get_settings_manager():
 data_manager = get_data_manager()
 settings_manager = get_settings_manager()
 
+
 # === Sidebar Configuration ===
 with st.sidebar:
+    # User info section
+    st.markdown("### 👤 User Information")
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        st.write(f"**{auth_manager.get_user_display_name()}**")
+        st.caption(f"Role: {st.session_state.get('user_role', 'user').title()}")
+    with col2:
+        if st.button("🚪", help="Logout"):
+            auth_manager.logout()
+            st.switch_page("pages/0_🔐_Login.py")
+    
+    # Session info
+    if 'login_time' in st.session_state:
+        elapsed = datetime.now() - st.session_state.login_time
+        hours, remainder = divmod(elapsed.seconds, 3600)
+        minutes, _ = divmod(remainder, 60)
+        st.caption(f"Session time: {hours}h {minutes}m")
+        
+        # Warning if session is about to expire (7+ hours)
+        if hours >= 7:
+            st.warning("⚠️ Session expires in less than 1 hour")
+    
+    st.markdown("---")
+    
+    # Original Configuration section
     st.header("⚙️ Configuration")
     
     # Manual refresh
@@ -48,6 +88,7 @@ with st.sidebar:
     if auto_refresh:
         refresh_interval = st.slider("Interval (minutes)", 5, 60, 15, 5)
         st.info(f"⏱️ Auto-refresh every {refresh_interval} min")
+
 
 # === Main Dashboard ===
 st.title("🏭 Supply Chain Control Center")
@@ -373,14 +414,33 @@ if auto_refresh:
     data_manager.clear_cache()
     st.rerun()
 
+
 # === Footer ===
 st.markdown("---")
-st.caption(f"Supply Chain Control Center v1.0 | Data freshness: {datetime.now().strftime('%H:%M:%S')}")
+col1, col2, col3 = st.columns([2, 2, 1])
+
+with col1:
+    st.caption(f"Supply Chain Control Center v1.0")
+
+with col2:
+    st.caption(f"Logged in as: {auth_manager.get_user_display_name()} ({st.session_state.get('user_role', 'user')})")
+
+with col3:
+    st.caption(f"Data freshness: {datetime.now().strftime('%H:%M:%S')}")
+
+# Update the debug section to include user info:
+# In the debug mode section at the bottom:
 
 # Debug mode (hidden)
 if st.checkbox("🐛", value=False, label_visibility="collapsed"):
     with st.expander("Debug Information"):
-        st.write("**Loaded Data:**")
+        st.write("**User Session:**")
+        st.write(f"- User ID: {st.session_state.get('user_id')}")
+        st.write(f"- Username: {st.session_state.get('username')}")
+        st.write(f"- Role: {st.session_state.get('user_role')}")
+        st.write(f"- Login Time: {st.session_state.get('login_time')}")
+        
+        st.write("\n**Loaded Data:**")
         for key, df in all_data.items():
             st.write(f"- {key}: {len(df)} rows, {df.shape[1] if not df.empty else 0} columns")
         st.write(f"**Cache Status:** Active")

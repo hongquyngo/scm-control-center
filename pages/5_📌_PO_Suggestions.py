@@ -1,4 +1,18 @@
 import streamlit as st
+import sys
+from pathlib import Path
+
+# Add parent directory to path for imports
+sys.path.append(str(Path(__file__).parent.parent))
+
+from utils.auth import AuthManager
+
+# Authentication check
+auth_manager = AuthManager()
+if not auth_manager.check_session():
+    st.switch_page("pages/0_🔐_Login.py")
+    st.stop()
+
 from datetime import datetime
 
 # === Page Config ===

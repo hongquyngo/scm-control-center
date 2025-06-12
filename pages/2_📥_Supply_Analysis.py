@@ -1,6 +1,20 @@
 # pages/2_📥_Supply_Analysis.py
 
 import streamlit as st
+import sys
+from pathlib import Path
+
+# Add parent directory to path for imports
+sys.path.append(str(Path(__file__).parent.parent))
+
+from utils.auth import AuthManager
+
+# Authentication check
+auth_manager = AuthManager()
+if not auth_manager.check_session():
+    st.switch_page("pages/0_🔐_Login.py")
+    st.stop()
+
 import pandas as pd
 from datetime import datetime, date
 import logging
@@ -24,6 +38,8 @@ from utils.helpers import (
 from utils.session_state import initialize_session_state
 from utils.smart_filter_manager import SmartFilterManager
 from utils.date_mode_component import DateModeComponent
+
+
 
 # Configure logging
 logger = logging.getLogger(__name__)

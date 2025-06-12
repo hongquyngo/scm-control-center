@@ -1,6 +1,20 @@
 # pages/3_📊_GAP_Analysis.py
 
 import streamlit as st
+import sys
+from pathlib import Path
+
+# Add parent directory to path for imports
+sys.path.append(str(Path(__file__).parent.parent))
+
+from utils.auth import AuthManager
+
+# Authentication check
+auth_manager = AuthManager()
+if not auth_manager.check_session():
+    st.switch_page("pages/0_🔐_Login.py")
+    st.stop()
+
 import pandas as pd
 from datetime import datetime
 import logging
@@ -36,6 +50,7 @@ def ensure_numeric_columns(df, columns):
             # Convert to numeric, replacing errors with 0
             df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
     return df
+
 
 
 # Configure logging
