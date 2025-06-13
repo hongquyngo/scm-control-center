@@ -96,11 +96,48 @@ def select_demand_source() -> str:
     
     return source
 
-# === Data Loading Functions ===
-# Update load_and_prepare_demand_data function in 1_📤_Demand_Analysis.py
 
-def load_and_prepare_demand_data(source: str, use_adjusted_dates: bool = True) -> pd.DataFrame:
-    """Load and standardize demand data based on source selection WITH ALLOCATION INFO"""
+# === NEW: Allocation Options ===
+def select_allocation_options() -> dict:
+    """Select allocation-related options"""
+    st.markdown("#### ⚙️ Allocation Options")
+    
+    col1, col2, col3 = st.columns([2, 2, 2])
+    
+    with col1:
+        include_draft = st.checkbox(
+            "📝 Include DRAFT allocations",
+            value=False,
+            key="demand_include_draft",
+            help="Include uncommitted (DRAFT) allocations in demand analysis. This will show a more conservative view of available demand."
+        )
+    
+    with col2:
+        # Future option placeholder
+        st.empty()
+    
+    with col3:
+        # Future option placeholder
+        st.empty()
+    
+    return {
+        "include_draft": include_draft
+    }
+
+
+# === Data Loading Functions ===
+def load_and_prepare_demand_data(source: str, use_adjusted_dates: bool = True, 
+                                include_drafts: bool = False) -> pd.DataFrame:
+    """Load and standardize demand data based on source selection WITH ALLOCATION INFO
+    
+    Args:
+        source: Data source selection ("OC Only", "Forecast Only", "Both")
+        use_adjusted_dates: Whether to use adjusted dates
+        include_drafts: Whether to include DRAFT allocations
+    
+    Returns:
+        pd.DataFrame: Demand data with allocation information
+    """
     try:
         # Convert source selection to list format for data_manager
         sources = []
@@ -109,35 +146,117 @@ def load_and_prepare_demand_data(source: str, use_adjusted_dates: bool = True) -
         if source in ["Forecast Only", "Both"]:
             sources.append("Forecast")
         
+        # Validate sources
+        if not sources:
+            logger.warning(f"No valid sources selected from: {source}")
+            return pd.DataFrame()
+        
+        # Log loading info
+        if debug_mode:
+            st.write(f"🐛 Loading demand data from sources: {sources}")
+            st.write(f"🐛 Include DRAFT allocations: {include_drafts}")
+        
         # Use data_manager to get demand data
         df = data_manager.get_demand_data(sources=sources, include_converted=True)
         
         if df.empty:
+            logger.warning("No demand data loaded from data_manager")
             return df
         
-        # NEW: Enhance with allocation information
-        df = data_manager.enhance_demand_with_allocations(df)
+        # Log raw data info
+        if debug_mode:
+            st.write(f"🐛 Raw demand data loaded: {len(df)} rows")
+            if 'source_type' in df.columns:
+                st.write(f"🐛 Source breakdown: {df['source_type'].value_counts().to_dict()}")
         
+        # NEW: Enhance with allocation information - pass include_drafts parameter
+        try:
+            df = data_manager.enhance_demand_with_allocations(df, include_drafts=include_drafts)
+            
+            # Verify allocation columns were added
+            allocation_columns = ['total_allocated', 'total_delivered', 'allocation_undelivered', 
+                                'unallocated_demand', 'allocation_status']
+            missing_cols = [col for col in allocation_columns if col not in df.columns]
+            
+            if missing_cols:
+                logger.warning(f"Missing allocation columns after enhancement: {missing_cols}")
+                # Add missing columns with defaults
+                for col in missing_cols:
+                    if col == 'allocation_status':
+                        df[col] = 'Not Allocated'
+                    else:
+                        df[col] = 0
+        
+        except Exception as e:
+            logger.error(f"Error enhancing demand with allocations: {str(e)}")
+            st.warning("⚠️ Could not load allocation data. Showing demand without allocation info.")
+            
+            # Add default allocation columns
+            df['total_allocated'] = 0
+            df['total_delivered'] = 0
+            df['allocation_undelivered'] = 0
+            df['unallocated_demand'] = df.get('demand_quantity', 0)
+            df['allocation_status'] = 'Not Allocated'
+        
+        # Enhanced debug info
         if debug_mode and not df.empty:
             debug_info = {
                 "Total rows": len(df),
                 "Unique products": df['pt_code'].nunique() if 'pt_code' in df.columns else 0,
                 "Data sources": df['source_type'].value_counts().to_dict() if 'source_type' in df.columns else {},
                 "Date columns": [col for col in df.columns if 'etd' in col.lower()],
-                # NEW: Allocation debug info
-                "Total allocated": df['total_allocated'].sum(),
-                "Total delivered": df['total_delivered'].sum(),
-                "Allocation statuses": df['allocation_status'].value_counts().to_dict()
+                # Updated allocation debug info with new column names
+                "Total allocated": df['total_allocated'].sum() if 'total_allocated' in df.columns else 0,
+                "Total delivered": df['total_delivered'].sum() if 'total_delivered' in df.columns else 0,
+                "Allocation undelivered": df['allocation_undelivered'].sum() if 'allocation_undelivered' in df.columns else 0,
+                "Unallocated demand": df['unallocated_demand'].sum() if 'unallocated_demand' in df.columns else 0,
+                "Allocation statuses": df['allocation_status'].value_counts().to_dict() if 'allocation_status' in df.columns else {},
+                "Include DRAFT allocations": include_drafts  # NEW
             }
+            
+            # Additional DRAFT-specific debug info
+            if include_drafts:
+                # Check if we can identify DRAFT vs ALLOCATED
+                draft_count = 0
+                allocated_count = 0
+                
+                # This would depend on having allocation_type column from enhanced data
+                if 'allocation_type' in df.columns:
+                    type_counts = df['allocation_type'].value_counts()
+                    draft_count = type_counts.get('DRAFT', 0)
+                    allocated_count = type_counts.get('ALLOCATED', 0)
+                    debug_info["DRAFT allocations"] = draft_count
+                    debug_info["ALLOCATED allocations"] = allocated_count
+                else:
+                    debug_info["Note"] = "Cannot distinguish DRAFT vs ALLOCATED in current data"
+            
             DisplayComponents.show_debug_info(debug_info)
+        
+        # Final data quality check
+        if df.empty:
+            logger.warning("Final demand dataframe is empty")
+        else:
+            # Log summary statistics
+            logger.info(f"Demand data loaded successfully: {len(df)} rows, {df['pt_code'].nunique()} products")
+            
+            # Log allocation summary
+            if 'allocation_status' in df.columns:
+                allocation_summary = df['allocation_status'].value_counts()
+                logger.info(f"Allocation status summary: {allocation_summary.to_dict()}")
         
         return df
         
     except Exception as e:
-        logger.error(f"Error loading demand data: {str(e)}")
+        logger.error(f"Error loading demand data: {str(e)}", exc_info=True)
         st.error(f"Failed to load demand data: {str(e)}")
-        return pd.DataFrame()
-
+        
+        # Return empty dataframe with expected columns
+        return pd.DataFrame(columns=[
+            'pt_code', 'product_name', 'brand', 'package_size', 'standard_uom',
+            'demand_quantity', 'value_in_usd', 'source_type', 'etd',
+            'total_allocated', 'total_delivered', 'allocation_undelivered',
+            'unallocated_demand', 'allocation_status'
+        ])
 
 # === Filtering Functions ===
 def apply_demand_filters(df: pd.DataFrame, use_adjusted_dates: bool = True) -> Tuple[pd.DataFrame, date, date]:
@@ -511,14 +630,24 @@ def show_demand_summary(filtered_df: pd.DataFrame, use_adjusted_dates: bool = Tr
         
         # NEW: Row 2 - Allocation metrics
         st.markdown("#### 📦 Allocation Status")
+        
+        # NEW: Show DRAFT status if included
+        if st.session_state.get('demand_include_draft', False):
+            st.info("📝 **DRAFT allocations included** - Showing both committed (ALLOCATED) and uncommitted (DRAFT) allocations")
+        
         col1, col2, col3, col4 = st.columns(4)
         
         with col1:
+            # Add context about DRAFT if included
+            help_text = "Total quantity allocated in approved plans"
+            if st.session_state.get('demand_include_draft', False):
+                help_text += " (includes DRAFT allocations)"
+            
             st.metric(
                 "Allocated",
                 format_number(total_allocated),
                 delta=f"{allocation_rate:.1f}%",
-                help="Total quantity allocated in approved plans"
+                help=help_text
             )
         
         with col2:
@@ -547,7 +676,7 @@ def show_demand_summary(filtered_df: pd.DataFrame, use_adjusted_dates: bool = Tr
             else:
                 st.metric("Coverage", "🔴 Low", delta=f"{allocation_rate:.0f}%", delta_color="inverse")
         
-        # NEW: Visual Progress Bar
+        # NEW: Visual Progress Bar with DRAFT awareness
         if total_demand > 0:
             st.markdown("#### 📊 Allocation Progress")
             
@@ -570,8 +699,38 @@ def show_demand_summary(filtered_df: pd.DataFrame, use_adjusted_dates: bool = Tr
             """
             st.markdown(progress_html, unsafe_allow_html=True)
         
-        # NEW: Allocation status breakdown
+        # NEW: Allocation status breakdown with DRAFT awareness
         with st.expander("📈 View Allocation Details", expanded=False):
+            # Add DRAFT breakdown if included
+            if st.session_state.get('demand_include_draft', False):
+                # Try to get DRAFT breakdown from data
+                if 'allocation_type' in filtered_df.columns:
+                    draft_breakdown = filtered_df.groupby('allocation_type').agg({
+                        'total_allocated': 'sum',
+                        'pt_code': 'count'
+                    }).rename(columns={'pt_code': 'Order Count'})
+                    
+                    st.markdown("##### Allocation Type Breakdown")
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        if 'ALLOCATED' in draft_breakdown.index:
+                            allocated_qty = draft_breakdown.loc['ALLOCATED', 'total_allocated']
+                            st.metric("Committed (ALLOCATED)", format_number(allocated_qty))
+                        else:
+                            st.metric("Committed (ALLOCATED)", "0")
+                    
+                    with col2:
+                        if 'DRAFT' in draft_breakdown.index:
+                            draft_qty = draft_breakdown.loc['DRAFT', 'total_allocated']
+                            st.metric("Uncommitted (DRAFT)", format_number(draft_qty))
+                        else:
+                            st.metric("Uncommitted (DRAFT)", "0")
+                    
+                    st.markdown("---")
+            
+            # Regular status summary
+            st.markdown("##### Allocation Status Summary")
             status_summary = filtered_df.groupby('allocation_status').agg({
                 'pt_code': 'count',
                 'demand_quantity': 'sum',
@@ -594,6 +753,12 @@ def show_demand_summary(filtered_df: pd.DataFrame, use_adjusted_dates: bool = Tr
             
             if not low_allocation.empty:
                 st.warning(f"⚠️ {len(low_allocation)} orders need allocation attention")
+                
+                # NEW: If DRAFT included, show how many could be helped by converting DRAFT
+                if st.session_state.get('demand_include_draft', False) and 'allocation_type' in filtered_df.columns:
+                    draft_orders = low_allocation[low_allocation['allocation_type'] == 'DRAFT']
+                    if not draft_orders.empty:
+                        st.info(f"💡 {len(draft_orders)} of these have DRAFT allocations that could be converted to committed")
         
         # Data quality warnings
         DisplayComponents.show_data_quality_warnings(filtered_df, etd_column, "Demand")
@@ -1456,13 +1621,18 @@ def main():
     
     # Source selection
     source = select_demand_source()
+
+        # NEW: Allocation options selection
+    allocation_options = select_allocation_options()
+    include_draft_allocations = allocation_options["include_draft"]
     
     # Load and prepare data
     df_all = DisplayComponents.show_data_loading_spinner(
         load_and_prepare_demand_data,
         "Loading demand data...",
         source, 
-        use_adjusted_dates
+        use_adjusted_dates,
+        include_draft_allocations  # NEW parameter
     )
     
     if df_all.empty:

@@ -85,8 +85,8 @@ DisplayComponents.show_page_header(
 use_adjusted_dates = DateModeComponent.render_date_mode_selector("supply_")
 
 # === Data Source Selection ===
-def select_supply_source() -> Tuple[str, bool]:
-    """Allow user to choose supply data source"""
+def select_supply_source() -> Tuple[str, bool, bool]:
+    """Allow user to choose supply data source with allocation options"""
     # Use DisplayComponents for source selection
     source_config = DisplayComponents.render_source_selector(
         options=SUPPLY_SOURCES,
@@ -100,17 +100,26 @@ def select_supply_source() -> Tuple[str, bool]:
                 'default': True,
                 'help': 'Hide inventory items that have passed their expiry date',
                 'key': 'supply_expired_checkbox'
+            },
+            'include_draft_allocations': {
+                'type': 'checkbox',
+                'label': '📝 Include DRAFT allocations',
+                'default': False,
+                'help': 'Include uncommitted allocations in supply calculations (may show conservative view)',
+                'key': 'supply_draft_allocations_checkbox'
             }
         }
     )
     
     source = source_config['source']
     exclude_expired = source_config.get('exclude_expired', True)
+    include_draft_allocations = source_config.get('include_draft_allocations', False)
     
     if debug_mode:
-        st.write(f"🐛 Selected source: {source}, Exclude expired: {exclude_expired}")
+        st.write(f"🐛 Selected source: {source}, Exclude expired: {exclude_expired}, Include drafts: {include_draft_allocations}")
     
-    return source, exclude_expired
+    return source, exclude_expired, include_draft_allocations
+
 
 # === Helper Functions ===
 def get_supply_date_column(df: pd.DataFrame, source_type: str, use_adjusted_dates: bool) -> str:
@@ -128,7 +137,9 @@ def get_supply_date_column(df: pd.DataFrame, source_type: str, use_adjusted_date
 
 
 # === Data Loading Functions ===
-def load_and_prepare_supply_data(source_type: str, exclude_expired: bool, use_adjusted_dates: bool = True) -> pd.DataFrame:
+def load_and_prepare_supply_data(source_type: str, exclude_expired: bool, 
+                                use_adjusted_dates: bool = True,
+                                include_draft_allocations: bool = False) -> pd.DataFrame:
     """Load and standardize supply data based on source selection WITH ALLOCATION INFO"""
     try:
         # Determine sources to load
@@ -150,8 +161,8 @@ def load_and_prepare_supply_data(source_type: str, exclude_expired: bool, use_ad
         if df.empty:
             return df
         
-        # NEW: Enhance with allocation information
-        df = data_manager.enhance_supply_with_allocations(df)
+        # NEW: Enhance with allocation information with draft option
+        df = data_manager.enhance_supply_with_allocations(df, include_drafts=include_draft_allocations)
         
         if debug_mode and not df.empty:
             debug_info = {
@@ -159,10 +170,15 @@ def load_and_prepare_supply_data(source_type: str, exclude_expired: bool, use_ad
                 "Unique products": df['pt_code'].nunique() if 'pt_code' in df.columns else 0,
                 "Data sources": df['source_type'].value_counts().to_dict() if 'source_type' in df.columns else {},
                 "Date columns": [col for col in df.columns if any(d in col.lower() for d in ['date', 'eta', 'arrival'])],
-                # NEW: Allocation debug info
-                "Total allocated": df['allocation_undelivered'].sum() if 'allocation_undelivered' in df.columns else 0,
-                "Total available": df['available_quantity'].sum() if 'available_quantity' in df.columns else 0,
-                "Items with allocations": len(df[df['allocation_undelivered'] > 0]) if 'allocation_undelivered' in df.columns else 0
+                # Enhanced allocation debug info
+                "Allocation Summary": {
+                    "Total supply quantity": df['quantity'].sum() if 'quantity' in df.columns else 0,
+                    "Total allocated": df['allocation_undelivered'].sum() if 'allocation_undelivered' in df.columns else 0,
+                    "Total available": df['available_quantity'].sum() if 'available_quantity' in df.columns else 0,
+                    "Items with allocations": len(df[df['allocation_undelivered'] > 0]) if 'allocation_undelivered' in df.columns else 0,
+                    "Average allocation %": (df['allocation_undelivered'].sum() / df['quantity'].sum() * 100) if df['quantity'].sum() > 0 else 0,
+                    "Include drafts": include_draft_allocations
+                }
             }
             DisplayComponents.show_debug_info(debug_info)
         
@@ -172,7 +188,6 @@ def load_and_prepare_supply_data(source_type: str, exclude_expired: bool, use_ad
         logger.error(f"Error in load_and_prepare_supply_data: {str(e)}")
         st.error(f"Failed to load supply data: {str(e)}")
         return pd.DataFrame()
-
 
 # === Filtering Functions ===
 def apply_supply_filters(df: pd.DataFrame, use_adjusted_dates: bool = True) -> Tuple[pd.DataFrame, date, date, Dict]:
@@ -193,7 +208,7 @@ def apply_supply_filters(df: pd.DataFrame, use_adjusted_dates: bool = True) -> T
 
 
 def apply_standard_supply_filters(df: pd.DataFrame, use_adjusted_dates: bool = True) -> Tuple[pd.DataFrame, date, date, Dict]:
-    """Standard independent filters for supply"""
+    """Standard independent filters for supply with allocation filter"""
     with st.expander("📎 Filters", expanded=True):
 
         # Always use date_ref for filtering (it's unified for All tab)
@@ -317,6 +332,38 @@ def apply_standard_supply_filters(df: pd.DataFrame, use_adjusted_dates: bool = T
                     key="supply_min_stock_std"
                 )
         
+        # NEW: Allocation filters row
+        if any(col in df.columns for col in ["allocation_undelivered", "available_quantity"]):
+            st.markdown("#### 📦 Allocation Filters")
+            col_a1, col_a2, col_a3 = st.columns(3)
+            
+            with col_a1:
+                if "allocation_undelivered" in df.columns:
+                    filter_params['show_allocated_only'] = st.checkbox(
+                        "Show items with allocations only",
+                        key="supply_allocated_only_std",
+                        help="Filter to show only items that have pending allocations"
+                    )
+            
+            with col_a2:
+                if "allocation_undelivered" in df.columns and "quantity" in df.columns:
+                    filter_params['min_allocation_pct'] = st.slider(
+                        "Min allocation %",
+                        min_value=0,
+                        max_value=100,
+                        value=0,
+                        key="supply_min_alloc_pct_std",
+                        help="Show items with allocation % above this threshold"
+                    )
+            
+            with col_a3:
+                if "available_quantity" in df.columns:
+                    filter_params['show_available_only'] = st.checkbox(
+                        "Show available items only",
+                        key="supply_available_only_std",
+                        help="Show only items with available quantity > 0"
+                    )
+        
         # Date range
         st.markdown("#### 📅 Date Range")
         col_date1, col_date2 = st.columns(2)
@@ -390,6 +437,21 @@ def apply_standard_supply_filters(df: pd.DataFrame, use_adjusted_dates: bool = T
     if filter_params.get('min_stock', 0) > 0 and "quantity" in filtered_df.columns:
         filtered_df = filtered_df[filtered_df["quantity"] >= filter_params['min_stock']]
     
+    # NEW: Apply allocation-specific filters
+    if filter_params.get('show_allocated_only') and "allocation_undelivered" in filtered_df.columns:
+        filtered_df = filtered_df[filtered_df["allocation_undelivered"] > 0]
+    
+    if filter_params.get('min_allocation_pct', 0) > 0 and "allocation_undelivered" in filtered_df.columns and "quantity" in filtered_df.columns:
+        # Calculate allocation percentage
+        filtered_df['_temp_alloc_pct'] = (filtered_df["allocation_undelivered"] / filtered_df["quantity"] * 100).fillna(0)
+        # Filter based on percentage
+        filtered_df = filtered_df[filtered_df['_temp_alloc_pct'] >= filter_params['min_allocation_pct']]
+        # Remove temporary column
+        filtered_df = filtered_df.drop(columns=['_temp_alloc_pct'])
+    
+    if filter_params.get('show_available_only') and "available_quantity" in filtered_df.columns:
+        filtered_df = filtered_df[filtered_df["available_quantity"] > 0]
+    
     # Show filtering result
     if len(filtered_df) < len(df):
         col1, col2, col3 = st.columns([2, 2, 1])
@@ -398,6 +460,21 @@ def apply_standard_supply_filters(df: pd.DataFrame, use_adjusted_dates: bool = T
         with col2:
             retention = (len(filtered_df) / len(df) * 100) if len(df) > 0 else 0
             st.metric("Retention", f"{retention:.1f}%")
+        with col3:
+            # Count active filters including allocation filters
+            active_count = active_filters
+            if filter_params.get('only_expiring'):
+                active_count += 1
+            if filter_params.get('min_stock', 0) > 0:
+                active_count += 1
+            if filter_params.get('show_allocated_only'):
+                active_count += 1
+            if filter_params.get('min_allocation_pct', 0) > 0:
+                active_count += 1
+            if filter_params.get('show_available_only'):
+                active_count += 1
+            if active_count > 0:
+                st.caption(f"📍 {active_count} filters")
     
     return filtered_df, start_date, end_date, filter_params
 
@@ -609,7 +686,7 @@ def apply_smart_supply_filters(df: pd.DataFrame, use_adjusted_dates: bool,
 
 # === Display Functions ===
 def show_supply_summary(filtered_df: pd.DataFrame, filter_params: Dict, use_adjusted_dates: bool = True):
-    """Show supply summary metrics with status comparison"""
+    """Show supply summary metrics with allocation awareness"""
     if filtered_df.empty:
         DisplayComponents.show_no_data_message("No supply data to display")
         return
@@ -641,14 +718,30 @@ def show_supply_summary(filtered_df: pd.DataFrame, filter_params: Dict, use_adju
             }
         ]
         
-        # NEW: Add allocation metric if columns exist
-        if 'allocation_undelivered' in filtered_df.columns:
-            metrics.append({
-                "title": "Allocation Impact",
-                "value": filtered_df["allocation_undelivered"].sum(),
-                "format_type": "number",
-                "delta": f"{filtered_df[filtered_df['allocation_undelivered'] > 0]['pt_code'].nunique()} products"
-            })
+        # Enhanced allocation metrics - FIXED: use 'help_text' instead of 'help'
+        if 'allocation_undelivered' in filtered_df.columns and 'available_quantity' in filtered_df.columns:
+            total_quantity = filtered_df["quantity"].sum()
+            total_allocated = filtered_df["allocation_undelivered"].sum()
+            total_available = filtered_df["available_quantity"].sum()
+            allocation_percentage = (total_allocated / total_quantity * 100) if total_quantity > 0 else 0
+            
+            metrics.extend([
+                {
+                    "title": "Allocated Quantity",
+                    "value": total_allocated,
+                    "format_type": "number",
+                    "delta": f"-{allocation_percentage:.1f}% of total supply",
+                    "delta_color": "inverse",
+                    "help_text": "Quantity already allocated to demands"  # FIXED: help_text
+                },
+                {
+                    "title": "Net Available",
+                    "value": total_available,
+                    "format_type": "number",
+                    "delta": f"{filtered_df[filtered_df['allocation_undelivered'] > 0]['pt_code'].nunique()} products affected",
+                    "help_text": "Supply minus allocated quantities"  # FIXED: help_text
+                }
+            ])
         
         # Render summary section with additional content
         DisplayComponents.render_summary_section(
@@ -664,24 +757,110 @@ def show_supply_summary(filtered_df: pd.DataFrame, filter_params: Dict, use_adju
 
 def show_additional_supply_info(filtered_df: pd.DataFrame, source_summary: pd.DataFrame, 
                                filter_params: Dict, use_adjusted_dates: bool):
-    """Show additional supply information - WITH DATE COMPARISON"""
-    # Source breakdown
-    st.markdown("#### 📦 Supply by Source")
+    """Show additional supply information with cleaner layout"""
     
-    # Create columns for each source type
-    if not source_summary.empty:
-        source_cols = st.columns(len(source_summary))
-        for idx, (col, row) in enumerate(zip(source_cols, source_summary.itertuples())):
-            with col:
-                st.markdown(f"**{row.source_type}**")
-                st.metric("Products", f"{row.pt_code:,}")
-                st.metric("Quantity", format_number(row.quantity))
-                st.metric("Value", format_currency(row.value_in_usd, "$", 0))
+    # Tab-based organization for cleaner view
+    tab1, tab2, tab3 = st.tabs(["📦 By Source", "📊 Allocation Impact", "📈 Date Status"])
     
-    # Show Date Status Comparison (if applicable)
-    show_date_status_comparison(filtered_df, use_adjusted_dates)
-
-    # Special warnings
+    with tab1:
+        # Source breakdown in a cleaner table format
+        st.markdown("#### Supply Distribution by Source")
+        
+        if not source_summary.empty:
+            # Prepare display dataframe
+            display_summary = source_summary.copy()
+            display_summary['quantity'] = display_summary['quantity'].apply(format_number)
+            display_summary['value_in_usd'] = display_summary['value_in_usd'].apply(lambda x: format_currency(x, "$", 0))
+            display_summary = display_summary.rename(columns={
+                'source_type': 'Source',
+                'pt_code': 'Products',
+                'quantity': 'Quantity',
+                'value_in_usd': 'Value'
+            })
+            
+            # Display as a clean table
+            st.dataframe(
+                display_summary,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Source": st.column_config.TextColumn("Source", width="medium"),
+                    "Products": st.column_config.NumberColumn("Products", format="%d"),
+                    "Quantity": st.column_config.TextColumn("Quantity", width="medium"),
+                    "Value": st.column_config.TextColumn("Value", width="medium")
+                }
+            )
+    
+    with tab2:
+        # Allocation impact - only show if data exists
+        if 'allocation_undelivered' in filtered_df.columns and 'available_quantity' in filtered_df.columns:
+            st.markdown("#### Allocation Impact Analysis")
+            
+            # Calculate allocation summary
+            allocation_summary = filtered_df.groupby('source_type').agg({
+                'quantity': 'sum',
+                'allocation_undelivered': 'sum',
+                'available_quantity': 'sum'
+            }).reset_index()
+            
+            # Add percentage calculations
+            allocation_summary['allocation_pct'] = (
+                allocation_summary['allocation_undelivered'] / 
+                allocation_summary['quantity'] * 100
+            ).round(1)
+            
+            allocation_summary['available_pct'] = (
+                allocation_summary['available_quantity'] / 
+                allocation_summary['quantity'] * 100
+            ).round(1)
+            
+            # Format for display
+            display_allocation = allocation_summary.copy()
+            display_allocation['Total Supply'] = display_allocation['quantity'].apply(format_number)
+            display_allocation['Allocated'] = display_allocation.apply(
+                lambda row: f"{format_number(row['allocation_undelivered'])} ({row['allocation_pct']:.1f}%)", 
+                axis=1
+            )
+            display_allocation['Available'] = display_allocation.apply(
+                lambda row: f"{format_number(row['available_quantity'])} ({row['available_pct']:.1f}%)", 
+                axis=1
+            )
+            
+            # Select columns to display
+            display_allocation = display_allocation[['source_type', 'Total Supply', 'Allocated', 'Available']]
+            display_allocation = display_allocation.rename(columns={'source_type': 'Source'})
+            
+            # Display table
+            st.dataframe(
+                display_allocation,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Source": st.column_config.TextColumn("Source", width="small"),
+                    "Total Supply": st.column_config.TextColumn("Total Supply", width="medium"),
+                    "Allocated": st.column_config.TextColumn("Allocated", width="medium"),
+                    "Available": st.column_config.TextColumn("Available", width="medium")
+                }
+            )
+            
+            # Summary insight
+            total_alloc_pct = (allocation_summary['allocation_undelivered'].sum() / 
+                             allocation_summary['quantity'].sum() * 100) if allocation_summary['quantity'].sum() > 0 else 0
+            
+            if total_alloc_pct > 50:
+                st.warning(f"⚠️ {total_alloc_pct:.1f}% of total supply is already allocated")
+            elif total_alloc_pct > 0:
+                st.info(f"ℹ️ {total_alloc_pct:.1f}% of total supply is allocated")
+            else:
+                st.success("✅ No allocations affecting supply")
+        else:
+            st.info("No allocation data available")
+    
+    with tab3:
+        # Date status comparison
+        show_date_status_comparison(filtered_df, use_adjusted_dates)
+    
+    # Special warnings - show outside tabs for visibility
     show_supply_warnings(filtered_df, filter_params)
 
 
@@ -1082,7 +1261,7 @@ def ensure_unique_index(df: pd.DataFrame) -> pd.DataFrame:
 # This will show PO line details better
 
 def prepare_supply_detail_display(display_df: pd.DataFrame) -> pd.DataFrame:
-    """Prepare supply dataframe for detail display - WITH PROPER DATE COLUMNS"""
+    """Prepare supply dataframe for detail display with allocation columns"""
     if display_df.empty:
         return display_df
     
@@ -1111,13 +1290,15 @@ def prepare_supply_detail_display(display_df: pd.DataFrame) -> pd.DataFrame:
     # Add quantity columns
     base_columns.append("quantity")
     
-    # NEW: Add allocation columns if they exist
+    # NEW: Add allocation columns right after quantity
     if "allocation_undelivered" in display_df.columns:
-        base_columns.extend(["allocation_undelivered", "available_quantity"])
+        base_columns.append("allocation_undelivered")
+    if "available_quantity" in display_df.columns:
+        base_columns.append("available_quantity")
     
     base_columns.extend(["value_in_usd", "legal_entity"])
     
-    # Add source-specific additional columns (KEEP EXISTING CODE)
+    # Add source-specific additional columns
     additional_columns = []
     
     if "expiry_date" in display_df.columns:
@@ -1155,7 +1336,7 @@ def prepare_supply_detail_display(display_df: pd.DataFrame) -> pd.DataFrame:
     
     display_df = display_df[display_columns].copy()
     
-    # Sort by appropriate columns (KEEP EXISTING SORT LOGIC)
+    # Sort by appropriate columns
     sort_columns = []
     
     # For All view, sort by source_type first
@@ -1187,9 +1368,8 @@ def prepare_supply_detail_display(display_df: pd.DataFrame) -> pd.DataFrame:
     
     return display_df
 
-
 def format_supply_display_df_enhanced(df: pd.DataFrame, date_columns: List[str]) -> pd.DataFrame:
-    """Enhanced formatting for supply dataframe with multiple date columns"""
+    """Enhanced formatting for supply dataframe with allocation columns"""
     df = df.copy()
     today = pd.Timestamp.now().normalize()
     
@@ -1200,13 +1380,25 @@ def format_supply_display_df_enhanced(df: pd.DataFrame, date_columns: List[str])
         if "value_in_usd" in df.columns:
             df["value_in_usd"] = df["value_in_usd"].apply(lambda x: format_currency(x))
         
-        # NEW: Format allocation columns
+        # NEW: Format allocation columns with color coding
         if "allocation_undelivered" in df.columns:
-            df["allocation_undelivered"] = df["allocation_undelivered"].apply(lambda x: format_number(x))
-        if "available_quantity" in df.columns:
-            df["available_quantity"] = df["available_quantity"].apply(lambda x: format_number(x))
+            def format_allocation(x):
+                if pd.isna(x) or x == 0:
+                    return "0"
+                return f"📌 {format_number(x)}"
+            df["allocation_undelivered"] = df["allocation_undelivered"].apply(format_allocation)
         
-        # Enhanced date formatting with indicators for all date columns (KEEP EXISTING CODE)
+        if "available_quantity" in df.columns:
+            def format_available(x):
+                if pd.isna(x):
+                    return "0"
+                elif x == 0:
+                    return "❌ 0"
+                else:
+                    return f"✅ {format_number(x)}"
+            df["available_quantity"] = df["available_quantity"].apply(format_available)
+        
+        # Enhanced date formatting with indicators for all date columns
         def format_date_with_status(x):
             if pd.isna(x):
                 return "❌ Missing"
@@ -1229,13 +1421,13 @@ def format_supply_display_df_enhanced(df: pd.DataFrame, date_columns: List[str])
         if "unified_date_adjusted" in df.columns and "unified_date_adjusted" not in date_columns:
             df["unified_date_adjusted"] = df["unified_date_adjusted"].apply(format_date_with_status)
         
-        # Format expiry date (KEEP EXISTING CODE)
+        # Format expiry date
         if "expiry_date" in df.columns:
             df["expiry_date"] = df["expiry_date"].apply(
                 lambda x: "" if pd.isna(x) else x.strftime("%Y-%m-%d")
             )
         
-        # Format days columns with color coding (KEEP EXISTING CODE)
+        # Format days columns with color coding
         if "days_until_expiry" in df.columns:
             def format_days_until_expiry(x):
                 if pd.isna(x):
@@ -1267,14 +1459,12 @@ def format_supply_display_df_enhanced(df: pd.DataFrame, date_columns: List[str])
         logger.error(f"Error formatting supply dataframe: {str(e)}")
         return df
 
-
-
 def highlight_supply_issues_enhanced(row: pd.Series, date_columns: List[str]) -> List[str]:
-    """Enhanced highlighting for supply issues with proper priority"""
+    """Enhanced highlighting for supply issues including allocation status"""
     styles = [""] * len(row)
     
     try:
-        # Priority order: expired > very urgent expiry > urgent expiry > past date > missing date
+        # Priority order: expired > very urgent expiry > high allocation > urgent expiry > past date > missing date
         
         # Check expiry status first (highest priority)
         if "days_until_expiry" in row.index:
@@ -1285,6 +1475,31 @@ def highlight_supply_issues_enhanced(row: pd.Series, date_columns: List[str]) ->
                 return ["background-color: #f8d7da"] * len(row)  # Light red
             elif "🟡" in cell_value:  # Urgent (≤30 days)
                 return ["background-color: #fff3cd"] * len(row)  # Light yellow
+        
+        # NEW: Check allocation percentage (high priority)
+        if "quantity" in row.index and "allocation_undelivered" in row.index:
+            try:
+                # Extract numeric values from formatted strings
+                qty_str = str(row["quantity"]).replace(',', '').replace('✅', '').replace('❌', '').strip()
+                alloc_str = str(row["allocation_undelivered"]).replace(',', '').replace('📌', '').strip()
+                
+                qty = float(qty_str) if qty_str and qty_str != '0' else 0
+                allocated = float(alloc_str) if alloc_str and alloc_str != '0' else 0
+                
+                if qty > 0:
+                    alloc_pct = allocated / qty
+                    if alloc_pct >= 0.8:  # ≥80% allocated
+                        return ["background-color: #d4edda"] * len(row)  # Light green - high allocation
+                    elif alloc_pct >= 0.5:  # ≥50% allocated
+                        return ["background-color: #d1ecf1"] * len(row)  # Light blue - medium allocation
+            except:
+                pass
+        
+        # Check if no available quantity
+        if "available_quantity" in row.index:
+            avail_str = str(row["available_quantity"])
+            if "❌" in avail_str:  # No available quantity
+                return ["background-color: #f5c6cb"] * len(row)  # Light red
         
         # Check transfer/arrival delays (medium priority)
         if "days_since_arrival" in row.index:
@@ -1319,7 +1534,6 @@ def highlight_supply_issues_enhanced(row: pd.Series, date_columns: List[str]) ->
         logger.error(f"Error highlighting rows: {str(e)}")
     
     return styles
-
 
 # Replace show_supply_grouped_view in Supply Analysis with this version
 # This uses the same helper functions as Demand Analysis for consistency
@@ -1503,17 +1717,38 @@ def show_supply_grouped_view(filtered_df: pd.DataFrame, start_date: date,
                     st.dataframe(filtered_df[display_cols].head())
 
 def display_supply_pivot(df_summary: pd.DataFrame, period: str, show_only_nonzero: bool, title: str):
-    """Display supply pivot table with past period indicators - using helper functions"""
+    """Display supply pivot table with available quantity option"""
     if df_summary.empty:
         DisplayComponents.show_no_data_message(f"No data to display for {title}")
         return
     
-    # Create pivot table using the SAME helper function as Demand Analysis
+    # NEW: Add toggle for quantity type
+    col1, col2 = st.columns([3, 1])
+    with col2:
+        show_available = False
+        if "available_quantity" in df_summary.columns:
+            show_available = st.checkbox(
+                "Show Available Qty",
+                value=False,
+                key=f"supply_show_available_{title.lower().replace(' ', '_')}",
+                help="Show available quantity (after allocations) instead of total quantity"
+            )
+    
+    # Select value column based on toggle
+    value_col = "available_quantity" if show_available else "quantity"
+    
+    # FIXED: Create a copy to avoid SettingWithCopyWarning
+    df_summary_copy = df_summary.copy()
+    
+    # Ensure numeric type
+    df_summary_copy[value_col] = pd.to_numeric(df_summary_copy[value_col], errors='coerce').fillna(0)
+    
+    # Create pivot table using helper function
     pivot_df = create_period_pivot(
-        df=df_summary,
+        df=df_summary_copy,  # Use the copy
         group_cols=["product_name", "pt_code"],
         period_col="period",
-        value_col="quantity",
+        value_col=value_col,  # Use selected column
         agg_func="sum",
         period_type=period,
         show_only_nonzero=show_only_nonzero,
@@ -1537,21 +1772,24 @@ def display_supply_pivot(df_summary: pd.DataFrame, period: str, show_only_nonzer
         if col not in ["product_name", "pt_code"]:
             display_pivot[col] = display_pivot[col].apply(lambda x: format_number(x))
     
-    # Show legend
-    st.info("🔴 = Past period (already occurred)")
+    # Show legend with quantity type indicator
+    if show_available:
+        st.info("🔴 = Past period | 📊 Showing: **Available Quantity** (after allocations)")
+    else:
+        st.info("🔴 = Past period | 📊 Showing: **Total Quantity**")
     
     # Display pivot
     st.dataframe(display_pivot, use_container_width=True, height=400)
     
     # Show totals with indicators
-    show_supply_totals_with_indicators(df_summary, period)
+    show_supply_totals_with_indicators(df_summary_copy, period, show_available)  # Pass the copy
     
-    # Export button (without indicators)
-    # Use the same format_pivot_for_display helper as Demand Analysis
+    # Export button
     excel_pivot = format_pivot_for_display(pivot_df)
+    file_suffix = "_available" if show_available else "_total"
     DisplayComponents.show_export_button(
         excel_pivot, 
-        f"supply_{title.lower().replace(' ', '_')}", 
+        f"supply_{title.lower().replace(' ', '_')}{file_suffix}", 
         f"📤 Export {title} to Excel"
     )
 
@@ -1569,20 +1807,26 @@ def format_pivot_for_display(pivot_df: pd.DataFrame) -> pd.DataFrame:
     # IMPORTANT: Return with original column order preserved
     return display_pivot[original_columns]
 
-def show_supply_totals_with_indicators(df_summary: pd.DataFrame, period: str):
-    """Show period totals for supply with past period indicators"""
+def show_supply_totals_with_indicators(df_summary: pd.DataFrame, period: str, show_available: bool = False):
+    """Show period totals for supply with available quantity option"""
     try:
-        # Prepare data
+        # FIXED: Create a copy to avoid SettingWithCopyWarning
         df_grouped = df_summary.copy()
-        df_grouped["quantity"] = pd.to_numeric(df_grouped["quantity"], errors='coerce').fillna(0)
-        df_grouped["value_in_usd"] = pd.to_numeric(df_grouped["value_in_usd"], errors='coerce').fillna(0)
+        
+        # Select value column
+        value_col = "available_quantity" if show_available and "available_quantity" in df_grouped.columns else "quantity"
+        
+        # Use .loc to avoid warning
+        df_grouped.loc[:, value_col] = pd.to_numeric(df_grouped[value_col], errors='coerce').fillna(0)
+        df_grouped.loc[:, "value_in_usd"] = pd.to_numeric(df_grouped["value_in_usd"], errors='coerce').fillna(0)
         
         # Calculate aggregates
-        qty_by_period = df_grouped.groupby("period")["quantity"].sum()
+        qty_by_period = df_grouped.groupby("period")[value_col].sum()
         val_by_period = df_grouped.groupby("period")["value_in_usd"].sum()
         
         # Create summary DataFrame
-        summary_data = {"Metric": ["🔢 TOTAL QUANTITY", "💵 TOTAL VALUE (USD)"]}
+        qty_label = "🔢 AVAILABLE QUANTITY" if show_available else "🔢 TOTAL QUANTITY"
+        summary_data = {"Metric": [qty_label, "💵 TOTAL VALUE (USD)"]}
         
         # Add all periods to summary_data with indicators
         for period_val in qty_by_period.index:
@@ -1636,7 +1880,7 @@ def main():
             st.write(f"- {source} → {date_col}")
     
     # Source selection and options
-    supply_source, exclude_expired = select_supply_source()
+    supply_source, exclude_expired, include_draft_allocations = select_supply_source()
     
     # Load and prepare data
     df_all = DisplayComponents.show_data_loading_spinner(
@@ -1644,7 +1888,8 @@ def main():
         "Loading supply data...",
         supply_source, 
         exclude_expired, 
-        use_adjusted_dates
+        use_adjusted_dates,
+        include_draft_allocations  # ADD THIS PARAMETER
     )
     
     if df_all.empty:

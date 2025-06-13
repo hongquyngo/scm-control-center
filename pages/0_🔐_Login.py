@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 st.set_page_config(
     page_title="SCM Login",
     page_icon="🔐",
-    layout="centered"
+    layout="wide"
 )
 
 # Initialize auth manager
