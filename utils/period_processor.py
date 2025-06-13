@@ -157,10 +157,27 @@ class PeriodBasedGAPProcessor:
         # Use available_quantity if exists (from enhance_supply_with_allocations)
         quantity_col = 'available_quantity' if 'available_quantity' in supply_df.columns else 'quantity'
         
-        return supply_df.groupby(['pt_code', 'period']).agg({
+        # Define aggregation dict
+        agg_dict = {
             quantity_col: 'sum'
-        }).reset_index().rename(columns={quantity_col: 'supply_quantity'})
-    
+        }
+        
+        # Include product info columns if they exist
+        if 'product_name' in supply_df.columns:
+            agg_dict['product_name'] = 'first'
+        if 'package_size' in supply_df.columns:
+            agg_dict['package_size'] = 'first'
+        if 'standard_uom' in supply_df.columns:
+            agg_dict['standard_uom'] = 'first'
+        
+        # Group by product and period
+        result_df = supply_df.groupby(['pt_code', 'period']).agg(agg_dict).reset_index()
+        
+        # Rename quantity column
+        result_df = result_df.rename(columns={quantity_col: 'supply_quantity'})
+        
+        return result_df
+
     def _group_allocations_by_period(self, allocations_df: pd.DataFrame) -> pd.DataFrame:
         """Group allocations by product + period"""
         if allocations_df.empty:
@@ -172,8 +189,9 @@ class PeriodBasedGAPProcessor:
             'undelivered_qty': 'sum'
         }).reset_index()
     
+
     def _merge_period_data(self, demand_df: pd.DataFrame, supply_df: pd.DataFrame, 
-                          allocation_df: pd.DataFrame) -> pd.DataFrame:
+                        allocation_df: pd.DataFrame) -> pd.DataFrame:
         """Merge all period data with proper handling of missing values"""
         # Get all unique product-period combinations
         all_keys = set()
@@ -189,23 +207,63 @@ class PeriodBasedGAPProcessor:
         # Create base dataframe
         base_data = pd.DataFrame(list(all_keys), columns=['pt_code', 'period'])
         
-        # Add product info from demand if available
+        # IMPORTANT: Get product info from BOTH demand and supply
+        product_info_list = []
+        
+        # Get from demand first
         if not demand_df.empty and 'product_name' in demand_df.columns:
-            product_info = demand_df[['pt_code', 'product_name', 'package_size', 'standard_uom']].drop_duplicates()
-            base_data = base_data.merge(product_info, on='pt_code', how='left')
+            demand_product_info = demand_df[['pt_code', 'product_name', 'package_size', 'standard_uom']].drop_duplicates()
+            product_info_list.append(demand_product_info)
+        
+        # Get from supply (for supply-only products)
+        if not supply_df.empty:
+            # Check if supply has product info columns
+            supply_info_cols = ['pt_code']
+            if 'product_name' in supply_df.columns:
+                supply_info_cols.append('product_name')
+            if 'package_size' in supply_df.columns:
+                supply_info_cols.append('package_size')
+            if 'standard_uom' in supply_df.columns:
+                supply_info_cols.append('standard_uom')
+            
+            if len(supply_info_cols) > 1:  # Has more than just pt_code
+                supply_product_info = supply_df[supply_info_cols].drop_duplicates()
+                product_info_list.append(supply_product_info)
+        
+        # Combine product info from all sources
+        if product_info_list:
+            # Concatenate all product info
+            all_product_info = pd.concat(product_info_list, ignore_index=True)
+            
+            # Remove duplicates, keeping first (prioritize demand info)
+            all_product_info = all_product_info.drop_duplicates(subset=['pt_code'], keep='first')
+            
+            # Merge with base data
+            base_data = base_data.merge(all_product_info, on='pt_code', how='left')
+        else:
+            # Add empty columns if no product info available
+            base_data['product_name'] = ''
+            base_data['package_size'] = ''
+            base_data['standard_uom'] = ''
         
         # Merge demand data
         if not demand_df.empty:
+            # Drop product info columns to avoid conflicts
+            demand_cols_to_merge = [col for col in demand_df.columns 
+                                if col not in ['product_name', 'package_size', 'standard_uom']]
             base_data = base_data.merge(
-                demand_df.drop(columns=['product_name', 'package_size', 'standard_uom'], errors='ignore'),
+                demand_df[demand_cols_to_merge],
                 on=['pt_code', 'period'],
                 how='left'
             )
         
         # Merge supply data
         if not supply_df.empty:
+            # Drop product info columns to avoid conflicts
+            supply_cols_to_merge = [col for col in supply_df.columns 
+                                if col not in ['product_name', 'package_size', 'standard_uom']]
             base_data = base_data.merge(
-                supply_df,
+                supply_df[supply_cols_to_merge],
                 on=['pt_code', 'period'],
                 how='left'
             )
@@ -231,8 +289,17 @@ class PeriodBasedGAPProcessor:
             else:
                 base_data[col] = 0
         
+        # Fill empty strings for text columns
+        text_cols = ['product_name', 'package_size', 'standard_uom']
+        for col in text_cols:
+            if col in base_data.columns:
+                base_data[col] = base_data[col].fillna('')
+            else:
+                base_data[col] = ''
+
         return base_data
-    
+
+
     def _calculate_net_values(self, period_data: pd.DataFrame) -> pd.DataFrame:
         """Calculate net values for GAP analysis"""
         df = period_data.copy()
