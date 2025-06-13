@@ -211,8 +211,12 @@ class DisplayComponents:
     
     @staticmethod
     def show_export_button(df: pd.DataFrame, filename: str, 
-                         button_label: str = "📥 Download Excel"):
+                        button_label: str = "📥 Download Excel"):
         """Show export button for dataframe"""
+        # Handle None button_label
+        if button_label is None:
+            button_label = "📥 Download Excel"
+        
         excel_data = convert_df_to_excel(df)
         st.download_button(
             label=button_label,
@@ -220,7 +224,7 @@ class DisplayComponents:
             file_name=f"{filename}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
-    
+
     @staticmethod
     def show_period_selector(key: str = "period", 
                            default_index: int = 1) -> str:

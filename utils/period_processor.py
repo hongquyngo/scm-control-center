@@ -228,6 +228,8 @@ class PeriodBasedGAPProcessor:
         for col in numeric_cols:
             if col in base_data.columns:
                 base_data[col] = base_data[col].fillna(0)
+            else:
+                base_data[col] = 0
         
         return base_data
     
