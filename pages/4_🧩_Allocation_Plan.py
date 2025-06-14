@@ -54,7 +54,6 @@ from utils.allocation_wizard_components import (
     show_step1_next_button
 )
 
-
 # Configure logging
 logger = logging.getLogger(__name__)
 

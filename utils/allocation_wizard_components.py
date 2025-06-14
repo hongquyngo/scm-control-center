@@ -103,21 +103,26 @@ def prepare_products_data(gap_data, demand_filtered, supply_filtered):
 def enrich_products_data(products_with_supply, demand_filtered, supply_filtered):
     """Enrich products data with additional columns from demand/supply data
     
-    Không thay đổi logic, chỉ add thêm debug info
+    Package size và UOM đã có sẵn trong gap_data, không cần query thêm
     """
     if st.session_state.get('debug_mode', False):
         st.write("🐛 enrich_products_data - Starting enrichment")
+        # Check available columns
+        st.write(f"🐛 Available columns in products_with_supply: {products_with_supply.columns.tolist()[:20]}...")
+    
+    # Package size và UOM đã có trong gap_data, chỉ cần ensure chúng tồn tại
+    if 'package_size' not in products_with_supply.columns:
+        products_with_supply['package_size'] = ''
+    if 'standard_uom' not in products_with_supply.columns:
+        products_with_supply['standard_uom'] = ''
+    
+    # Ensure these are string type for display
+    products_with_supply['package_size'] = products_with_supply['package_size'].astype(str).str.strip()
+    products_with_supply['standard_uom'] = products_with_supply['standard_uom'].astype(str).str.strip()
     
     # Enrich from demand data
     if not demand_filtered.empty:
         # Get unique attributes per product from demand
-        demand_enrichment = demand_filtered.groupby('pt_code').agg({
-            'legal_entity': lambda x: list(x.dropna().unique()) if 'legal_entity' in demand_filtered.columns else [],
-            'customer': lambda x: list(x.dropna().unique()) if 'customer' in demand_filtered.columns else [],
-            'brand': lambda x: list(x.dropna().unique()) if 'brand' in demand_filtered.columns else []
-        }).reset_index()
-        
-        # Handle the aggregation based on what columns exist
         agg_dict = {}
         if 'legal_entity' in demand_filtered.columns:
             agg_dict['legal_entity'] = lambda x: list(x.dropna().unique())
@@ -161,7 +166,6 @@ def enrich_products_data(products_with_supply, demand_filtered, supply_filtered)
     
     return products_with_supply
 
-
 def combine_enrichment_columns(products_with_supply):
     """Combine enrichment columns from demand and supply sources
     
@@ -191,10 +195,7 @@ def combine_enrichment_columns(products_with_supply):
 
 
 def show_debug_info(products_with_supply):
-    """Show debug information if debug mode is enabled
-    
-    Helper function - enhanced với more info
-    """
+    """Show debug information if debug mode is enabled - Updated to show package info"""
     if st.session_state.get('debug_mode', False):
         with st.expander("🐛 Enrichment Debug Info"):
             gap_data = get_from_session_state('gap_analysis_result', pd.DataFrame())
@@ -204,10 +205,10 @@ def show_debug_info(products_with_supply):
             st.write(f"**Available columns:** {products_with_supply.columns.tolist()}")
             
             if not products_with_supply.empty:
-                # Show sample data
+                # Show sample data including package info
                 sample = products_with_supply.head(3)
                 st.write("**Sample enriched data:**")
-                for col in ['pt_code', 'legal_entity', 'customer', 'brand']:
+                for col in ['pt_code', 'product_name', 'package_size', 'standard_uom', 'legal_entity', 'customer', 'brand']:
                     if col in sample.columns:
                         st.write(f"- {col}: {sample[col].tolist()}")
                 
@@ -218,6 +219,11 @@ def show_debug_info(products_with_supply):
                     st.write(f"- Periods: {len(p007_data)}")
                     st.write(f"- Total demand: {p007_data.get('total_demand_qty', pd.Series()).sum()}")
                     st.write(f"- Total supply: {p007_data.get('total_available', pd.Series()).sum()}")
+                    if 'package_size' in p007_data.columns:
+                        st.write(f"- Package size: {p007_data['package_size'].iloc[0]}")
+                    if 'standard_uom' in p007_data.columns:
+                        st.write(f"- UOM: {p007_data['standard_uom'].iloc[0]}")
+
 
 def show_no_products_message():
     """Show message when no products with supply are found"""
@@ -529,9 +535,8 @@ def show_no_filtered_data_message(filter_type, use_smart_filters):
     ]):
         st.caption("💡 Try clearing some advanced filters to see more products.")
 
-
 def prepare_product_summary(filtered_data):
-    """Prepare product summary data với logic mới và error handling tốt hơn"""
+    """Prepare product summary data với package_size và uom từ gap_data"""
     # Initialize empty DataFrame để tránh UnboundLocalError
     product_summary = pd.DataFrame()
     
@@ -571,6 +576,9 @@ def prepare_product_summary(filtered_data):
             st.write(f"🐛 Sample demand values: {filtered_data['original_demand_qty'].head()}")
         
         # Group by product
+        group_cols = ['pt_code', 'product_name']
+        
+        # Build aggregation dict
         agg_dict = {
             'original_demand_qty': 'sum',
             'total_available': 'sum',
@@ -578,10 +586,16 @@ def prepare_product_summary(filtered_data):
             'fulfillment_rate_percent': 'mean'
         }
         
+        # Include package_size và standard_uom using 'first' since they're same for each product
+        if 'package_size' in filtered_data.columns:
+            agg_dict['package_size'] = 'first'
+        if 'standard_uom' in filtered_data.columns:
+            agg_dict['standard_uom'] = 'first'
+        
         # Remove columns that don't exist
         agg_dict = {k: v for k, v in agg_dict.items() if k in filtered_data.columns}
         
-        product_summary = filtered_data.groupby(['pt_code', 'product_name']).agg(agg_dict).reset_index()
+        product_summary = filtered_data.groupby(group_cols).agg(agg_dict).reset_index()
         
         # Add period count
         if 'period' in filtered_data.columns:
@@ -604,6 +618,10 @@ def prepare_product_summary(filtered_data):
             product_summary['available_supply_sum'] = 0
         if 'fulfillment_rate_percent' not in product_summary.columns:
             product_summary['fulfillment_rate_percent'] = 0
+        if 'package_size' not in product_summary.columns:
+            product_summary['package_size'] = ''
+        if 'standard_uom' not in product_summary.columns:
+            product_summary['standard_uom'] = ''
         
         # Recalculate net GAP
         product_summary['net_gap'] = (
@@ -806,6 +824,19 @@ def show_product_row(row, selected_products, select_all_page):
         display_name = product_name[:50] + ('...' if len(product_name) > 50 else '')
         st.caption(display_name)
         
+        # Package size & UOM - NEW
+        package_info_parts = []
+        if 'package_size' in row and pd.notna(row['package_size']):
+            package_str = str(row['package_size'])[:20]
+            package_info_parts.append(f"📦 {package_str}")
+        
+        if 'standard_uom' in row and pd.notna(row['standard_uom']):
+            uom_str = str(row['standard_uom'])[:20]
+            package_info_parts.append(f"📏 {uom_str}")
+        
+        if package_info_parts:
+            st.caption(" | ".join(package_info_parts))
+
         # Show period count
         period_count = int(row.get('period_count', 1))
         if period_count > 0:
