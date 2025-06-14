@@ -320,13 +320,14 @@ class AllocationManager:
             return pd.DataFrame()
 
     def create_allocation_plan(self, plan_data: Dict, allocation_details: pd.DataFrame, 
-                            supply_mapping: Dict = None) -> Optional[int]:
-        """Create new allocation plan with details and supply mapping for HARD allocation
+                            supply_mapping: Dict = None, data_prepared: bool = False) -> Optional[int]:
+        """Create new allocation plan with details and supply mapping
         
         Args:
             plan_data: Plan header information
             allocation_details: DataFrame with allocation line details
             supply_mapping: Dict mapping demand_line_id to supply source (for HARD allocation)
+            data_prepared: If True, skip data preparation steps (customer mapping, etc.)
             
         Returns:
             Optional[int]: Allocation plan ID if successful, None otherwise
@@ -335,13 +336,16 @@ class AllocationManager:
         trans = conn.begin()
         
         try:
-            # Generate allocation number
-            allocation_number = generate_allocation_number()
+            # Generate allocation number if not provided
+            if 'allocation_number' in plan_data:
+                allocation_number = plan_data['allocation_number']
+            else:
+                allocation_number = generate_allocation_number()
             
             # Use SCM system user (id=1) as default creator
             creator_id = plan_data.get('creator_id', 1)
             
-            # Convert allocation_context to JSON string - handle NaN values
+            # Convert allocation_context to JSON string
             import json
             import numpy as np
             
@@ -391,7 +395,32 @@ class AllocationManager:
             allocation_plan_id = result.lastrowid
             logger.info(f"Created allocation plan header with ID {allocation_plan_id}")
             
-            # Get product mapping from cached data
+            # === PREPARE DATA IF NEEDED ===
+            if not data_prepared:
+                # Original data preparation logic
+                logger.info("Preparing allocation data...")
+                
+                # Get customer mapping
+                from utils.data_manager import DataManager
+                data_manager = DataManager()
+                customers_df = data_manager.load_customer_master()
+                
+                if not customers_df.empty:
+                    customer_mapping = dict(zip(
+                        customers_df['customer_name'].str.strip(), 
+                        customers_df['customer_code'].str.strip()
+                    ))
+                else:
+                    customer_mapping = {}
+                
+                # Apply mappings and prepare data
+                if 'customer' in allocation_details.columns:
+                    allocation_details['customer_name'] = allocation_details['customer'].str.strip()
+                    allocation_details['customer_code'] = allocation_details['customer_name'].map(customer_mapping)
+                
+                # Add other preparations as needed...
+                
+            # Get product mapping
             product_map = self._get_product_mapping()
             
             if not product_map:
@@ -422,10 +451,11 @@ class AllocationManager:
             for idx, row_dict in enumerate(details_list):
                 try:
                     # Check if this is a HARD allocation from supply_mapping
-                    allocation_mode = 'SOFT'
-                    supply_source_type = None
-                    supply_source_id = None
+                    allocation_mode = row_dict.get('allocation_mode', 'SOFT')
+                    supply_source_type = row_dict.get('supply_source_type')
+                    supply_source_id = row_dict.get('supply_source_id')
                     
+                    # Override with supply_mapping if exists
                     demand_line_id = row_dict.get('demand_line_id', '')
                     if supply_mapping and str(demand_line_id) in supply_mapping:
                         allocation_mode = 'HARD'
@@ -433,20 +463,7 @@ class AllocationManager:
                         supply_source_type = mapping_info.get('source_type')
                         supply_source_id = mapping_info.get('source_id')
                     
-                    # Map demand type from source_type
-                    demand_type = 'OC'  # default
-                    if row_dict.get('source_type') == 'Forecast':
-                        demand_type = 'FORECAST'
-                    
-                    # Extract demand reference ID from demand_line_id
-                    demand_reference_id = None
-                    if demand_line_id and pd.notna(demand_line_id):
-                        try:
-                            demand_reference_id = int(str(demand_line_id).split('_')[0])
-                        except:
-                            pass
-                    
-                    # Get product_id from pt_code using cached map
+                    # Get product_id from pt_code
                     pt_code = row_dict.get('pt_code')
                     product_id = None
                     
@@ -464,7 +481,7 @@ class AllocationManager:
                         continue
                     
                     # Determine initial status based on plan status
-                    detail_status = 'DRAFT' if plan_data.get('status', 'DRAFT') == 'DRAFT' else 'ALLOCATED'
+                    detail_status = row_dict.get('status', 'DRAFT')
                     
                     # Helper function to clean values
                     def clean_value(val):
@@ -478,7 +495,7 @@ class AllocationManager:
                     etd_value = row_dict.get('etd')
                     allocated_etd_value = row_dict.get('allocated_etd', etd_value)
                     
-                    # Convert Timestamp to string
+                    # Convert dates to string format for MySQL
                     if etd_value and pd.notna(etd_value):
                         if isinstance(etd_value, pd.Timestamp):
                             etd_value = etd_value.strftime('%Y-%m-%d')
@@ -501,28 +518,20 @@ class AllocationManager:
                     else:
                         allocated_etd_value = etd_value
                     
-                    # Get quantities with proper cleaning
-                    requested_qty = float(clean_value(
-                        row_dict.get('requested_qty', row_dict.get('demand_quantity', 0))
-                    ) or 0)
-                    allocated_qty = float(clean_value(row_dict.get('allocated_qty', 0)) or 0)
-                    
                     # Insert detail record
                     detail_insert = text("""
                         INSERT INTO allocation_details
                         (allocation_plan_id, allocation_mode, status,
                         demand_type, demand_reference_id, demand_number,
-                        product_id, pt_code, customer_id, customer_name,
-                        legal_entity_id, legal_entity_name,
-                        requested_qty, allocated_qty, delivered_qty,
+                        product_id, pt_code, customer_code, customer_name,
+                        legal_entity_name, requested_qty, allocated_qty, delivered_qty,
                         etd, allocated_etd, notes,
                         supply_source_type, supply_source_id)
                         VALUES
                         (:allocation_plan_id, :allocation_mode, :status,
                         :demand_type, :demand_reference_id, :demand_number,
-                        :product_id, :pt_code, :customer_id, :customer_name,
-                        :legal_entity_id, :legal_entity_name,
-                        :requested_qty, :allocated_qty, 0,
+                        :product_id, :pt_code, :customer_code, :customer_name,
+                        :legal_entity_name, :requested_qty, :allocated_qty, 0,
                         :etd, :allocated_etd, :notes,
                         :supply_source_type, :supply_source_id)
                     """)
@@ -531,17 +540,16 @@ class AllocationManager:
                         'allocation_plan_id': allocation_plan_id,
                         'allocation_mode': allocation_mode,
                         'status': detail_status,
-                        'demand_type': demand_type,
-                        'demand_reference_id': demand_reference_id,
+                        'demand_type': clean_value(row_dict.get('demand_type', 'OC')),
+                        'demand_reference_id': clean_value(row_dict.get('demand_reference_id')),
                         'demand_number': clean_value(row_dict.get('demand_number', '')),
                         'product_id': int(product_id),
                         'pt_code': pt_code_str,
-                        'customer_id': None,  # GAP data doesn't have customer_id
-                        'customer_name': clean_value(row_dict.get('customer', row_dict.get('customer_name', ''))),
-                        'legal_entity_id': None,  # GAP data doesn't have legal_entity_id
-                        'legal_entity_name': clean_value(row_dict.get('legal_entity', row_dict.get('legal_entity_name', ''))),
-                        'requested_qty': requested_qty,
-                        'allocated_qty': allocated_qty,
+                        'customer_code': clean_value(row_dict.get('customer_code')),
+                        'customer_name': clean_value(row_dict.get('customer_name', '')),
+                        'legal_entity_name': clean_value(row_dict.get('legal_entity_name', '')),
+                        'requested_qty': float(clean_value(row_dict.get('requested_qty', 0)) or 0),
+                        'allocated_qty': float(clean_value(row_dict.get('allocated_qty', 0)) or 0),
                         'etd': etd_value,
                         'allocated_etd': allocated_etd_value,
                         'notes': clean_value(row_dict.get('notes', '')),
@@ -586,15 +594,11 @@ class AllocationManager:
             import traceback
             logger.error(f"Traceback: {traceback.format_exc()}")
             
-            # Log debug info
-            if not allocation_details.empty:
-                logger.error(f"Allocation details columns: {allocation_details.columns.tolist()}")
-                logger.error(f"First row sample: {allocation_details.iloc[0].to_dict() if len(allocation_details) > 0 else 'No rows'}")
-            
             return None
         finally:
             conn.close()
 
+  
     def _get_product_mapping(self) -> Dict[str, int]:
         """Get product mapping from cached data
         
@@ -621,6 +625,8 @@ class AllocationManager:
         except Exception as e:
             logger.error(f"Error getting product mapping: {str(e)}")
             return {}
+
+
 
     def update_allocation_plan(self, allocation_id: int, updates: Dict) -> bool:
         """Update allocation plan"""
