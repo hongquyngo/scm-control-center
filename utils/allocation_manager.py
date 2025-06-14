@@ -5,7 +5,7 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime
 from sqlalchemy import text
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Any
 import logging
 
 from utils.db import get_db_engine
@@ -99,10 +99,10 @@ class AllocationManager:
             query = """
                 SELECT 
                     vaps.*,
-                    CONCAT(COALESCE(e.first_name, ''), ' ', COALESCE(e.last_name, '')) as creator_name,
+                    u.username as creator_name,
                     JSON_UNQUOTE(JSON_EXTRACT(vaps.allocation_context, '$.allocation_method')) as allocation_method
                 FROM v_allocation_plans_summary vaps
-                LEFT JOIN employees e ON vaps.creator_id = e.id
+                LEFT JOIN users u ON vaps.creator_id = u.id
                 WHERE 1=1
             """
             
@@ -174,7 +174,7 @@ class AllocationManager:
             plan_query = """
                 SELECT 
                     ap.*, 
-                    CONCAT(COALESCE(e.first_name, ''), ' ', COALESCE(e.last_name, '')) as creator_name,
+                    u.username as creator_name,
                     -- Extract allocation_method from multiple possible JSON paths
                     COALESCE(
                         JSON_UNQUOTE(JSON_EXTRACT(ap.allocation_context, '$.allocation_method')),
@@ -188,7 +188,7 @@ class AllocationManager:
                         'SOFT'
                     ) as allocation_type
                 FROM allocation_plans ap
-                LEFT JOIN employees e ON ap.creator_id = e.id
+                LEFT JOIN users u ON ap.creator_id = u.id
                 WHERE ap.id = :allocation_id
             """
             
@@ -674,56 +674,334 @@ class AllocationManager:
         except Exception as e:
             logger.error(f"Error approving allocation: {str(e)}")
             return False
-    
-    def cancel_allocation_plan(self, allocation_id: int) -> bool:
-        """Cancel allocation plan by creating cancellation records
+
+
+    def cancel_allocation_plan(self, allocation_id: int, reason: str = None, 
+                            reason_category: str = 'BUSINESS_DECISION',
+                            user_id: int = None) -> bool:
+        """Cancel allocation plan - handles both DRAFT and ALLOCATED plans
         
-        This creates cancellation records for all undelivered quantities
-        instead of updating status fields (which no longer exist)
+        Args:
+            allocation_id: ID of allocation plan to cancel
+            reason: Cancellation reason (optional)
+            reason_category: Category of cancellation (default: BUSINESS_DECISION)
+            user_id: User performing cancellation (default: system user)
+            
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        conn = self.engine.connect()
+        trans = conn.begin()
+        
+        try:
+            # Get user info for audit
+            if user_id is None:
+                user_id = 1  # System user default
+                
+            # 1. Get plan summary to determine status
+            plan_query = text("""
+                SELECT 
+                    vaps.*,
+                    ap.allocation_number,
+                    CONCAT(COALESCE(e.first_name, ''), ' ', COALESCE(e.last_name, '')) as creator_name
+                FROM v_allocation_plans_summary vaps
+                JOIN allocation_plans ap ON vaps.id = ap.id
+                LEFT JOIN employees e ON vaps.creator_id = e.id
+                WHERE vaps.id = :allocation_id
+            """)
+            
+            result = conn.execute(plan_query, {'allocation_id': allocation_id})
+            plan = result.fetchone()
+            
+            if not plan:
+                logger.error(f"Allocation plan {allocation_id} not found")
+                return False
+            
+            # Convert Row to dict for easier access
+            plan_dict = dict(plan._mapping) if hasattr(plan, '_mapping') else dict(zip(result.keys(), plan))
+            
+            logger.info(f"Cancelling allocation plan {plan_dict['allocation_number']} with status {plan_dict['display_status']}")
+            
+            # 2. Get all details for this plan
+            details_query = text("""
+                SELECT 
+                    ad.id,
+                    ad.status as original_status,
+                    ad.allocated_qty,
+                    ad.delivered_qty,
+                    ad.pt_code,
+                    ad.customer_name,
+                    COALESCE(
+                        ad.allocated_qty - ad.delivered_qty - 
+                        COALESCE((
+                            SELECT SUM(ac.cancelled_qty) 
+                            FROM allocation_cancellations ac 
+                            WHERE ac.allocation_detail_id = ad.id 
+                            AND ac.status = 'ACTIVE'
+                        ), 0), 
+                        0
+                    ) as cancellable_qty
+                FROM allocation_details ad
+                WHERE ad.allocation_plan_id = :allocation_id
+            """)
+            
+            details = conn.execute(details_query, {'allocation_id': allocation_id}).fetchall()
+            
+            if not details:
+                logger.warning(f"No details found for allocation plan {allocation_id}")
+                return True  # Empty plan, consider it cancelled
+            
+            # 3. Process based on plan status
+            cancelled_count = 0
+            draft_deleted_count = 0
+            
+            # Set default reason if not provided
+            if not reason:
+                reason = f"Allocation plan {plan_dict['allocation_number']} cancelled"
+            
+            # Get user name for audit
+            user_query = text("""
+                SELECT CONCAT(COALESCE(first_name, ''), ' ', COALESCE(last_name, '')) as full_name 
+                FROM employees 
+                WHERE id = :user_id AND delete_flag = 0
+            """)
+            user_result = conn.execute(user_query, {'user_id': user_id})
+            user_row = user_result.fetchone()
+            cancelled_by_name = user_row['full_name'].strip() if user_row and user_row['full_name'] else f'User {user_id}'
+            
+            for detail in details:
+                detail_dict = dict(detail._mapping) if hasattr(detail, '_mapping') else dict(zip(details_query.keys(), detail))
+                
+                # Handle DRAFT details
+                if detail_dict['original_status'] == 'DRAFT':
+                    # For DRAFT, we can either delete or mark as cancelled
+                    # Option 1: Delete (clean removal)
+                    delete_query = text("""
+                        DELETE FROM allocation_details 
+                        WHERE id = :detail_id
+                    """)
+                    conn.execute(delete_query, {'detail_id': detail_dict['id']})
+                    draft_deleted_count += 1
+                    
+                    # Option 2: Create cancellation record even for DRAFT (for audit trail)
+                    # Uncomment if you want to keep DRAFT records with cancellation
+                    """
+                    cancel_insert = text('''
+                        INSERT INTO allocation_cancellations 
+                        (allocation_detail_id, allocation_plan_id, cancelled_qty, 
+                        reason, reason_category, cancelled_by_user_id, status)
+                        VALUES (:detail_id, :plan_id, :qty, 
+                                :reason, :category, :user_id, 'ACTIVE')
+                    ''')
+                    
+                    conn.execute(cancel_insert, {
+                        'detail_id': detail_dict['id'],
+                        'plan_id': allocation_id,
+                        'qty': detail_dict['allocated_qty'],
+                        'reason': f"{reason} (Draft item)",
+                        'category': reason_category,
+                        'user_id': user_id
+                    })
+                    """
+                    
+                # Handle ALLOCATED details with cancellable quantity
+                elif detail_dict['original_status'] == 'ALLOCATED' and detail_dict['cancellable_qty'] > 0:
+                    # Create cancellation record
+                    cancel_insert = text("""
+                        INSERT INTO allocation_cancellations 
+                        (allocation_detail_id, allocation_plan_id, cancelled_qty, 
+                        reason, reason_category, cancelled_by_user_id, status)
+                        VALUES (:detail_id, :plan_id, :qty, 
+                                :reason, :category, :user_id, 'ACTIVE')
+                    """)
+                    
+                    conn.execute(cancel_insert, {
+                        'detail_id': detail_dict['id'],
+                        'plan_id': allocation_id,
+                        'qty': detail_dict['cancellable_qty'],
+                        'reason': reason,
+                        'category': reason_category,
+                        'user_id': user_id
+                    })
+                    cancelled_count += 1
+                    
+                    logger.info(f"Cancelled {detail_dict['cancellable_qty']} qty for {detail_dict['pt_code']} - {detail_dict['customer_name']}")
+                
+                # Skip if already delivered or no cancellable quantity
+                elif detail_dict['delivered_qty'] >= detail_dict['allocated_qty']:
+                    logger.info(f"Skipping {detail_dict['pt_code']} - already delivered")
+                elif detail_dict['cancellable_qty'] <= 0:
+                    logger.info(f"Skipping {detail_dict['pt_code']} - no cancellable quantity")
+            
+            # 4. Add plan-level cancellation note
+            if plan_dict.get('notes'):
+                updated_notes = f"{plan_dict['notes']}\n\n[CANCELLED {datetime.now().strftime('%Y-%m-%d %H:%M')}] {reason}"
+            else:
+                updated_notes = f"[CANCELLED {datetime.now().strftime('%Y-%m-%d %H:%M')}] {reason}"
+            
+            # Update plan notes
+            update_plan = text("""
+                UPDATE allocation_plans
+                SET notes = :notes,
+                    updated_date = NOW()
+                WHERE id = :allocation_id
+            """)
+            
+            conn.execute(update_plan, {
+                'allocation_id': allocation_id,
+                'notes': updated_notes
+            })
+            
+            # 5. Commit transaction
+            trans.commit()
+            
+            # Log summary
+            logger.info(f"""
+                Allocation plan {plan_dict['allocation_number']} cancelled successfully:
+                - Draft items deleted: {draft_deleted_count}
+                - Allocated items cancelled: {cancelled_count}
+                - Status was: {plan_dict['display_status']}
+                - Cancelled by: {cancelled_by_name}
+                - Reason: {reason}
+            """)
+            
+            return True
+            
+        except Exception as e:
+            trans.rollback()
+            logger.error(f"Error cancelling allocation plan {allocation_id}: {str(e)}")
+            logger.error(f"Stack trace: ", exc_info=True)
+            return False
+            
+        finally:
+            conn.close()
+
+
+    def bulk_cancel_allocation_plans(self, plan_ids: List[int], reason: str = None,
+                                    reason_category: str = 'BUSINESS_DECISION',
+                                    user_id: int = None) -> Tuple[int, List[str]]:
+        """Cancel multiple allocation plans
+        
+        Args:
+            plan_ids: List of allocation plan IDs to cancel
+            reason: Cancellation reason
+            reason_category: Category of cancellation
+            user_id: User performing cancellation
+            
+        Returns:
+            Tuple[int, List[str]]: (success_count, list of errors)
+        """
+        success_count = 0
+        errors = []
+        
+        for plan_id in plan_ids:
+            try:
+                if self.cancel_allocation_plan(plan_id, reason, reason_category, user_id):
+                    success_count += 1
+                else:
+                    errors.append(f"Plan ID {plan_id}: Cancellation failed")
+            except Exception as e:
+                errors.append(f"Plan ID {plan_id}: {str(e)}")
+        
+        return success_count, errors
+
+    def validate_before_cancel(self, allocation_id: int) -> Tuple[bool, Dict[str, Any]]:
+        """Validate and get impact analysis before cancelling
+        
+        Args:
+            allocation_id: Allocation plan ID
+            
+        Returns:
+            Tuple[bool, Dict]: (can_cancel, impact_analysis)
         """
         try:
-            with self.engine.begin() as conn:
-                # Get undelivered quantities using view
-                details_query = text("""
+            with self.engine.connect() as conn:
+                # Get plan info
+                plan_query = text("""
                     SELECT 
-                        id as detail_id,
-                        allocation_plan_id,
-                        remaining_qty as cancellable_qty
-                    FROM allocation_delivery_status_view
-                    WHERE allocation_plan_id = :allocation_id
-                    AND detail_status = 'ALLOCATED'  -- Only ALLOCATED can be cancelled
-                    AND remaining_qty > 0
+                        vaps.*,
+                        ap.allocation_number
+                    FROM v_allocation_plans_summary vaps
+                    JOIN allocation_plans ap ON vaps.id = ap.id
+                    WHERE vaps.id = :allocation_id
                 """)
                 
-                details = conn.execute(details_query, {'allocation_id': allocation_id}).fetchall()
+                plan = conn.execute(plan_query, {'allocation_id': allocation_id}).fetchone()
                 
-                if not details:
-                    logger.info(f"No cancellable details found for plan {allocation_id}")
-                    return True
+                if not plan:
+                    return False, {'error': 'Plan not found'}
                 
-                # Bulk insert cancellations
-                for detail in details:
-                    if detail['cancellable_qty'] > 0:
-                        cancel_insert = text("""
-                            INSERT INTO allocation_cancellations 
-                            (allocation_detail_id, allocation_plan_id, cancelled_qty, 
-                            reason, reason_category, cancelled_by_user_id, cancelled_by_name, status)
-                            VALUES (:detail_id, :plan_id, :qty, 
-                                    'Plan cancelled', 'BUSINESS_DECISION', 1, 'System', 'ACTIVE')
-                        """)
-                        
-                        conn.execute(cancel_insert, {
-                            'detail_id': detail['detail_id'],
-                            'plan_id': allocation_id,
-                            'qty': detail['cancellable_qty']
-                        })
+                plan_dict = dict(plan._mapping) if hasattr(plan, '_mapping') else dict(zip(plan.keys(), plan))
                 
-                logger.info(f"Created {len(details)} cancellation records for plan {allocation_id}")
-                return True
+                # Get impact analysis
+                impact_query = text("""
+                    SELECT 
+                        COUNT(DISTINCT ad.id) as total_details,
+                        COUNT(DISTINCT CASE WHEN ad.status = 'DRAFT' THEN ad.id END) as draft_count,
+                        COUNT(DISTINCT CASE WHEN ad.status = 'ALLOCATED' THEN ad.id END) as allocated_count,
+                        COUNT(DISTINCT CASE WHEN ad.delivered_qty > 0 THEN ad.id END) as partial_delivered_count,
+                        SUM(ad.allocated_qty) as total_allocated_qty,
+                        SUM(ad.delivered_qty) as total_delivered_qty,
+                        SUM(
+                            CASE 
+                                WHEN ad.status = 'DRAFT' THEN ad.allocated_qty
+                                WHEN ad.status = 'ALLOCATED' THEN 
+                                    ad.allocated_qty - ad.delivered_qty - 
+                                    COALESCE((
+                                        SELECT SUM(ac.cancelled_qty) 
+                                        FROM allocation_cancellations ac 
+                                        WHERE ac.allocation_detail_id = ad.id 
+                                        AND ac.status = 'ACTIVE'
+                                    ), 0)
+                                ELSE 0
+                            END
+                        ) as total_cancellable_qty,
+                        COUNT(DISTINCT ad.pt_code) as affected_products,
+                        COUNT(DISTINCT ad.customer_name) as affected_customers
+                    FROM allocation_details ad
+                    WHERE ad.allocation_plan_id = :allocation_id
+                """)
+                
+                impact = conn.execute(impact_query, {'allocation_id': allocation_id}).fetchone()
+                impact_dict = dict(impact._mapping) if hasattr(impact, '_mapping') else dict(zip(impact.keys(), impact))
+                
+                # Check if can cancel
+                can_cancel = True
+                warnings = []
+                
+                # Cannot cancel if all delivered
+                if impact_dict['total_delivered_qty'] >= impact_dict['total_allocated_qty']:
+                    can_cancel = False
+                    warnings.append("All quantities already delivered")
+                
+                # Warning if partial deliveries exist
+                if impact_dict['partial_delivered_count'] > 0:
+                    warnings.append(f"{impact_dict['partial_delivered_count']} items have partial deliveries")
+                
+                # Build impact analysis
+                analysis = {
+                    'can_cancel': can_cancel,
+                    'plan_info': {
+                        'allocation_number': plan_dict['allocation_number'],
+                        'status': plan_dict['display_status'],
+                        'total_items': impact_dict['total_details']
+                    },
+                    'impact': {
+                        'draft_items_to_delete': impact_dict['draft_count'],
+                        'allocated_items_to_cancel': impact_dict['allocated_count'],
+                        'quantity_to_release': float(impact_dict['total_cancellable_qty'] or 0),
+                        'affected_products': impact_dict['affected_products'],
+                        'affected_customers': impact_dict['affected_customers']
+                    },
+                    'warnings': warnings
+                }
+                
+                return can_cancel, analysis
                 
         except Exception as e:
-            logger.error(f"Error cancelling allocation plan: {str(e)}")
-            return False
+            logger.error(f"Error validating cancellation: {str(e)}")
+            return False, {'error': str(e)}
+
 
     def cancel_allocation_detail(self, detail_id: int, quantity: float, 
                             reason: str, reason_category: str, user_id: int = None) -> Tuple[bool, str]:
@@ -750,6 +1028,7 @@ class AllocationManager:
         return self.cancellation_manager.bulk_cancel(
             detail_ids, reason, reason_category, user_id
         )
+
 
     def reverse_cancellation(self, cancellation_id: int, reason: str, user_id: int = None) -> Tuple[bool, str]:
         """Reverse a cancellation"""
@@ -819,8 +1098,6 @@ class AllocationManager:
         except Exception as e:
             logger.error(f"Error getting active allocations summary: {str(e)}")
             return pd.DataFrame()
-
-
 
 
     def get_allocation_performance_metrics(self, date_from: datetime = None, 

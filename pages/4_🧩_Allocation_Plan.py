@@ -297,16 +297,90 @@ def show_all_allocation_plans():
                 if row['display_status'] == 'ALL_DRAFT':
                     col6_1, col6_2 = st.columns(2)
                     with col6_1:
+                        # Better implementation
                         if st.button("✅ Allocate", key=f"allocate_{row['id']}", type="primary"):
-                            if allocation_manager.bulk_update_allocation_status(row['id'], 'ALLOCATED'):
-                                st.success("Plan allocated successfully!")
-                                st.rerun()
-                    with col6_2:
-                        if st.button("❌ Cancel", key=f"cancel_plan_{row['id']}"):
-                            if allocation_manager.cancel_allocation_plan(row['id']):
-                                st.info("Plan cancelled")
-                                st.rerun()
-                
+                            # Validate before allocating
+                            is_valid, errors = allocation_manager.validate_before_allocation(row['id'])
+                            
+                            if not is_valid:
+                                st.error("Cannot allocate plan:")
+                                for error in errors:
+                                    st.write(f"- {error}")
+                            else:
+                                # Show confirmation
+                                with st.form(f"confirm_allocate_{row['id']}"):
+                                    st.warning("⚠️ Once allocated, the plan cannot be edited. Only cancellation is allowed.")
+                                    st.write(f"Allocating {row.get('total_count', 0)} items")
+                                    
+                                    col1, col2 = st.columns(2)
+                                    with col1:
+                                        if st.form_submit_button("Confirm Allocate", type="primary"):
+                                            if allocation_manager.bulk_update_allocation_status(row['id'], 'ALLOCATED'):
+                                                st.success("✅ Plan allocated successfully!")
+                                                
+                                                # Optional: Send notifications
+                                                # notification_manager.notify_allocation_approved(row['id'])
+                                                
+                                                st.rerun()
+                                            else:
+                                                st.error("❌ Failed to allocate plan. Please check logs.")
+                                    
+                                    with col2:
+                                        if st.form_submit_button("Cancel"):
+                                            st.rerun()
+                                            with col6_2:
+                                                # Updated button handler in show_all_allocation_plans()
+                                                if st.button("❌ Cancel", key=f"cancel_plan_{row['id']}"):
+                                                    # Validate first
+                                                    can_cancel, impact = allocation_manager.validate_before_cancel(row['id'])
+                                                    
+                                                    if not can_cancel:
+                                                        st.error("Cannot cancel this plan:")
+                                                        for warning in impact.get('warnings', []):
+                                                            st.write(f"- {warning}")
+                                                    else:
+                                                        # Show confirmation with impact analysis
+                                                        with st.form(f"cancel_confirm_{row['id']}"):
+                                                            st.warning("⚠️ Cancel Allocation Plan")
+                                                            
+                                                            # Show impact
+                                                            col1, col2 = st.columns(2)
+                                                            with col1:
+                                                                st.metric("Items to Cancel", impact['impact']['allocated_items_to_cancel'])
+                                                                st.metric("Draft Items to Delete", impact['impact']['draft_items_to_delete'])
+                                                            with col2:
+                                                                st.metric("Quantity to Release", format_number(impact['impact']['quantity_to_release']))
+                                                                st.metric("Affected Customers", impact['impact']['affected_customers'])
+                                                            
+                                                            # Warnings
+                                                            if impact['warnings']:
+                                                                st.info("⚠️ Warnings:")
+                                                                for warning in impact['warnings']:
+                                                                    st.write(f"- {warning}")
+                                                            
+                                                            # Reason input
+                                                            reason = st.text_area("Cancellation Reason", 
+                                                                                placeholder="Please provide reason for cancellation...")
+                                                            
+                                                            # Action buttons
+                                                            col1, col2 = st.columns(2)
+                                                            with col1:
+                                                                if st.form_submit_button("Confirm Cancel", type="primary"):
+                                                                    if allocation_manager.cancel_allocation_plan(
+                                                                        row['id'], 
+                                                                        reason or "Cancelled by user",
+                                                                        user_id=st.session_state.get('user_id', 1)
+                                                                    ):
+                                                                        st.success("✅ Plan cancelled successfully")
+                                                                        st.rerun()
+                                                                    else:
+                                                                        st.error("❌ Failed to cancel plan")
+                                                            
+                                                            with col2:
+                                                                if st.form_submit_button("Keep Plan"):
+                                                                    st.rerun()
+
+
                 elif row['display_status'] in ['IN_PROGRESS', 'MIXED']:
                     # Show delivery progress
                     delivered_pct = (row.get('total_delivered', 0) / row.get('total_allocated_effective', 1) * 100) if row.get('total_allocated_effective', 0) > 0 else 0
