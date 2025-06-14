@@ -6,6 +6,7 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+from typing import List
 
 from utils.formatters import format_number
 
@@ -80,103 +81,178 @@ class AllocationComponents:
         return descriptions.get(method, "Unknown allocation method")
     
     @staticmethod
+    def show_supply_capability_table(allocation_df: pd.DataFrame):
+        """Show supply capability by period for reference"""
+        # Get unique products
+        products = allocation_df['pt_code'].unique()
+        
+        # Get supply data from session state
+        supply_data = st.session_state.get('supply_filtered', pd.DataFrame())
+        
+        if supply_data.empty:
+            st.info("No supply data available for reference")
+            return
+        
+        # Filter supply for selected products
+        supply_filtered = supply_data[supply_data['pt_code'].isin(products)]
+        
+        # Group by period (simplified view)
+        # This should ideally show supply by period matching the demand periods
+        supply_summary = supply_filtered.groupby(['pt_code', 'legal_entity']).agg({
+            'quantity': 'sum'
+        }).reset_index()
+        
+        # Display in expandable section
+        with st.expander("View Supply Capability Details", expanded=False):
+            for pt_code in products:
+                product_supply = supply_summary[supply_summary['pt_code'] == pt_code]
+                if not product_supply.empty:
+                    st.write(f"**{pt_code}**")
+                    for _, row in product_supply.iterrows():
+                        st.write(f"- {row['legal_entity']}: {format_number(row['quantity'])} available")
+                else:
+                    st.write(f"**{pt_code}**: No supply data")
+
+    @staticmethod
+    def validate_against_supply_capability(edited_df: pd.DataFrame) -> List[str]:
+        """Validate allocations against supply capability by period"""
+        warnings = []
+        
+        # Group by product and allocated_etd to check supply availability
+        period_allocations = edited_df.groupby(['pt_code', 'legal_entity', 'allocated_etd']).agg({
+            'allocated_qty': 'sum'
+        }).reset_index()
+        
+        # Get supply data
+        supply_data = st.session_state.get('supply_filtered', pd.DataFrame())
+        
+        if not supply_data.empty:
+            # Check each period allocation against available supply
+            for _, alloc in period_allocations.iterrows():
+                # This is simplified - in real implementation, should check supply availability by date
+                product_supply = supply_data[
+                    (supply_data['pt_code'] == alloc['pt_code']) &
+                    (supply_data['legal_entity'] == alloc['legal_entity'])
+                ]['quantity'].sum()
+                
+                if alloc['allocated_qty'] > product_supply:
+                    warnings.append(
+                        f"Product {alloc['pt_code']} on {alloc['allocated_etd']}: "
+                        f"Allocated {alloc['allocated_qty']} exceeds available supply {product_supply}"
+                    )
+        
+        return warnings
+
+    @staticmethod
     def show_editable_allocation_table(allocation_df: pd.DataFrame) -> pd.DataFrame:
         """Show editable allocation table for manual adjustments"""
         
         st.markdown("##### 📝 Adjust Allocations Manually")
-        st.info("Modify allocated quantities below. Available supply will be updated in real-time.")
+        st.info("Modify allocated quantities and ETD dates below. Supply capability is shown for reference.")
+        st.warning("⚠️ **Note**: Allocated quantities must be whole numbers (natural numbers) matching the product UOM")
         
-        # Group by product to show available supply
-        product_supply = allocation_df.groupby(['pt_code', 'legal_entity']).agg({
-            'available_qty': 'first',
-            'allocated_qty': 'sum'
-        }).reset_index()
+        # Show supply capability by period instead of simple status
+        st.markdown("**📊 Supply Capability Reference**")
+        AllocationComponents.show_supply_capability_table(allocation_df)
         
-        # Show supply status
-        col1, col2 = st.columns([1, 3])
-        with col1:
-            st.markdown("**Supply Status**")
-            for _, row in product_supply.iterrows():
-                remaining = row['available_qty'] - row['allocated_qty']
-                color = "🟢" if remaining >= 0 else "🔴"
-                st.write(f"{color} {row['pt_code']}: {format_number(remaining)} remaining")
+        st.markdown("---")
         
-        with col2:
-            # Create editable dataframe
-            edited_df = allocation_df.copy()
-            
-            # Prepare display columns
-            display_columns = ['pt_code', 'product_name', 'customer', 'etd', 
-                             'requested_qty', 'allocated_qty']
-            
-            # Use st.data_editor for editing
-            edited_result = st.data_editor(
-                edited_df[display_columns],
-                column_config={
-                    "pt_code": st.column_config.TextColumn("PT Code", disabled=True),
-                    "product_name": st.column_config.TextColumn("Product", disabled=True),
-                    "customer": st.column_config.TextColumn("Customer", disabled=True),
-                    "etd": st.column_config.DateColumn("ETD", disabled=True),
-                    "requested_qty": st.column_config.NumberColumn(
-                        "Requested",
-                        disabled=True,
-                        format="%.0f"
-                    ),
-                    "allocated_qty": st.column_config.NumberColumn(
-                        "Allocated",
-                        min_value=0,
-                        format="%.0f",
-                        help="Adjust allocation quantity"
-                    )
-                },
-                hide_index=True,
-                use_container_width=True,
-                num_rows="fixed"
-            )
-            
-            # Update the original dataframe with edits
-            edited_df['allocated_qty'] = edited_result['allocated_qty']
-            
-            # Recalculate fulfillment rate
-            edited_df['fulfillment_rate'] = (
-                edited_df['allocated_qty'] / edited_df['requested_qty'] * 100
-            ).fillna(0).clip(upper=100)
-            
-            # Validate allocations
-            validation_warnings = []
-            
-            # Check over-allocation by product
-            for pt_code, entity in edited_df[['pt_code', 'legal_entity']].drop_duplicates().values:
-                product_data = edited_df[
-                    (edited_df['pt_code'] == pt_code) & 
-                    (edited_df['legal_entity'] == entity)
-                ]
-                
-                total_allocated = product_data['allocated_qty'].sum()
-                available = product_data['available_qty'].iloc[0] if len(product_data) > 0 else 0
-                
-                if total_allocated > available:
-                    validation_warnings.append(
-                        f"⚠️ Over-allocation for {pt_code}: "
-                        f"Allocated {format_number(total_allocated)} but only {format_number(available)} available"
-                    )
-            
-            # Show warnings
-            if validation_warnings:
-                st.warning("Validation Issues:")
-                for warning in validation_warnings:
-                    st.write(warning)
-            
-            return edited_df
-    
+        # Create editable dataframe
+        edited_df = allocation_df.copy()
+        
+        # Add calculated allocation column (preserve original calculation)
+        edited_df['calculated_allocation'] = edited_df['allocated_qty'].copy()
+        
+        # Prepare display columns with new structure
+        display_columns = [
+            'pt_code', 
+            'product_name',
+            'package_size',  # Added package size
+            'customer', 
+            'etd',  # This is requested ETD
+            'allocated_etd',  # This is editable allocated ETD
+            'requested_qty', 
+            'calculated_allocation',  # System calculated
+            'allocated_qty',  # Actual allocated (editable)
+            'standard_uom'
+        ]
+        
+        # Initialize allocated_etd if not exists
+        if 'allocated_etd' not in edited_df.columns:
+            edited_df['allocated_etd'] = edited_df['etd'].copy()
+        
+        # Use st.data_editor for editing
+        edited_result = st.data_editor(
+            edited_df[display_columns],
+            column_config={
+                "pt_code": st.column_config.TextColumn("PT Code", disabled=True),
+                "product_name": st.column_config.TextColumn("Product", disabled=True),
+                "package_size": st.column_config.TextColumn("Pack Size", disabled=True),
+                "customer": st.column_config.TextColumn("Customer", disabled=True),
+                "etd": st.column_config.DateColumn(
+                    "Requested ETD", 
+                    disabled=True,
+                    help="Original ETD from demand"
+                ),
+                "allocated_etd": st.column_config.DateColumn(
+                    "Allocated ETD",
+                    help="Adjust if allocation will be delivered on different date"
+                ),
+                "requested_qty": st.column_config.NumberColumn(
+                    "Requested",
+                    disabled=True,
+                    format="%.0f"
+                ),
+                "calculated_allocation": st.column_config.NumberColumn(
+                    "System Calculated",
+                    disabled=True,
+                    format="%.0f",
+                    help="Quantity calculated by selected method"
+                ),
+                "allocated_qty": st.column_config.NumberColumn(
+                    "Actual Allocated",
+                    min_value=0,
+                    step=1,
+                    format="%.0f",
+                    help="Enter actual allocation (whole numbers only)"
+                ),
+                "standard_uom": st.column_config.TextColumn("UOM", disabled=True)
+            },
+            hide_index=True,
+            use_container_width=True,
+            num_rows="fixed"
+        )
+        
+        # Validate that allocated quantities are whole numbers
+        edited_result['allocated_qty'] = edited_result['allocated_qty'].round(0).astype(int)
+        
+        # Update the dataframe with edits
+        edited_df['allocated_qty'] = edited_result['allocated_qty']
+        edited_df['allocated_etd'] = edited_result['allocated_etd']
+        
+        # Recalculate fulfillment rate based on actual allocated
+        edited_df['fulfillment_rate'] = (
+            edited_df['allocated_qty'] / edited_df['requested_qty'] * 100
+        ).fillna(0).clip(upper=100)
+        
+        # Validate allocations against supply capability
+        validation_warnings = AllocationComponents.validate_against_supply_capability(edited_df)
+        
+        if validation_warnings:
+            st.warning("⚠️ Validation Issues:")
+            for warning in validation_warnings:
+                st.write(f"- {warning}")
+        
+        return edited_df
+
     @staticmethod
     def create_fulfillment_chart_by_product(allocation_df: pd.DataFrame) -> go.Figure:
-        """Create fulfillment chart grouped by product"""
+        """Create fulfillment chart grouped by product using actual allocated quantities"""
         
         # Group by product
         product_summary = allocation_df.groupby(['pt_code', 'product_name']).agg({
             'requested_qty': 'sum',
-            'allocated_qty': 'sum'
+            'allocated_qty': 'sum'  # This is now actual allocated
         }).reset_index()
         
         product_summary['fulfillment_rate'] = (
@@ -200,9 +276,9 @@ class AllocationComponents:
             textposition='auto'
         ))
         
-        # Add allocated quantity bars
+        # Add actual allocated quantity bars
         fig.add_trace(go.Bar(
-            name='Allocated',
+            name='Actual Allocated',
             y=product_summary['pt_code'],
             x=product_summary['allocated_qty'],
             orientation='h',
@@ -212,7 +288,7 @@ class AllocationComponents:
         ))
         
         fig.update_layout(
-            title='Fulfillment Rate by Product',
+            title='Fulfillment Rate by Product (Actual Allocated)',
             xaxis_title='Quantity',
             yaxis_title='Product Code',
             barmode='overlay',
@@ -221,7 +297,8 @@ class AllocationComponents:
         )
         
         return fig
-    
+
+ 
     @staticmethod
     def create_fulfillment_chart_by_customer(allocation_df: pd.DataFrame) -> go.Figure:
         """Create fulfillment chart grouped by customer"""

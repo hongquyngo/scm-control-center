@@ -490,6 +490,12 @@ def show_step1_select_products():
 def show_step2_choose_method():
     """Step 2: Choose allocation method and type"""
     st.markdown("#### 🎯 Choose Allocation Method & Type")
+
+    # Add general info
+    st.info("""
+    💡 **Important**: All allocation methods provide initial calculations to help you distribute quantities. 
+    You can always manually adjust the allocated amounts in the preview step before saving.
+    """)
     
     col1, col2 = st.columns(2)
     
@@ -556,6 +562,8 @@ def show_step2_choose_method():
         if st.button("Next ➡️", type="primary", use_container_width=True):
             st.session_state['allocation_step'] = 3
             st.rerun()
+
+
 
 def show_step3_set_parameters():
     """Step 3: Set allocation parameters based on method"""
@@ -857,9 +865,8 @@ def show_step4_map_supply():
             st.session_state['allocation_step'] = 5
             st.rerun()
 
-
 def show_step4_preview():
-    """Step 4: Preview allocation results (for SOFT allocation)"""
+    """Step 4: Preview allocation results with dynamic updates"""
     st.markdown("#### 👀 Preview Allocation Results")
     
     # Get data and parameters
@@ -888,60 +895,92 @@ def show_step4_preview():
         st.error("Failed to calculate allocations")
         return
     
-    # Store results
+    # Round allocated quantities to whole numbers
+    allocation_results['allocated_qty'] = allocation_results['allocated_qty'].round(0).astype(int)
+    
+    # Ensure package_size column exists
+    if 'package_size' not in allocation_results.columns:
+        allocation_results['package_size'] = ''
+    
+    # Store initial results
     st.session_state['draft_allocation']['results'] = allocation_results
     
-    # Summary metrics
-    col1, col2, col3, col4 = st.columns(4)
-    
-    total_demand = allocation_results['requested_qty'].sum()
-    total_allocated = allocation_results['allocated_qty'].sum()
-    total_orders = len(allocation_results)
-    avg_fulfillment = (allocation_results['allocated_qty'] / allocation_results['requested_qty']).mean() * 100
-    
-    with col1:
-        st.metric("Total Demand", format_number(total_demand))
-    with col2:
-        st.metric("Total Allocated", format_number(total_allocated))
-    with col3:
-        st.metric("Orders", total_orders)
-    with col4:
-        st.metric("Avg Fulfillment", f"{avg_fulfillment:.1f}%")
+    # Create a container for dynamic metrics
+    metrics_container = st.container()
     
     # Allocation details table
     st.markdown("##### Allocation Details")
+    st.info("💡 **Note**: System calculated allocations are shown. Adjust 'Actual Allocated' and 'Allocated ETD' as needed.")
     
-    # For manual method, allow editing
-    if method == 'MANUAL':
-        edited_df = AllocationComponents.show_editable_allocation_table(allocation_results)
-        st.session_state['draft_allocation']['results'] = edited_df
-    else:
-        # Display read-only table
-        display_df = allocation_results[['pt_code', 'product_name', 'customer', 'etd', 
-                                       'requested_qty', 'allocated_qty', 'fulfillment_rate']].copy()
-        
-        # Format columns
-        display_df['requested_qty'] = display_df['requested_qty'].apply(format_number)
-        display_df['allocated_qty'] = display_df['allocated_qty'].apply(format_number)
-        display_df['fulfillment_rate'] = display_df['fulfillment_rate'].apply(lambda x: f"{x:.1f}%")
-        
-        st.dataframe(display_df, use_container_width=True, height=400)
+    # Allow editing
+    edited_df = AllocationComponents.show_editable_allocation_table(allocation_results)
+    st.session_state['draft_allocation']['results'] = edited_df
     
-    # Visualization
+    # Update metrics dynamically based on edited values
+    with metrics_container:
+        col1, col2, col3, col4 = st.columns(4)
+        
+        total_demand = edited_df['requested_qty'].sum()
+        total_allocated = edited_df['allocated_qty'].sum()  # Use actual allocated
+        total_orders = len(edited_df)
+        
+        # Calculate fulfillment based on actual allocated
+        if total_demand > 0:
+            avg_fulfillment = (total_allocated / total_demand) * 100
+        else:
+            avg_fulfillment = 0
+        
+        with col1:
+            st.metric("Total Demand", format_number(total_demand))
+        with col2:
+            st.metric(
+                "Total Allocated", 
+                format_number(total_allocated),
+                delta=f"{total_allocated - edited_df['calculated_allocation'].sum():.0f} vs calculated" if 'calculated_allocation' in edited_df.columns else None
+            )
+        with col3:
+            st.metric("Orders", total_orders)
+        with col4:
+            st.metric("Avg Fulfillment", f"{avg_fulfillment:.1f}%")
+    
+    # Visualization based on actual allocated values
     col1, col2 = st.columns(2)
     
     with col1:
-        # Fulfillment by product
-        fig1 = AllocationComponents.create_fulfillment_chart_by_product(allocation_results)
+        # Fulfillment by product using actual allocated
+        fig1 = AllocationComponents.create_fulfillment_chart_by_product(edited_df)
         st.plotly_chart(fig1, use_container_width=True)
     
     with col2:
-        # Fulfillment by customer
-        fig2 = AllocationComponents.create_fulfillment_chart_by_customer(allocation_results)
+        # Fulfillment by customer using actual allocated
+        fig2 = AllocationComponents.create_fulfillment_chart_by_customer(edited_df)
         st.plotly_chart(fig2, use_container_width=True)
     
+    # Show allocation variance analysis
+    if 'calculated_allocation' in edited_df.columns:
+        with st.expander("📊 Allocation Variance Analysis", expanded=False):
+            variance_df = edited_df[['pt_code', 'customer', 'calculated_allocation', 'allocated_qty']].copy()
+            variance_df['variance'] = variance_df['allocated_qty'] - variance_df['calculated_allocation']
+            variance_df['variance_pct'] = (variance_df['variance'] / variance_df['calculated_allocation'] * 100).fillna(0)
+            
+            # Show only items with variance
+            variance_df = variance_df[variance_df['variance'] != 0]
+            
+            if not variance_df.empty:
+                st.dataframe(
+                    variance_df.style.format({
+                        'calculated_allocation': '{:.0f}',
+                        'allocated_qty': '{:.0f}',
+                        'variance': '{:+.0f}',
+                        'variance_pct': '{:+.1f}%'
+                    }),
+                    use_container_width=True
+                )
+            else:
+                st.info("No variance - all allocations match system calculations")
+    
     # Validation warnings
-    warnings = AllocationValidator.validate_allocation_results(allocation_results, filtered_supply)
+    warnings = AllocationValidator.validate_allocation_results(edited_df, filtered_supply)
     if warnings:
         st.warning("⚠️ Validation Warnings:")
         for warning in warnings:
@@ -954,6 +993,7 @@ def show_step4_preview():
         if st.button("Next ➡️", type="primary", use_container_width=True):
             st.session_state['allocation_step'] = 5
             st.rerun()
+
 
 def show_step5_preview_with_mapping():
     """Step 5: Preview allocation with supply mapping (for HARD allocation)"""

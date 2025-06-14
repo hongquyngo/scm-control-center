@@ -1188,7 +1188,7 @@ def get_gap_display_filters():
     with col1:
         show_matched = st.checkbox(
             "🔗 Matched Products",
-            value=True,
+            value=False,
             key="gap_show_matched",
             help="Products with both demand and supply"
         )

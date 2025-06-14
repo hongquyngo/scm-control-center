@@ -70,7 +70,7 @@ class AllocationMethods:
     
     @staticmethod
     def _allocate_fcfs(demand_df: pd.DataFrame, parameters: Dict) -> pd.DataFrame:
-        """FCFS allocation - prioritize earliest ETD (First Come First Served)"""
+        """FCFS allocation - prioritize earliest ETD"""
         
         # Sort by ETD
         demand_df = demand_df.sort_values('etd')
@@ -97,12 +97,15 @@ class AllocationMethods:
             else:
                 allocated = requested if available >= requested else 0
             
+            # Round to whole number (natural number)
+            allocated = int(allocated)
+            
             # Update
             demand_df.at[idx, 'allocated_qty'] = allocated
             supply_tracker[key] -= allocated
         
         return demand_df
-    
+
     @staticmethod
     def _allocate_priority(demand_df: pd.DataFrame, parameters: Dict) -> pd.DataFrame:
         """Priority-based allocation"""
@@ -176,17 +179,34 @@ class AllocationMethods:
                 # Calculate proportional allocation
                 group['allocated_qty'] = group['requested_qty'] * allocation_ratio
                 
+                # Round down to whole numbers
+                group['allocated_qty'] = group['allocated_qty'].apply(lambda x: int(x))
+                
+                # Distribute remaining units to largest orders first
+                total_allocated = group['allocated_qty'].sum()
+                remaining = int(available_supply) - total_allocated
+                
+                if remaining > 0:
+                    # Sort by requested quantity descending
+                    sorted_indices = group.sort_values('requested_qty', ascending=False).index
+                    
+                    # Distribute remaining units one by one
+                    for i in range(remaining):
+                        idx = sorted_indices[i % len(sorted_indices)]
+                        group.at[idx, 'allocated_qty'] += 1
+                
                 # Ensure we don't over-allocate
                 total_allocated = group['allocated_qty'].sum()
                 if total_allocated > available_supply:
                     # Scale down proportionally
                     scale_factor = available_supply / total_allocated
                     group['allocated_qty'] = group['allocated_qty'] * scale_factor
+                    group['allocated_qty'] = group['allocated_qty'].apply(lambda x: int(x))
             
             result_dfs.append(group)
         
         return pd.concat(result_dfs, ignore_index=True)
-    
+
     @staticmethod
     def _allocate_manual(demand_df: pd.DataFrame, parameters: Dict) -> pd.DataFrame:
         """Manual allocation - start with pro-rata as base"""
