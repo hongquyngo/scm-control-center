@@ -919,7 +919,7 @@ def calculate_gap_with_carry_forward(df_demand, df_supply, period_type="Weekly",
                 if effective_demand > 0:
                     fulfillment_rate = min(100, (total_available / effective_demand * 100))
                 else:
-                    fulfillment_rate = 100
+                    fulfillment_rate = 100 if total_available > 0 else 0
                 
                 # For display purposes
                 display_demand = effective_demand
@@ -933,7 +933,7 @@ def calculate_gap_with_carry_forward(df_demand, df_supply, period_type="Weekly",
                 if row['unallocated_demand'] > 0:
                     fulfillment_rate = min(100, (total_available / row['unallocated_demand'] * 100))
                 else:
-                    fulfillment_rate = 100
+                    fulfillment_rate = 100 if total_available > 0 else 0
                 
                 # Update carry forward (original logic)
                 carry_forward = max(0, gap)
@@ -3326,37 +3326,87 @@ if st.session_state.get('gap_analysis_ran', False):
         else:
             st.warning("No data available for the selected filters and sources.")
 
-# Debug info panel
+
+# Debug info panel - COMPLETE REPLACEMENT
 if debug_mode:
     with st.expander("🐛 Debug Information", expanded=True):
         st.markdown("### Debug Information")
         
+        # Create debug info safely
+        debug_info = {
+            "Date Modes": {
+                "Demand": 'Adjusted' if use_adjusted_demand else 'Original',
+                "Supply": 'Adjusted' if use_adjusted_supply else 'Original'
+            },
+            "Data Status": {},
+            "Session Keys": {}
+        }
+        
+        # Check gap_analysis_data safely
+        try:
+            gap_data = st.session_state.get('gap_analysis_data')
+            if gap_data is not None:
+                if isinstance(gap_data, dict):
+                    demand_data = gap_data.get('demand', pd.DataFrame())
+                    supply_data = gap_data.get('supply', pd.DataFrame())
+                    debug_info["Data Status"]["Demand"] = f"{len(demand_data)} rows" if isinstance(demand_data, pd.DataFrame) else "Invalid type"
+                    debug_info["Data Status"]["Supply"] = f"{len(supply_data)} rows" if isinstance(supply_data, pd.DataFrame) else "Invalid type"
+                else:
+                    debug_info["Data Status"]["gap_analysis_data"] = f"Type: {type(gap_data).__name__}"
+            else:
+                debug_info["Data Status"]["gap_analysis_data"] = "None"
+        except Exception as e:
+            debug_info["Data Status"]["Error"] = str(e)
+        
+        # Check gap_df_cached safely
+        try:
+            gap_df = st.session_state.get('gap_df_cached')
+            if gap_df is not None and hasattr(gap_df, 'shape'):
+                debug_info["Data Status"]["GAP Results"] = f"{len(gap_df)} rows"
+            else:
+                debug_info["Data Status"]["GAP Results"] = "Not available"
+        except Exception as e:
+            debug_info["Data Status"]["GAP Error"] = str(e)
+        
+        # Get session state keys
+        gap_keys = sorted([k for k in st.session_state.keys() if 'gap' in k.lower()])
+        for key in gap_keys[:10]:
+            try:
+                value = st.session_state.get(key)
+                if value is None:
+                    debug_info["Session Keys"][key] = "None"
+                elif isinstance(value, pd.DataFrame):
+                    debug_info["Session Keys"][key] = f"DataFrame({len(value)} rows)"
+                elif isinstance(value, dict):
+                    debug_info["Session Keys"][key] = f"Dict({len(value)} keys)"
+                elif isinstance(value, (str, int, float, bool)):
+                    debug_info["Session Keys"][key] = str(value)
+                else:
+                    debug_info["Session Keys"][key] = type(value).__name__
+            except:
+                debug_info["Session Keys"][key] = "Error reading"
+        
+        if len(gap_keys) > 10:
+            debug_info["Session Keys"]["..."] = f"{len(gap_keys) - 10} more keys"
+        
+        # Display debug info in columns
         col1, col2 = st.columns(2)
+        
         with col1:
-            st.write("**Date Modes:**")
-            st.write(f"- Demand: {'Adjusted' if use_adjusted_demand else 'Original'}")
-            st.write(f"- Supply: {'Adjusted' if use_adjusted_supply else 'Original'}")
-            
-            if 'gap_analysis_data' in st.session_state:
-                demand_data = st.session_state['gap_analysis_data'].get('demand', pd.DataFrame())
-                supply_data = st.session_state['gap_analysis_data'].get('supply', pd.DataFrame())
-                
-                st.write("\n**Data Shapes:**")
-                st.write(f"- Demand: {len(demand_data)} rows")
-                st.write(f"- Supply: {len(supply_data)} rows")
-                
-                if 'gap_df_cached' in st.session_state:
-                    gap_data = st.session_state['gap_df_cached']
-                    st.write(f"- GAP: {len(gap_data)} rows")
+            st.write("**Date Modes & Data Status:**")
+            for category in ["Date Modes", "Data Status"]:
+                if category in debug_info:
+                    for key, value in debug_info[category].items():
+                        st.write(f"- {key}: {value}")
         
         with col2:
             st.write("**Session State Keys:**")
-            gap_keys = [k for k in st.session_state.keys() if 'gap' in k.lower()]
-            for key in gap_keys[:10]:  # Show first 10
-                st.write(f"- {key}")
-            
-            if len(gap_keys) > 10:
-                st.write(f"... and {len(gap_keys) - 10} more")
+            if "Session Keys" in debug_info:
+                for key, value in debug_info["Session Keys"].items():
+                    st.write(f"- {key}: {value}")
+        
+        # Show timestamp
+        st.caption(f"🕐 Debug generated at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
 
 # Help section
 DisplayComponents.show_help_section(

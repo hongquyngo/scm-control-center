@@ -373,59 +373,120 @@ def show_step1_select_products():
     """Step 1: Select products for allocation with pagination and smart filters"""
     st.markdown("#### 📦 Select Products for Allocation")
     
-    # Get and validate data
-    gap_data, demand_filtered, supply_filtered = get_allocation_data()
-    if gap_data.empty:
-        show_no_data_message()
-        return
+    # Initialize product_summary at the very beginning
+    product_summary = pd.DataFrame()
     
-    # Calculate fulfillment and filter products
-    products_with_supply = prepare_products_data(gap_data, demand_filtered, supply_filtered)
-    if products_with_supply.empty:
-        show_no_products_message()
-        return
-    
-    # Show filter options (checkbox and items per page only)
-    use_smart_filters, items_per_page = show_filter_options()
-    
-    # Start with all products
-    filtered_data = products_with_supply.copy()
-    filter_type = 'All'  # Default
-    
-    # Apply filters based on settings
-    if use_smart_filters:
-        # apply_smart_filters now returns both filtered_data and filter_type
-        filtered_data, filter_type = apply_smart_filters(filtered_data, products_with_supply)
-    
-    # Check if we have data after filters
-    if filtered_data.empty:
-        show_no_filtered_data_message(filter_type, use_smart_filters)
-        return
-    
-    # Prepare product summary
-    product_summary = prepare_product_summary(filtered_data)
-    
-    # Show summary metrics
-    show_summary_metrics(product_summary)
-    
-    # Handle pagination
-    total_products = len(product_summary)
-    total_pages = max(1, (total_products + items_per_page - 1) // items_per_page)
-    ensure_valid_current_page(total_pages)
-    
-    # Show pagination controls
-    show_pagination_controls(total_pages, total_products)
-    
-    # Get current page data
-    start_idx = (st.session_state['alloc_current_page'] - 1) * items_per_page
-    end_idx = min(start_idx + items_per_page, total_products)
-    page_products = product_summary.iloc[start_idx:end_idx]
-    
-    # Show selection interface
-    selected_products = show_product_selection(page_products, filtered_data)
-    
-    # Show next button
-    show_step1_next_button(selected_products)
+    try:
+        # Get and validate data
+        gap_data, demand_filtered, supply_filtered = get_allocation_data()
+        
+        if gap_data.empty:
+            show_no_data_message()
+            return
+        
+        # Debug GAP data if debug mode is on
+        if st.session_state.get('debug_mode', False):
+            with st.expander("🐛 Debug - GAP Data Info", expanded=False):
+                st.write(f"**GAP data shape:** {gap_data.shape}")
+                st.write(f"**Columns:** {list(gap_data.columns)[:10]}...")  # Show first 10
+                
+                # Check for required columns
+                required_cols = ['pt_code', 'total_demand_qty', 'total_available']
+                missing_cols = [col for col in required_cols if col not in gap_data.columns]
+                if missing_cols:
+                    st.error(f"Missing required columns: {missing_cols}")
+                
+                # Sample data
+                if not gap_data.empty:
+                    st.write("**Sample GAP data (first 3 rows):**")
+                    display_cols = [col for col in ['pt_code', 'period', 'total_demand_qty', 'total_available', 'gap_quantity'] 
+                                   if col in gap_data.columns]
+                    st.dataframe(gap_data[display_cols].head(3))
+        
+        # Calculate fulfillment and filter products
+        products_with_supply = prepare_products_data(gap_data, demand_filtered, supply_filtered)
+        
+        if products_with_supply.empty:
+            show_no_products_message()
+            return
+        
+        # Show filter options (checkbox and items per page only)
+        use_smart_filters, items_per_page = show_filter_options()
+        
+        # Start with all products
+        filtered_data = products_with_supply.copy()
+        filter_type = 'All'  # Default
+        
+        # Apply filters based on settings
+        if use_smart_filters:
+            # apply_smart_filters now returns both filtered_data and filter_type
+            filtered_data, filter_type = apply_smart_filters(filtered_data, products_with_supply)
+        
+        # Check if we have data after filters
+        if filtered_data.empty:
+            show_no_filtered_data_message(filter_type, use_smart_filters)
+            return
+        
+        # Prepare product summary - THIS IS WHERE product_summary GETS ASSIGNED
+        product_summary = prepare_product_summary(filtered_data)
+        
+        # Check if product_summary is valid
+        if product_summary.empty:
+            st.warning("No products available after processing. This might be due to:")
+            st.write("- All products have 0 demand")
+            st.write("- Data processing error")
+            
+            if st.session_state.get('debug_mode', False):
+                st.write("🐛 Debug - filtered_data shape:", filtered_data.shape)
+                st.write("🐛 Debug - product_summary shape:", product_summary.shape)
+            return
+        
+        # Show summary metrics
+        show_summary_metrics(product_summary)
+        
+        # Handle pagination
+        total_products = len(product_summary)
+        total_pages = max(1, (total_products + items_per_page - 1) // items_per_page)
+        ensure_valid_current_page(total_pages)
+        
+        # Show pagination controls
+        show_pagination_controls(total_pages, total_products)
+        
+        # Get current page data
+        start_idx = (st.session_state.get('alloc_current_page', 1) - 1) * items_per_page
+        end_idx = min(start_idx + items_per_page, total_products)
+        page_products = product_summary.iloc[start_idx:end_idx]
+        
+        # Show selection interface
+        selected_products = show_product_selection(page_products, filtered_data)
+        
+        # Show next button
+        show_step1_next_button(selected_products)
+        
+    except Exception as e:
+        st.error(f"Error in product selection: {str(e)}")
+        
+        if st.session_state.get('debug_mode', False):
+            import traceback
+            with st.expander("🐛 Full Error Traceback", expanded=True):
+                st.code(traceback.format_exc())
+                
+                # Show session state info
+                st.write("**Relevant Session State:**")
+                relevant_keys = ['gap_analysis_result', 'demand_filtered', 'supply_filtered', 
+                               'gap_analysis_data', 'selected_allocation_products']
+                for key in relevant_keys:
+                    if key in st.session_state:
+                        value = st.session_state[key]
+                        if isinstance(value, pd.DataFrame):
+                            st.write(f"- {key}: DataFrame with shape {value.shape}")
+                        elif value is None:
+                            st.write(f"- {key}: None")
+                        else:
+                            st.write(f"- {key}: {type(value).__name__}")
+                    else:
+                        st.write(f"- {key}: Not in session state")
+
 
 def show_step2_choose_method():
     """Step 2: Choose allocation method and type"""
