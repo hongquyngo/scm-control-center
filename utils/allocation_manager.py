@@ -36,6 +36,7 @@ class AllocationManager:
         Returns:
             pd.DataFrame: Active allocations with details
         """
+
         try:
             query = """
                 SELECT * FROM active_allocations_view
@@ -159,6 +160,254 @@ class AllocationManager:
         except Exception as e:
             logger.error(f"Error getting allocation plans: {str(e)}")
             return pd.DataFrame()
+
+    def validate_before_allocation(self, allocation_id: int) -> Tuple[bool, List[str]]:
+        """Validate allocation plan before changing from DRAFT to ALLOCATED
+        
+        This method performs comprehensive validation to ensure the allocation plan
+        is ready to be activated (allocated).
+        
+        Args:
+            allocation_id: ID of the allocation plan to validate
+            
+        Returns:
+            Tuple[bool, List[str]]: (is_valid, list_of_errors)
+            - is_valid: True if plan can be allocated, False otherwise
+            - list_of_errors: List of validation error messages
+        """
+        errors = []
+        
+        try:
+            with self.engine.connect() as conn:
+                # 1. Check if plan exists and get basic info
+                plan_query = text("""
+                    SELECT 
+                        ap.id,
+                        ap.allocation_number,
+                        vaps.display_status,
+                        vaps.total_count,
+                        vaps.draft_count,
+                        vaps.allocated_count,
+                        ap.notes,
+                        JSON_UNQUOTE(JSON_EXTRACT(ap.allocation_context, '$.allocation_info.type')) as allocation_type
+                    FROM allocation_plans ap
+                    LEFT JOIN v_allocation_plans_summary vaps ON ap.id = vaps.id
+                    WHERE ap.id = :allocation_id
+                """)
+                
+                result = conn.execute(plan_query, {'allocation_id': allocation_id})
+                plan = result.fetchone()
+                
+                if not plan:
+                    errors.append("Allocation plan not found")
+                    return False, errors
+                
+                plan_dict = dict(plan._mapping) if hasattr(plan, '_mapping') else dict(zip(result.keys(), plan))
+                
+                # 2. Check if plan status allows allocation
+                if plan_dict['display_status'] not in ['ALL_DRAFT', 'MIXED_DRAFT']:
+                    errors.append(f"Plan status '{plan_dict['display_status']}' does not allow allocation. Only DRAFT plans can be allocated.")
+                    return False, errors
+                
+                # 3. Check if plan has any details
+                if plan_dict['total_count'] == 0:
+                    errors.append("Plan has no allocation details")
+                    return False, errors
+                
+                # 4. Get detailed validation data
+                details_query = text("""
+                    SELECT 
+                        ad.id,
+                        ad.pt_code,
+                        ad.product_id,
+                        ad.customer_code,
+                        ad.customer_name,
+                        ad.allocated_qty,
+                        ad.requested_qty,
+                        ad.allocation_mode,
+                        ad.supply_source_type,
+                        ad.supply_source_id,
+                        ad.status,
+                        ad.etd,
+                        ad.allocated_etd,
+                        p.name as product_name
+                    FROM allocation_details ad
+                    LEFT JOIN products p ON ad.product_id = p.id
+                    WHERE ad.allocation_plan_id = :allocation_id
+                    AND ad.status = 'DRAFT'
+                """)
+                
+                details_result = conn.execute(details_query, {'allocation_id': allocation_id})
+                details = details_result.fetchall()
+                
+                if not details:
+                    errors.append("No DRAFT details found to allocate")
+                    return False, errors
+                
+                # Convert to list of dicts for easier processing
+                details_list = []
+                for row in details:
+                    details_list.append(dict(row._mapping) if hasattr(row, '_mapping') else dict(zip(details_result.keys(), row)))
+                
+                # 5. Validate each detail
+                zero_allocation_count = 0
+                missing_customer_count = 0
+                missing_product_count = 0
+                over_allocation_items = []
+                hard_allocation_issues = []
+                missing_dates = []
+                
+                for detail in details_list:
+                    # Check for zero allocations
+                    if detail['allocated_qty'] <= 0:
+                        zero_allocation_count += 1
+                    
+                    # Check for missing customer mapping
+                    if not detail['customer_code']:
+                        missing_customer_count += 1
+                    
+                    # Check for missing product
+                    if not detail['product_id']:
+                        missing_product_count += 1
+                    
+                    # Check for over-allocation
+                    if detail['requested_qty'] > 0 and detail['allocated_qty'] > detail['requested_qty']:
+                        over_allocation_items.append(
+                            f"{detail['pt_code']} - {detail['customer_name']}: "
+                            f"allocated {detail['allocated_qty']} > requested {detail['requested_qty']}"
+                        )
+                    
+                    # Check HARD allocation requirements
+                    if detail['allocation_mode'] == 'HARD':
+                        if not detail['supply_source_type'] or not detail['supply_source_id']:
+                            hard_allocation_issues.append(
+                                f"{detail['pt_code']} - {detail['customer_name']}: "
+                                f"HARD allocation missing supply mapping"
+                            )
+                    
+                    # Check dates
+                    if not detail['etd'] or not detail['allocated_etd']:
+                        missing_dates.append(f"{detail['pt_code']} - {detail['customer_name']}")
+                
+                # 6. Compile validation errors
+                if zero_allocation_count > 0:
+                    errors.append(f"{zero_allocation_count} items have zero allocated quantity")
+                
+                if missing_customer_count > 0:
+                    errors.append(f"{missing_customer_count} items missing customer code mapping")
+                
+                if missing_product_count > 0:
+                    errors.append(f"{missing_product_count} items missing product ID")
+                
+                if over_allocation_items:
+                    errors.append(f"Over-allocation found in {len(over_allocation_items)} items")
+                    # Add first 3 examples
+                    for item in over_allocation_items[:3]:
+                        errors.append(f"  - {item}")
+                    if len(over_allocation_items) > 3:
+                        errors.append(f"  ... and {len(over_allocation_items) - 3} more")
+                
+                if hard_allocation_issues:
+                    errors.append(f"HARD allocation issues in {len(hard_allocation_issues)} items")
+                    for issue in hard_allocation_issues[:3]:
+                        errors.append(f"  - {issue}")
+                    if len(hard_allocation_issues) > 3:
+                        errors.append(f"  ... and {len(hard_allocation_issues) - 3} more")
+                
+                if missing_dates:
+                    errors.append(f"{len(missing_dates)} items missing ETD or allocated ETD")
+                
+                # 7. Check allocation type specific validations
+                allocation_type = plan_dict.get('allocation_type', 'SOFT')
+                
+                if allocation_type in ['HARD', 'MIXED']:
+                    # For HARD/MIXED, validate supply availability
+                    supply_validation_query = text("""
+                        SELECT 
+                            ad.id,
+                            ad.pt_code,
+                            ad.allocated_qty,
+                            ad.supply_source_type,
+                            ad.supply_source_id,
+                            -- Check if supply source still exists and has enough quantity
+                            CASE 
+                                WHEN ad.supply_source_type = 'Inventory' THEN (
+                                    SELECT ih.quantity_actual 
+                                    FROM inventory_history ih 
+                                    WHERE ih.id = ad.supply_source_id 
+                                    AND ih.delete_flag = 0
+                                )
+                                WHEN ad.supply_source_type = 'Pending PO' THEN (
+                                    SELECT pol.quantity - COALESCE(pol.received_quantity, 0)
+                                    FROM purchase_order_lines pol 
+                                    WHERE pol.id = ad.supply_source_id 
+                                    AND pol.delete_flag = 0
+                                )
+                                -- Add other supply types as needed
+                                ELSE NULL
+                            END as available_qty
+                        FROM allocation_details ad
+                        WHERE ad.allocation_plan_id = :allocation_id
+                        AND ad.allocation_mode = 'HARD'
+                        AND ad.status = 'DRAFT'
+                    """)
+                    
+                    supply_result = conn.execute(supply_validation_query, {'allocation_id': allocation_id})
+                    supply_issues = []
+                    
+                    for row in supply_result:
+                        supply_dict = dict(row._mapping) if hasattr(row, '_mapping') else dict(zip(supply_result.keys(), row))
+                        
+                        if supply_dict['available_qty'] is None:
+                            supply_issues.append(
+                                f"{supply_dict['pt_code']}: Supply source not found"
+                            )
+                        elif supply_dict['available_qty'] < supply_dict['allocated_qty']:
+                            supply_issues.append(
+                                f"{supply_dict['pt_code']}: Insufficient supply "
+                                f"(need {supply_dict['allocated_qty']}, available {supply_dict['available_qty']})"
+                            )
+                    
+                    if supply_issues:
+                        errors.append(f"Supply availability issues for HARD allocations:")
+                        for issue in supply_issues[:5]:
+                            errors.append(f"  - {issue}")
+                        if len(supply_issues) > 5:
+                            errors.append(f"  ... and {len(supply_issues) - 5} more")
+                
+                # 8. Business rule validations
+                # Check if all items have same allocation mode for SOFT/HARD types
+                if allocation_type in ['SOFT', 'HARD']:
+                    mode_check_query = text("""
+                        SELECT COUNT(DISTINCT allocation_mode) as mode_count
+                        FROM allocation_details
+                        WHERE allocation_plan_id = :allocation_id
+                        AND status = 'DRAFT'
+                    """)
+                    
+                    mode_result = conn.execute(mode_check_query, {'allocation_id': allocation_id})
+                    mode_row = mode_result.fetchone()
+                    
+                    if mode_row and mode_row[0] > 1:
+                        errors.append(
+                            f"Inconsistent allocation modes found. "
+                            f"Plan type is '{allocation_type}' but details have mixed modes."
+                        )
+                
+                # Return validation result
+                is_valid = len(errors) == 0
+                
+                if is_valid:
+                    logger.info(f"Allocation plan {allocation_id} passed validation")
+                else:
+                    logger.warning(f"Allocation plan {allocation_id} failed validation with {len(errors)} errors")
+                
+                return is_valid, errors
+                
+        except Exception as e:
+            logger.error(f"Error validating allocation plan {allocation_id}: {str(e)}")
+            errors.append(f"Validation error: {str(e)}")
+            return False, errors
 
     def get_allocation_details(self, allocation_id: int) -> Tuple[Dict, pd.DataFrame]:
         """Get allocation plan and its details with computed status
@@ -625,8 +874,6 @@ class AllocationManager:
         except Exception as e:
             logger.error(f"Error getting product mapping: {str(e)}")
             return {}
-
-
 
     def update_allocation_plan(self, allocation_id: int, updates: Dict) -> bool:
         """Update allocation plan"""
