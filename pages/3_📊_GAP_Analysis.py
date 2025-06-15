@@ -886,17 +886,17 @@ def calculate_gap_with_carry_forward(df_demand, df_supply, period_type="Weekly",
         
         # Initialize tracking variables
         carry_forward = 0  # Positive inventory carried forward
-        backlog = 0        # Negative balance (unfulfilled demand)
-        previous_gap = 0   # Track previous period's gap
+        backlog = 0        # Negative balance (unfulfilled demand) from previous period
         
         for idx, (_, row) in enumerate(product_data.iterrows()):
-            # Store the begin inventory (carry forward from previous period)
+            # Store values at beginning of period
             begin_inventory = carry_forward
+            backlog_from_previous = backlog  # Backlog từ kỳ trước để display
             
             if track_backlog:
                 # ENHANCED LOGIC: Track both positive and negative balances
                 
-                # Calculate effective demand (current demand + backlog)
+                # Calculate effective demand (current demand + backlog from previous)
                 effective_demand = row['unallocated_demand'] + backlog
                 
                 # Total available = current supply + carried forward inventory
@@ -911,19 +911,15 @@ def calculate_gap_with_carry_forward(df_demand, df_supply, period_type="Weekly",
                     carry_forward = gap
                     backlog = 0
                 else:
-                    # Shortage: clear carry forward, accumulate backlog
+                    # Shortage: clear carry forward, set backlog to negative gap
                     carry_forward = 0
-                    backlog = abs(gap)
+                    backlog = abs(gap)  # This is the backlog for NEXT period
                 
                 # Calculate fulfillment rate based on effective demand
                 if effective_demand > 0:
                     fulfillment_rate = min(100, (total_available / effective_demand * 100))
                 else:
                     fulfillment_rate = 100 if total_available > 0 else 0
-                
-                # For display purposes
-                display_demand = effective_demand
-                current_period_backlog = backlog  # Backlog that will carry to NEXT period
                 
             else:
                 # ORIGINAL LOGIC: Only positive carry forward
@@ -938,9 +934,9 @@ def calculate_gap_with_carry_forward(df_demand, df_supply, period_type="Weekly",
                 # Update carry forward (original logic)
                 carry_forward = max(0, gap)
                 
-                # For display purposes
-                display_demand = row['unallocated_demand']
-                current_period_backlog = 0
+                # No backlog tracking
+                effective_demand = row['unallocated_demand']
+                backlog_from_previous = 0
             
             # Determine status
             if gap >= 0:
@@ -955,11 +951,11 @@ def calculate_gap_with_carry_forward(df_demand, df_supply, period_type="Weekly",
                 'package_size': row.get('package_size', ''),
                 'standard_uom': row.get('standard_uom', ''),
                 'period': row['period'],
-                'begin_inventory': begin_inventory,  # Use the stored value
+                'begin_inventory': begin_inventory,
                 'supply_in_period': row['supply_quantity'],
                 'total_available': total_available,
                 'original_demand_qty': row['demand_quantity'],
-                'total_demand_qty': display_demand,
+                'total_demand_qty': effective_demand if track_backlog else row['unallocated_demand'],
                 'gap_quantity': gap,
                 'fulfillment_rate_percent': fulfillment_rate,
                 'fulfillment_status': status
@@ -968,10 +964,10 @@ def calculate_gap_with_carry_forward(df_demand, df_supply, period_type="Weekly",
             # Add backlog info if tracking
             if track_backlog:
                 # Show backlog FROM PREVIOUS period that was added to current demand
-                result_row['backlog_qty'] = backlog if idx > 0 else 0
+                result_row['backlog_qty'] = backlog_from_previous  # Fixed: use stored value
                 result_row['effective_demand'] = effective_demand
-                # Track backlog that will go to NEXT period
-                result_row['backlog_to_next'] = current_period_backlog
+                # Optional: Track backlog that will go to NEXT period (for debugging)
+                result_row['backlog_to_next'] = backlog
             
             results.append(result_row)
     
@@ -983,7 +979,16 @@ def calculate_gap_with_carry_forward(df_demand, df_supply, period_type="Weekly",
         st.write(f"- Unique products: {gap_df['pt_code'].nunique()}")
         st.write(f"- Shortage rows: {len(gap_df[gap_df['gap_quantity'] < 0])}")
         if track_backlog:
-            st.write(f"- Rows with backlog: {len(gap_df[gap_df.get('backlog_qty', 0) > 0])}")
+            st.write(f"- Rows with backlog: {len(gap_df[gap_df['backlog_qty'] > 0])}")
+            # Debug: Show backlog progression
+            if st.checkbox("Show backlog progression", key="debug_backlog_progression"):
+                for product in gap_df['pt_code'].unique()[:3]:  # Show first 3 products
+                    st.write(f"\n**Product: {product}**")
+                    product_df = gap_df[gap_df['pt_code'] == product][
+                        ['period', 'original_demand_qty', 'backlog_qty', 'effective_demand', 
+                         'total_available', 'gap_quantity', 'backlog_to_next']
+                    ]
+                    st.dataframe(product_df, use_container_width=True)
     
     return gap_df
 
