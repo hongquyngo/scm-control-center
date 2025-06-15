@@ -3261,7 +3261,10 @@ if st.session_state.get('gap_analysis_ran', False):
         )
         
         # Show allocation impact
-        df_demand_enhanced = data_manager.enhance_demand_with_allocations(df_demand_filtered_display)
+        df_demand_enhanced = data_manager.enhance_demand_with_allocations(
+            df_demand_filtered_display,
+            include_drafts=calc_options.get("include_draft_allocations", False)
+        )
         show_allocation_impact_summary(df_demand_enhanced)
         
         # Check if we need to recalculate GAP based on period change
