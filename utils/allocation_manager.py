@@ -499,10 +499,9 @@ class AllocationManager:
             return None, pd.DataFrame()
 
     def get_available_supply_for_hard_allocation(self, product_codes: List[str], 
-                                            legal_entities: List[str]) -> pd.DataFrame:
+                                                legal_entities: List[str]) -> pd.DataFrame:
         """Get available supply details for HARD allocation mapping from GAP Analysis results"""
         try:
-            # Import streamlit here to avoid circular dependency
             import streamlit as st
             
             # Get supply data from session state (already filtered by GAP Analysis)
@@ -511,6 +510,10 @@ class AllocationManager:
             if supply_filtered.empty:
                 logger.warning("No supply data found in session state. Please run GAP Analysis first.")
                 return pd.DataFrame()
+            
+            # Debug: Check available columns
+            if st.session_state.get('debug_mode', False):
+                logger.info(f"Available columns in supply_filtered: {list(supply_filtered.columns)}")
             
             # Filter for selected products and entities
             mask = (
@@ -521,60 +524,311 @@ class AllocationManager:
             
             filtered_supply = supply_filtered[mask].copy()
             
-            # Rename columns for consistency
-            filtered_supply = filtered_supply.rename(columns={
-                'quantity': 'available_qty',
-                'supply_number': 'reference'
-            })
+            if filtered_supply.empty:
+                return pd.DataFrame()
             
-            # Add source_id based on source_type
-            def get_source_id(row):
-                """Extract source ID from supply_number or other identifiers"""
-                if row['source_type'] == 'Inventory':
-                    return row.get('inventory_history_id', row.get('supply_number', ''))
-                elif row['source_type'] == 'Pending CAN':
-                    return row.get('arrival_note_line_id', row.get('supply_number', ''))
-                elif row['source_type'] == 'Pending PO':
-                    return row.get('po_line_id', row.get('supply_number', ''))
+            # Process each supply source type
+            supply_parts = []
+            
+            # 1. INVENTORY - using inventory_history_id
+            inventory_mask = filtered_supply['source_type'] == 'Inventory'
+            if inventory_mask.any():
+                inv_df = filtered_supply[inventory_mask].copy()
+                
+                # Ensure we have inventory_history_id
+                if 'inventory_history_id' not in inv_df.columns:
+                    if 'supply_number' in inv_df.columns:
+                        inv_df['inventory_history_id'] = pd.to_numeric(inv_df['supply_number'], errors='coerce')
+                    else:
+                        # Generate from index if no other option
+                        inv_df['inventory_history_id'] = inv_df.index
+                
+                # Aggregate by unique inventory item
+                group_cols = ['source_type', 'inventory_history_id', 'pt_code', 'legal_entity']
+                
+                # Add batch/expiry to grouping if they exist
+                if 'batch_number' in inv_df.columns:
+                    group_cols.append('batch_number')
+                if 'expiry_date' in inv_df.columns:
+                    group_cols.append('expiry_date')
+                
+                # Build aggregation dict based on ACTUALLY AVAILABLE columns
+                agg_dict = {'quantity': 'sum'}
+                
+                # Check each optional column before adding to aggregation
+                optional_agg_cols = {
+                    'product_name': 'first',
+                    'warehouse_name': 'first',
+                    'location': 'first',
+                    'created_date': 'first',
+                    'date_ref': 'first',
+                    'date_ref_adjusted': 'first',
+                    'value_in_usd': 'sum'
+                }
+                
+                # Only add columns that actually exist
+                for col, agg_func in optional_agg_cols.items():
+                    if col in inv_df.columns:
+                        agg_dict[col] = agg_func
+                
+                # Perform aggregation only with existing columns
+                inv_aggregated = inv_df.groupby(group_cols).agg(agg_dict).reset_index()
+                
+                # Set source_id for inventory
+                inv_aggregated['source_id'] = inv_aggregated['inventory_history_id'].astype(str)
+                inv_aggregated['reference'] = 'INV-' + inv_aggregated['inventory_history_id'].astype(str)
+                
+                # Add display info based on AVAILABLE columns
+                display_parts = []
+                if 'warehouse_name' in inv_aggregated.columns and not inv_aggregated['warehouse_name'].isna().all():
+                    display_parts.append(f"Warehouse: {inv_aggregated['warehouse_name'].iloc[0]}")
+                if 'location' in inv_aggregated.columns and not inv_aggregated['location'].isna().all():
+                    display_parts.append(f"Location: {inv_aggregated['location'].iloc[0]}")
+                
+                if display_parts:
+                    inv_aggregated['display_info'] = ' | '.join(display_parts)
                 else:
-                    return row.get('supply_number', '')
+                    inv_aggregated['display_info'] = 'Inventory'
+                
+                supply_parts.append(inv_aggregated)
             
-            filtered_supply['source_id'] = filtered_supply.apply(get_source_id, axis=1)
+            # 2. PENDING CAN - using can_line_id or arrival_detail_id
+            can_mask = filtered_supply['source_type'] == 'Pending CAN'
+            if can_mask.any():
+                can_df = filtered_supply[can_mask].copy()
+                
+                # Determine the ID column to use
+                if 'arrival_detail_id' in can_df.columns:
+                    can_df['can_line_id'] = can_df['arrival_detail_id']
+                elif 'can_line_id' not in can_df.columns:
+                    if 'supply_number' in can_df.columns:
+                        can_df['can_line_id'] = pd.to_numeric(can_df['supply_number'], errors='coerce')
+                    else:
+                        can_df['can_line_id'] = can_df.index
+                
+                # Group columns
+                group_cols = ['source_type', 'can_line_id', 'pt_code', 'legal_entity']
+                
+                # Build aggregation dict for existing columns only
+                agg_dict = {'quantity': 'sum'}
+                optional_cols = {
+                    'product_name': 'first',
+                    'arrival_note_number': 'first',
+                    'arrival_date': 'first',
+                    'arrival_date_adjusted': 'first',
+                    'vendor': 'first',
+                    'date_ref': 'first',
+                    'date_ref_adjusted': 'first',
+                    'value_in_usd': 'sum'
+                }
+                
+                for col, agg_func in optional_cols.items():
+                    if col in can_df.columns:
+                        agg_dict[col] = agg_func
+                
+                can_aggregated = can_df.groupby(group_cols).agg(agg_dict).reset_index()
+                
+                # Set source_id
+                can_aggregated['source_id'] = can_aggregated['can_line_id'].astype(str)
+                
+                # Set reference - use arrival_note_number if available
+                if 'arrival_note_number' in can_aggregated.columns:
+                    can_aggregated['reference'] = can_aggregated['arrival_note_number'].fillna(
+                        'CAN-' + can_aggregated['can_line_id'].astype(str)
+                    )
+                else:
+                    can_aggregated['reference'] = 'CAN-' + can_aggregated['can_line_id'].astype(str)
+                
+                # Add display info
+                display_parts = []
+                if 'vendor' in can_aggregated.columns and not can_aggregated['vendor'].isna().all():
+                    display_parts.append(f"Vendor: {can_aggregated['vendor'].iloc[0]}")
+                if 'arrival_date' in can_aggregated.columns and not can_aggregated['arrival_date'].isna().all():
+                    display_parts.append(f"Arrived: {pd.to_datetime(can_aggregated['arrival_date'].iloc[0]).strftime('%Y-%m-%d')}")
+                
+                can_aggregated['display_info'] = ' | '.join(display_parts) if display_parts else 'Pending CAN'
+                
+                supply_parts.append(can_aggregated)
             
-            # Select relevant columns
-            columns_to_keep = [
+            # 3. PENDING PO - using po_line_id
+            po_mask = filtered_supply['source_type'] == 'Pending PO'
+            if po_mask.any():
+                po_df = filtered_supply[po_mask].copy()
+                
+                # Extract po_line_id
+                if 'po_line_id' not in po_df.columns:
+                    if 'supply_number' in po_df.columns:
+                        # Try to extract from supply_number format "PO123_L456"
+                        po_df['po_line_id'] = po_df['supply_number'].str.extract(r'_L(\d+)')[0]
+                        po_df['po_line_id'] = pd.to_numeric(po_df['po_line_id'], errors='coerce')
+                        # Fallback to index for invalid extractions
+                        po_df.loc[po_df['po_line_id'].isna(), 'po_line_id'] = po_df.loc[po_df['po_line_id'].isna()].index
+                    else:
+                        po_df['po_line_id'] = po_df.index
+                
+                # Group columns
+                group_cols = ['source_type', 'po_line_id', 'pt_code', 'legal_entity']
+                
+                # Build aggregation dict
+                agg_dict = {'quantity': 'sum'}
+                optional_cols = {
+                    'product_name': 'first',
+                    'po_number': 'first',
+                    'vendor_name': 'first',
+                    'vendor': 'first',
+                    'eta': 'first',
+                    'eta_adjusted': 'first',
+                    'date_ref': 'first',
+                    'date_ref_adjusted': 'first',
+                    'value_in_usd': 'sum'
+                }
+                
+                for col, agg_func in optional_cols.items():
+                    if col in po_df.columns:
+                        agg_dict[col] = agg_func
+                
+                po_aggregated = po_df.groupby(group_cols).agg(agg_dict).reset_index()
+                
+                # Set source_id
+                po_aggregated['source_id'] = po_aggregated['po_line_id'].astype(str)
+                
+                # Set reference
+                if 'po_number' in po_aggregated.columns:
+                    po_aggregated['reference'] = po_aggregated['po_number'].fillna(
+                        'PO-' + po_aggregated['po_line_id'].astype(str)
+                    )
+                else:
+                    po_aggregated['reference'] = 'PO-' + po_aggregated['po_line_id'].astype(str)
+                
+                # Add display info
+                display_parts = []
+                vendor_col = 'vendor_name' if 'vendor_name' in po_aggregated.columns else 'vendor'
+                if vendor_col in po_aggregated.columns and not po_aggregated[vendor_col].isna().all():
+                    display_parts.append(f"Vendor: {po_aggregated[vendor_col].iloc[0]}")
+                if 'eta' in po_aggregated.columns and not po_aggregated['eta'].isna().all():
+                    display_parts.append(f"ETA: {pd.to_datetime(po_aggregated['eta'].iloc[0]).strftime('%Y-%m-%d')}")
+                
+                po_aggregated['display_info'] = ' | '.join(display_parts) if display_parts else 'Pending PO'
+                
+                supply_parts.append(po_aggregated)
+            
+            # 4. PENDING WH TRANSFER
+            wht_mask = filtered_supply['source_type'] == 'Pending WH Transfer'
+            if wht_mask.any():
+                wht_df = filtered_supply[wht_mask].copy()
+                
+                # Ensure we have warehouse_transfer_line_id
+                if 'warehouse_transfer_line_id' not in wht_df.columns:
+                    if 'supply_number' in wht_df.columns:
+                        wht_df['warehouse_transfer_line_id'] = pd.to_numeric(wht_df['supply_number'], errors='coerce')
+                    else:
+                        wht_df['warehouse_transfer_line_id'] = wht_df.index
+                
+                # Group columns
+                group_cols = ['source_type', 'warehouse_transfer_line_id', 'pt_code', 'legal_entity']
+                
+                # Build aggregation dict
+                agg_dict = {'quantity': 'sum'}
+                optional_cols = {
+                    'product_name': 'first',
+                    'from_warehouse': 'first',
+                    'to_warehouse': 'first',
+                    'transfer_date': 'first',
+                    'transfer_date_adjusted': 'first',
+                    'batch_number': 'first',
+                    'expiry_date': 'first',
+                    'date_ref': 'first',
+                    'date_ref_adjusted': 'first',
+                    'value_in_usd': 'sum'
+                }
+                
+                for col, agg_func in optional_cols.items():
+                    if col in wht_df.columns:
+                        agg_dict[col] = agg_func
+                
+                wht_aggregated = wht_df.groupby(group_cols).agg(agg_dict).reset_index()
+                
+                # Set source_id
+                wht_aggregated['source_id'] = wht_aggregated['warehouse_transfer_line_id'].astype(str)
+                wht_aggregated['reference'] = 'WHT-' + wht_aggregated['warehouse_transfer_line_id'].astype(str)
+                
+                # Add display info
+                display_parts = []
+                if 'from_warehouse' in wht_aggregated.columns and 'to_warehouse' in wht_aggregated.columns:
+                    if not wht_aggregated['from_warehouse'].isna().all() and not wht_aggregated['to_warehouse'].isna().all():
+                        display_parts.append(f"{wht_aggregated['from_warehouse'].iloc[0]} → {wht_aggregated['to_warehouse'].iloc[0]}")
+                elif 'transfer_date' in wht_aggregated.columns and not wht_aggregated['transfer_date'].isna().all():
+                    display_parts.append(f"Transfer: {pd.to_datetime(wht_aggregated['transfer_date'].iloc[0]).strftime('%Y-%m-%d')}")
+                
+                wht_aggregated['display_info'] = ' | '.join(display_parts) if display_parts else 'Pending Transfer'
+                
+                supply_parts.append(wht_aggregated)
+            
+            # Combine all supply sources
+            if not supply_parts:
+                return pd.DataFrame()
+            
+            # Concatenate all parts
+            result_df = pd.concat(supply_parts, ignore_index=True)
+            
+            # Rename quantity column
+            result_df = result_df.rename(columns={'quantity': 'available_qty'})
+            
+            # Select final columns - only include columns that exist
+            base_columns = [
                 'source_type', 'source_id', 'pt_code', 'product_name',
-                'legal_entity', 'available_qty', 'reference'
+                'legal_entity', 'available_qty', 'reference', 'display_info'
             ]
             
             # Add optional columns if they exist
-            optional_cols = ['batch_number', 'expiry_date', 'origin_country', 
-                            'date_ref', 'vendor', 'from_warehouse', 'to_warehouse']
+            optional_final_cols = [
+                'date_ref', 'date_ref_adjusted', 'batch_number', 'expiry_date',
+                'vendor', 'vendor_name', 'arrival_date', 'arrival_date_adjusted',
+                'eta', 'eta_adjusted', 'transfer_date', 'transfer_date_adjusted',
+                'value_in_usd'
+            ]
             
-            for col in optional_cols:
-                if col in filtered_supply.columns:
-                    columns_to_keep.append(col)
+            final_columns = []
+            for col in base_columns:
+                if col in result_df.columns:
+                    final_columns.append(col)
             
-            # Rename date_ref to expected_date for consistency
-            if 'date_ref' in filtered_supply.columns:
-                filtered_supply['expected_date'] = filtered_supply['date_ref']
-                columns_to_keep.append('expected_date')
+            for col in optional_final_cols:
+                if col in result_df.columns and col not in final_columns:
+                    final_columns.append(col)
             
-            result_df = filtered_supply[columns_to_keep].copy()
+            # Select only available columns
+            result_df = result_df[final_columns]
             
-            # Sort by source type and expected date
-            sort_cols = ['source_type']
-            if 'expected_date' in result_df.columns:
-                sort_cols.append('expected_date')
+            # Sort by source type and date
+            sort_columns = ['source_type', 'pt_code']
             
-            result_df = result_df.sort_values(sort_cols)
+            # Add date column to sort if available
+            date_col = None
+            if 'date_ref_adjusted' in result_df.columns:
+                date_col = 'date_ref_adjusted'
+            elif 'date_ref' in result_df.columns:
+                date_col = 'date_ref'
             
-            logger.info(f"Found {len(result_df)} supply items for HARD allocation from GAP Analysis data")
+            if date_col:
+                sort_columns.append(date_col)
+            
+            result_df = result_df.sort_values(sort_columns)
+            
+            # Final validation - ensure source_id is valid
+            result_df = result_df[result_df['source_id'].notna()]
+            
+            logger.info(f"Found {len(result_df)} unique supply items for HARD allocation:")
+            for source_type in result_df['source_type'].unique():
+                count = len(result_df[result_df['source_type'] == source_type])
+                logger.info(f"- {source_type}: {count}")
             
             return result_df
             
         except Exception as e:
             logger.error(f"Error getting available supply for HARD allocation: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
             return pd.DataFrame()
 
     def create_allocation_plan(self, plan_data: Dict, allocation_details: pd.DataFrame, 
