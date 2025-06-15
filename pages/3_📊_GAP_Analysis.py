@@ -3126,19 +3126,24 @@ if st.button("🚀 Run GAP Analysis", type="primary", use_container_width=True):
                 selected_sources["supply"], 
                 selected_sources["exclude_expired"]
             )
-        
+
         # IMPORTANT: Enhance BEFORE filtering
         with st.spinner("Enhancing data with allocation info..."):
-            # Enhance demand with allocations
-            df_demand_enhanced = data_manager.enhance_demand_with_allocations(df_demand_all)
-            
-            # Enhance supply with allocations (with DRAFT option from calculation_options)
+            # Get include_drafts option
             include_drafts = calculation_options.get("include_draft_allocations", False)
+            
+            # Enhance demand with allocations - PASS include_drafts parameter
+            df_demand_enhanced = data_manager.enhance_demand_with_allocations(
+                df_demand_all,
+                include_drafts=include_drafts  # ✅ Fix: Pass the parameter
+            )
+            
+            # Enhance supply with allocations
             df_supply_enhanced = data_manager.enhance_supply_with_allocations(
                 df_supply_all,
                 include_drafts=include_drafts
             )
-        
+
         # Apply filters on ENHANCED data
         df_demand_filtered, df_supply_filtered = apply_filters_to_data(
             df_demand_enhanced,  # Use enhanced
