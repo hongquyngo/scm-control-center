@@ -101,7 +101,7 @@ class AllocationManager:
                 SELECT 
                     vaps.*,
                     u.username as creator_name,
-                    JSON_UNQUOTE(JSON_EXTRACT(vaps.allocation_context, '$.allocation_method')) as allocation_method
+                    JSON_UNQUOTE(JSON_EXTRACT(vaps.allocation_context, '$.allocation_info.method')) as allocation_method
                 FROM v_allocation_plans_summary vaps
                 LEFT JOIN users u ON vaps.creator_id = u.id
                 WHERE 1=1
