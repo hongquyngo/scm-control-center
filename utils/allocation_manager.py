@@ -320,8 +320,8 @@ class AllocationManager:
                 # 7. Check allocation type specific validations
                 allocation_type = plan_dict.get('allocation_type', 'SOFT')
                 
-                if allocation_type in ['HARD', 'MIXED']:
-                    # For HARD/MIXED, validate supply availability
+                if allocation_type == 'HARD':
+                    # For HARD validate supply availability
                     supply_validation_query = text("""
                         SELECT 
                             ad.id,

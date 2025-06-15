@@ -459,7 +459,7 @@ def show_create_allocation_wizard():
     
     # Adjust total steps based on allocation type
     allocation_type = st.session_state['draft_allocation'].get('allocation_type', 'SOFT')
-    total_steps = 6 if allocation_type in ['HARD', 'MIXED'] else 5
+    total_steps = 6 if allocation_type == 'HARD' else 5
     
     # Progress indicator
     progress = st.session_state['allocation_step'] / total_steps
@@ -474,10 +474,10 @@ def show_create_allocation_wizard():
                 st.rerun()
     
     with col2:
-        if allocation_type in ['HARD', 'MIXED']:
-            steps = ['Select Products', 'Choose Method', 'Set Parameters', 'Map Supply', 'Preview', 'Confirm']
+        if allocation_type == 'HARD':
+            steps = ['Select Products', 'Choose Method', 'Set Parameters', 'Preview & Adjust', 'Map Supply', 'Confirm']
         else:
-            steps = ['Select Products', 'Choose Method', 'Set Parameters', 'Preview', 'Confirm']
+            steps = ['Select Products', 'Choose Method', 'Set Parameters', 'Preview & Adjust', 'Confirm']
         current_step_idx = min(st.session_state['allocation_step'] - 1, len(steps) - 1)
         st.markdown(f"**Step {st.session_state['allocation_step']}/{total_steps}: {steps[current_step_idx]}**")
     
@@ -489,17 +489,14 @@ def show_create_allocation_wizard():
     elif st.session_state['allocation_step'] == 3:
         show_step3_set_parameters()
     elif st.session_state['allocation_step'] == 4:
-        if allocation_type in ['HARD', 'MIXED']:
-            show_step4_map_supply()
-        else:
-            show_step4_preview()
+        show_step4_preview()  # Updated with zero allocation handling
     elif st.session_state['allocation_step'] == 5:
-        if allocation_type in ['HARD', 'MIXED']:
-            show_step5_preview_with_mapping()
+        if allocation_type == 'HARD':
+            show_step5_map_supply()  # Updated with filtering
         else:
-            show_step5_confirm()
+            show_step5_confirm()  # Updated with excluded lines info
     elif st.session_state['allocation_step'] == 6:
-        show_step6_confirm_with_mapping()
+        show_step6_final_confirm()  # Updated with excluded lines info
 
 def show_step1_select_products():
     """Step 1: Select products for allocation with pagination and smart filters"""
@@ -619,7 +616,6 @@ def show_step1_select_products():
                     else:
                         st.write(f"- {key}: Not in session state")
 
-
 def show_step2_choose_method():
     """Step 2: Choose allocation method and type"""
     st.markdown("#### 🎯 Choose Allocation Method & Type")
@@ -650,7 +646,7 @@ def show_step2_choose_method():
         st.markdown("##### Allocation Type")
         allocation_type = st.radio(
             "Select allocation type:",
-            options=list(ALLOCATION_TYPES.keys()),
+            options=['SOFT', 'HARD'],  # REMOVED MIXED
             format_func=lambda x: ALLOCATION_TYPES[x],
             index=0
         )
@@ -672,14 +668,7 @@ def show_step2_choose_method():
             - Cannot be changed after approval
             - Use only when customer needs specific batches
             """)
-        else:  # MIXED
-            st.info("""
-            **Mixed Allocation**
-            - Some products use SOFT allocation
-            - Some products use HARD allocation
-            - Configure per product in next steps
-            - For complex scenarios
-            """)
+        # REMOVED MIXED description
     
     # Store selections
     if 'draft_allocation' not in st.session_state or st.session_state['draft_allocation'] is None:
@@ -695,7 +684,6 @@ def show_step2_choose_method():
         if st.button("Next ➡️", type="primary", use_container_width=True):
             st.session_state['allocation_step'] = 3
             st.rerun()
-
 
 
 def show_step3_set_parameters():
@@ -793,213 +781,12 @@ def show_step3_set_parameters():
                 'entities': get_from_session_state('selected_entities', []),
                 'products': st.session_state.get('selected_allocation_products', [])
             }
-            
-            # Check allocation type to determine next step
-            allocation_type = st.session_state['draft_allocation'].get('allocation_type', 'SOFT')
-            if allocation_type in ['HARD', 'MIXED']:
-                # Calculate allocation first for HARD mapping
-                method = st.session_state['draft_allocation'].get('method', 'FCFS')
-                parameters = st.session_state['draft_allocation'].get('parameters', {})
-                selected_products = st.session_state.get('selected_allocation_products', [])
-                
-                demand_data = get_from_session_state('demand_filtered', pd.DataFrame())
-                supply_data = get_from_session_state('supply_filtered', pd.DataFrame())
-                
-                filtered_demand = demand_data[demand_data['pt_code'].isin(selected_products)].copy()
-                filtered_supply = supply_data[supply_data['pt_code'].isin(selected_products)].copy()
-                
-                allocation_results = AllocationMethods.calculate_allocation(
-                    demand_df=filtered_demand,
-                    supply_df=filtered_supply,
-                    method=method,
-                    parameters=parameters
-                )
-                st.session_state['temp_allocation_results'] = allocation_results
-            
+            # Just move to next step - calculation will be done in preview            
             st.session_state['allocation_step'] = 4
             st.rerun()
 
-def show_step4_map_supply():
-    """Step 4: Map supply sources for HARD allocation"""
-    st.markdown("#### 🔗 Map Supply to Demand (HARD Allocation)")
-    
-    allocation_type = st.session_state['draft_allocation'].get('allocation_type', 'SOFT')
-    
-    # Get allocation results from previous calculation
-    allocation_results = st.session_state.get('temp_allocation_results')
-    if allocation_results is None:
-        st.error("Allocation results not found. Please go back to previous step.")
-        return
-    
-    # Get supply data from session state (from GAP Analysis)
-    supply_filtered = st.session_state.get('supply_filtered', pd.DataFrame())
-    
-    if supply_filtered.empty:
-        st.error("No supply data found. Please run GAP Analysis first.")
-        return
-    
-    # Get unique products and entities from allocation results
-    product_codes = allocation_results['pt_code'].unique().tolist()
-    legal_entities = allocation_results['legal_entity'].unique().tolist()
-    
-    # Get available supply using the corrected function
-    available_supply = allocation_manager.get_available_supply_for_hard_allocation(
-        product_codes, legal_entities
-    )
-    
-    if available_supply.empty:
-        st.error("No available supply found for HARD allocation")
-        # Allow user to go back
-        if st.button("← Go Back to Previous Step"):
-            st.session_state['allocation_step'] = 3
-            st.rerun()
-        return
-    
-    # Show info about data source
-    st.info(f"""
-        📊 Using supply data from GAP Analysis:
-        - Total supply items: {len(supply_filtered)}
-        - Filtered for selected products: {len(available_supply)}
-        - Time adjustments applied: {st.session_state.get('time_adjustments', {}).get('supply_arrival_offset', 0)} days
-    """)
-    
-    # Initialize supply mapping in session state
-    if 'supply_mapping' not in st.session_state:
-        st.session_state['supply_mapping'] = {}
-    
-    # Group allocations by product for easier mapping
-    allocation_by_product = allocation_results.groupby('pt_code')
-    
-    # For MIXED allocation, allow selection of which items are HARD
-    if allocation_type == 'MIXED':
-        st.markdown("##### Select items for HARD allocation")
-        st.info("Items not selected will use SOFT allocation (flexible supply)")
-        
-        hard_allocation_items = []
-        for _, row in allocation_results.iterrows():
-            key = f"hard_{row['demand_line_id']}"
-            if st.checkbox(
-                f"{row['pt_code']} - {row['customer']} ({row['allocated_qty']:.0f} units)",
-                key=key,
-                value=key in st.session_state.get('selected_hard_items', [])
-            ):
-                hard_allocation_items.append(row['demand_line_id'])
-        
-        st.session_state['selected_hard_items'] = hard_allocation_items
-        
-        # Filter to show only selected items for mapping
-        if hard_allocation_items:
-            allocation_to_map = allocation_results[
-                allocation_results['demand_line_id'].isin(hard_allocation_items)
-            ]
-        else:
-            st.warning("No items selected for HARD allocation")
-            allocation_to_map = pd.DataFrame()
-    else:
-        # For pure HARD allocation, map all items
-        allocation_to_map = allocation_results
-    
-    if not allocation_to_map.empty:
-        st.markdown("##### Map Supply Sources")
-        
-        # Create mapping interface
-        for pt_code, product_allocations in allocation_to_map.groupby('pt_code'):
-            with st.expander(f"📦 {pt_code}", expanded=True):
-                # Get available supply for this product
-                product_supply = available_supply[available_supply['pt_code'] == pt_code]
-                
-                if product_supply.empty:
-                    st.warning(f"No supply available for {pt_code}")
-                    continue
-                
-                # Show supply summary
-                col1, col2 = st.columns([1, 2])
-                with col1:
-                    st.metric("Available Supply", f"{product_supply['available_qty'].sum():.0f}")
-                    st.metric("Allocation Needed", f"{product_allocations['allocated_qty'].sum():.0f}")
-                
-                with col2:
-                    # Supply breakdown by source
-                    supply_by_source = product_supply.groupby('source_type')['available_qty'].sum()
-                    for source, qty in supply_by_source.items():
-                        st.write(f"- {source}: {qty:.0f} units")
-                
-                # Map each allocation line
-                for _, alloc_row in product_allocations.iterrows():
-                    st.markdown(f"**Customer: {alloc_row['customer']} - {alloc_row['allocated_qty']:.0f} units**")
-                    
-                    # Create supply options
-                    supply_options = []
-                    for _, supply_row in product_supply.iterrows():
-                        option_text = (
-                            f"{supply_row['source_type']} - "
-                            f"{supply_row['reference']} - "
-                            f"{supply_row['available_qty']:.0f} units"
-                        )
-                        if 'expected_date' in supply_row and pd.notna(supply_row['expected_date']):
-                            option_text += f" (ETA: {supply_row['expected_date'].strftime('%Y-%m-%d')})"
-                        
-                        supply_options.append({
-                            'text': option_text,
-                            'value': f"{supply_row['source_type']}_{supply_row['source_id']}",
-                            'source_type': supply_row['source_type'],
-                            'source_id': supply_row['source_id']
-                        })
-                    
-                    # Supply selection with better error handling
-                    selected_key = st.selectbox(
-                        "Select Supply Source",
-                        options=[opt['value'] for opt in supply_options],
-                        format_func=lambda x: next((opt['text'] for opt in supply_options if opt['value'] == x), ''),
-                        key=f"supply_{alloc_row['demand_line_id']}"
-                    )
-                    
-                    # Store mapping with error handling
-                    if selected_key:
-                        # Safe iteration with default
-                        selected_supply = next(
-                            (opt for opt in supply_options if opt['value'] == selected_key), 
-                            None
-                        )
-                        
-                        if selected_supply:
-                            st.session_state['supply_mapping'][str(alloc_row['demand_line_id'])] = {
-                                'source_type': selected_supply['source_type'],
-                                'source_id': selected_supply['source_id']
-                            }
-                        else:
-                            logger.warning(f"Could not find supply option for key: {selected_key}")
-                    
-                    st.divider()
-    
-    # Validation
-    if allocation_type == 'HARD' or (allocation_type == 'MIXED' and st.session_state.get('selected_hard_items')):
-        mapped_count = len(st.session_state.get('supply_mapping', {}))
-        required_count = len(allocation_to_map) if allocation_type == 'HARD' else len(st.session_state.get('selected_hard_items', []))
-        
-        if mapped_count < required_count:
-            st.warning(f"Please map all allocations. Mapped: {mapped_count}/{required_count}")
-    
-    # Next button
-    st.markdown("---")
-    col1, col2, col3 = st.columns([2, 1, 2])
-    with col2:
-        # Check if all required mappings are done
-        can_proceed = True
-        if allocation_type == 'HARD':
-            can_proceed = len(st.session_state.get('supply_mapping', {})) >= len(allocation_to_map)
-        elif allocation_type == 'MIXED' and st.session_state.get('selected_hard_items'):
-            can_proceed = all(
-                str(item_id) in st.session_state.get('supply_mapping', {})
-                for item_id in st.session_state.get('selected_hard_items', [])
-            )
-        
-        if st.button("Next ➡️", type="primary", use_container_width=True, disabled=not can_proceed):
-            st.session_state['allocation_step'] = 5
-            st.rerun()
-
 def show_step4_preview():
-    """Step 4: Preview allocation results with dynamic updates"""
+    """Step 4: Preview allocation results with dynamic updates and zero allocation warnings"""
     st.markdown("#### 👀 Preview Allocation Results")
     
     # Get data and parameters
@@ -1038,45 +825,102 @@ def show_step4_preview():
     # Store initial results
     st.session_state['draft_allocation']['results'] = allocation_results
     
+    # === NEW: Check for zero allocations ===
+    zero_allocations = allocation_results[allocation_results['allocated_qty'] <= 0]
+    valid_allocations = allocation_results[allocation_results['allocated_qty'] > 0]
+    
+    # Warning about zero allocations
+    if not zero_allocations.empty:  # ✅ FIXED: Use .empty instead of .any()
+        st.warning(f"""
+        ⚠️ **{len(zero_allocations)} line(s) have 0 allocated quantity**
+        
+        These lines will be **excluded** from the allocation plan:
+        """)
+        
+        # Show zero allocation details
+        with st.expander("View excluded lines", expanded=False):
+            zero_display = zero_allocations[['pt_code', 'product_name', 'customer', 'requested_qty', 'allocated_qty']].copy()
+            zero_display = zero_display.rename(columns={
+                'pt_code': 'Product Code',
+                'product_name': 'Product Name',
+                'customer': 'Customer',
+                'requested_qty': 'Requested',
+                'allocated_qty': 'Allocated'
+            })
+            st.dataframe(zero_display, use_container_width=True, hide_index=True)
+            
+            # Explain why
+            st.info(f"""
+            **Possible reasons for 0 allocation:**
+            - Insufficient supply for these products
+            - Lower priority in {method} method
+            - Supply already allocated to higher priority orders
+            """)
+    
+    # === Summary section with valid allocations only ===
+    st.markdown("---")
+    st.markdown("### 📊 Allocation Summary")
+    
+    if valid_allocations.empty:
+        st.error("❌ No valid allocations. All lines have 0 quantity.")
+        st.info("Please check your supply data or adjust allocation parameters.")
+        return
+    
     # Create a container for dynamic metrics
     metrics_container = st.container()
     
-    # Allocation details table
-    st.markdown("##### Allocation Details")
-    st.info("💡 **Note**: System calculated allocations are shown. Adjust 'Actual Allocated' and 'Allocated ETD' as needed.")
+    # Allocation details table - ONLY VALID ALLOCATIONS
+    st.markdown("##### Allocation Details (Valid Lines Only)")
+    st.info("💡 **Note**: Only showing lines with allocated quantity > 0. Adjust 'Actual Allocated' and 'Allocated ETD' as needed.")
     
-    # Allow editing
-    edited_df = AllocationComponents.show_editable_allocation_table(allocation_results)
+    # Allow editing - pass only valid allocations
+    edited_df = AllocationComponents.show_editable_allocation_table(valid_allocations)
+    
+    # Update session state with edited valid allocations only
     st.session_state['draft_allocation']['results'] = edited_df
+    st.session_state['draft_allocation']['excluded_lines'] = zero_allocations  # Store for reference
     
     # Update metrics dynamically based on edited values
     with metrics_container:
-        col1, col2, col3, col4 = st.columns(4)
+        col1, col2, col3, col4, col5 = st.columns(5)
         
-        total_demand = edited_df['requested_qty'].sum()
-        total_allocated = edited_df['allocated_qty'].sum()  # Use actual allocated
-        total_orders = len(edited_df)
+        total_demand = allocation_results['requested_qty'].sum()  # Original total
+        valid_demand = edited_df['requested_qty'].sum()  # Valid lines only
+        total_allocated = edited_df['allocated_qty'].sum()
+        total_orders = len(allocation_results)  # Original count
+        valid_orders = len(edited_df)  # Valid count
         
         # Calculate fulfillment based on actual allocated
-        if total_demand > 0:
-            avg_fulfillment = (total_allocated / total_demand) * 100
+        if valid_demand > 0:
+            avg_fulfillment = (total_allocated / valid_demand) * 100
         else:
             avg_fulfillment = 0
         
         with col1:
             st.metric("Total Demand", format_number(total_demand))
+            if not zero_allocations.empty:  # ✅ FIXED: Use .empty
+                st.caption(f"({format_number(valid_demand)} valid)")
+        
         with col2:
             st.metric(
                 "Total Allocated", 
                 format_number(total_allocated),
                 delta=f"{total_allocated - edited_df['calculated_allocation'].sum():.0f} vs calculated" if 'calculated_allocation' in edited_df.columns else None
             )
+        
         with col3:
-            st.metric("Orders", total_orders)
+            st.metric("Total Orders", total_orders)
+            if not zero_allocations.empty:  # ✅ FIXED: Use .empty
+                st.caption(f"({valid_orders} valid)")
+        
         with col4:
+            st.metric("Excluded", len(zero_allocations), delta_color="inverse")
+        
+        with col5:
             st.metric("Avg Fulfillment", f"{avg_fulfillment:.1f}%")
+            st.caption("(valid lines only)")
     
-    # Visualization based on actual allocated values
+    # Visualization based on valid allocations only
     col1, col2 = st.columns(2)
     
     with col1:
@@ -1089,29 +933,6 @@ def show_step4_preview():
         fig2 = AllocationComponents.create_fulfillment_chart_by_customer(edited_df)
         st.plotly_chart(fig2, use_container_width=True)
     
-    # Show allocation variance analysis
-    if 'calculated_allocation' in edited_df.columns:
-        with st.expander("📊 Allocation Variance Analysis", expanded=False):
-            variance_df = edited_df[['pt_code', 'customer', 'calculated_allocation', 'allocated_qty']].copy()
-            variance_df['variance'] = variance_df['allocated_qty'] - variance_df['calculated_allocation']
-            variance_df['variance_pct'] = (variance_df['variance'] / variance_df['calculated_allocation'] * 100).fillna(0)
-            
-            # Show only items with variance
-            variance_df = variance_df[variance_df['variance'] != 0]
-            
-            if not variance_df.empty:
-                st.dataframe(
-                    variance_df.style.format({
-                        'calculated_allocation': '{:.0f}',
-                        'allocated_qty': '{:.0f}',
-                        'variance': '{:+.0f}',
-                        'variance_pct': '{:+.1f}%'
-                    }),
-                    use_container_width=True
-                )
-            else:
-                st.info("No variance - all allocations match system calculations")
-    
     # Validation warnings
     warnings = AllocationValidator.validate_allocation_results(edited_df, filtered_supply)
     if warnings:
@@ -1123,106 +944,399 @@ def show_step4_preview():
     st.markdown("---")
     col1, col2, col3 = st.columns([2, 1, 2])
     with col2:
-        if st.button("Next ➡️", type="primary", use_container_width=True):
-            st.session_state['allocation_step'] = 5
+        # Check allocation type to show appropriate button text
+        allocation_type = st.session_state['draft_allocation'].get('allocation_type', 'SOFT')
+        
+        button_text = "Next ➡️" if allocation_type == 'HARD' else "Confirm ➡️"
+        button_disabled = valid_allocations.empty  # Disable if no valid allocations
+        
+        if st.button(button_text, type="primary", use_container_width=True, disabled=button_disabled):
+            if allocation_type == 'HARD':
+                st.session_state['allocation_step'] = 5  # Go to map supply
+            else:
+                st.session_state['allocation_step'] = 5  # Go to confirm
             st.rerun()
 
 
-def show_step5_preview_with_mapping():
-    """Step 5: Preview allocation with supply mapping (for HARD allocation)"""
-    st.markdown("#### 👀 Preview Allocation Results")
+def show_step5_map_supply():
+    """Step 5: Map supply sources for HARD allocation with advanced features"""
+    st.markdown("#### 🔗 Map Supply to Demand (HARD Allocation)")
     
-    # Get allocation results
-    allocation_results = st.session_state.get('temp_allocation_results', pd.DataFrame())
-    supply_mapping = st.session_state.get('supply_mapping', {})
+    # Get allocation results from session state (already filtered in step 4)
+    allocation_results = st.session_state.get('draft_allocation', {}).get('results', pd.DataFrame())
+    excluded_lines = st.session_state.get('draft_allocation', {}).get('excluded_lines', pd.DataFrame())
     
     if allocation_results.empty:
-        st.error("No allocation results found")
+        st.error("No valid allocation results found. Please go back to previous step.")
         return
     
-    # Add supply mapping info to results
-    allocation_results['allocation_mode'] = 'SOFT'
-    allocation_results['supply_reference'] = None
+    # Initialize supply mapping details if not exists
+    if 'supply_mapping_details' not in st.session_state:
+        st.session_state['supply_mapping_details'] = {}
     
-    for demand_key, mapping in supply_mapping.items():
-        mask = allocation_results['demand_line_id'].astype(str) == str(demand_key)
-        allocation_results.loc[mask, 'allocation_mode'] = 'HARD'
-        allocation_results.loc[mask, 'supply_reference'] = mapping.get('source_type', '') + ' - ' + str(mapping.get('source_id', ''))
+    # === Summary of what we're processing ===
+    st.info(f"""
+        📊 **Supply Mapping Instructions:**
+        - Processing {len(allocation_results)} valid allocation lines
+        - Excluded {len(excluded_lines)} lines with 0 quantity
+        - Map supply sources to fulfill each allocation line
+        - System will auto-suggest quantities based on availability
+        - You can adjust quantities and ETD dates as needed
+        - Total mapped quantity must equal allocated quantity
+    """)
     
-    # Store updated results
-    st.session_state['draft_allocation']['results'] = allocation_results
+    # Get supply data
+    supply_filtered = st.session_state.get('supply_filtered', pd.DataFrame())
     
-    # Summary metrics
-    col1, col2, col3, col4, col5 = st.columns(5)
+    if supply_filtered.empty:
+        st.error("No supply data found. Please run GAP Analysis first.")
+        return
     
-    total_demand = allocation_results['requested_qty'].sum()
-    total_allocated = allocation_results['allocated_qty'].sum()
-    total_orders = len(allocation_results)
-    hard_orders = len(allocation_results[allocation_results['allocation_mode'] == 'HARD'])
-    avg_fulfillment = (allocation_results['allocated_qty'] / allocation_results['requested_qty']).mean() * 100
+    # Get unique products and entities
+    product_codes = allocation_results['pt_code'].unique().tolist()
+    legal_entities = allocation_results['legal_entity'].unique().tolist()
     
-    with col1:
-        st.metric("Total Demand", format_number(total_demand))
-    with col2:
-        st.metric("Total Allocated", format_number(total_allocated))
-    with col3:
-        st.metric("Total Orders", total_orders)
-    with col4:
-        st.metric("HARD Orders", hard_orders)
-    with col5:
-        st.metric("Avg Fulfillment", f"{avg_fulfillment:.1f}%")
-    
-    # Allocation details table
-    st.markdown("##### Allocation Details")
-    
-    # Display table with allocation mode
-    display_df = allocation_results[[
-        'pt_code', 'product_name', 'customer', 'etd', 
-        'requested_qty', 'allocated_qty', 'fulfillment_rate',
-        'allocation_mode', 'supply_reference'
-    ]].copy()
-    
-    # Format columns
-    display_df['requested_qty'] = display_df['requested_qty'].apply(format_number)
-    display_df['allocated_qty'] = display_df['allocated_qty'].apply(format_number)
-    display_df['fulfillment_rate'] = display_df['fulfillment_rate'].apply(lambda x: f"{x:.1f}%")
-    display_df['allocation_mode'] = display_df['allocation_mode'].apply(
-        lambda x: '🔒 HARD' if x == 'HARD' else '🌊 SOFT'
+    # Get available supply
+    available_supply = allocation_manager.get_available_supply_for_hard_allocation(
+        product_codes, legal_entities
     )
     
-    st.dataframe(display_df, use_container_width=True, height=400)
+    if available_supply.empty:
+        st.error("No available supply found for HARD allocation")
+        if st.button("← Go Back to Previous Step"):
+            st.session_state['allocation_step'] = 4
+            st.rerun()
+        return
     
-    # Visualization
-    col1, col2 = st.columns(2)
+    # Process each allocation line
+    all_mappings_valid = True
     
-    with col1:
-        # Fulfillment by product
-        fig1 = AllocationComponents.create_fulfillment_chart_by_product(allocation_results)
-        st.plotly_chart(fig1, use_container_width=True)
+    for idx, alloc_row in allocation_results.iterrows():
+        with st.expander(
+            f"📦 {alloc_row['pt_code']} - {alloc_row['customer']} ({alloc_row['allocated_qty']:.0f} units)", 
+            expanded=True
+        ):
+            # Create unique key for this allocation line
+            line_key = f"{alloc_row['demand_line_id']}"
+            
+            # Get available supply for this product and entity
+            product_supply = available_supply[
+                (available_supply['pt_code'] == alloc_row['pt_code']) &
+                (available_supply['legal_entity'] == alloc_row['legal_entity'])
+            ].copy()
+            
+            if product_supply.empty:
+                st.error(f"No supply available for {alloc_row['pt_code']}")
+                all_mappings_valid = False
+                continue
+            
+            # Initialize mapping for this line if not exists
+            if line_key not in st.session_state['supply_mapping_details']:
+                st.session_state['supply_mapping_details'][line_key] = {
+                    'allocations': [],
+                    'total_mapped': 0
+                }
+            
+            # Display allocation info
+            col1, col2, col3 = st.columns([2, 1, 1])
+            with col1:
+                st.write(f"**Product:** {alloc_row['pt_code']} - {alloc_row.get('product_name', '')}")
+                st.write(f"**Customer:** {alloc_row['customer']}")
+                if 'package_size' in alloc_row and pd.notna(alloc_row['package_size']):
+                    st.caption(f"📦 Package: {alloc_row['package_size']}")
+            with col2:
+                st.metric("Required Qty", f"{alloc_row['allocated_qty']:.0f}")
+            with col3:
+                current_mapped = st.session_state['supply_mapping_details'][line_key]['total_mapped']
+                remaining = alloc_row['allocated_qty'] - current_mapped
+                
+                # Color coding for progress
+                if remaining == 0:
+                    delta_color = "off"
+                    status_icon = "✅"
+                elif remaining < 0:
+                    delta_color = "inverse"
+                    status_icon = "❌"
+                else:
+                    delta_color = "normal"
+                    status_icon = "⚠️"
+                
+                st.metric(
+                    "Remaining", 
+                    f"{remaining:.0f}",
+                    delta=f"-{current_mapped:.0f} mapped" if current_mapped > 0 else None,
+                    delta_color=delta_color
+                )
+                st.caption(status_icon)
+            
+            # Supply mapping interface
+            st.markdown("##### Select Supply Sources")
+            
+            # Get already selected supply IDs for this line
+            used_supply_ids = [
+                alloc['supply_id'] 
+                for alloc in st.session_state['supply_mapping_details'][line_key]['allocations']
+            ]
+            
+            # Filter out already used supplies
+            available_for_selection = product_supply[
+                ~product_supply['source_id'].isin(used_supply_ids)
+            ]
+            
+            # Add new supply mapping
+            if not available_for_selection.empty and remaining > 0:
+                st.markdown("**➕ Add Supply Source:**")
+                add_col1, add_col2, add_col3, add_col4 = st.columns([3, 1.5, 1.5, 1])
+                
+                with add_col1:
+                    # Supply selection
+                    supply_options = []
+                    for _, supply_row in available_for_selection.iterrows():
+                        # Calculate available after existing allocations
+                        already_allocated = sum([
+                            alloc['quantity'] 
+                            for alloc in st.session_state['supply_mapping_details'][line_key]['allocations']
+                            if alloc['supply_id'] == supply_row['source_id']
+                        ])
+                        net_available = supply_row['available_qty'] - already_allocated
+                        
+                        option_text = (
+                            f"{supply_row['source_type']} - "
+                            f"{supply_row['reference']} - "
+                            f"Available: {net_available:.0f}/{supply_row['available_qty']:.0f} units"
+                        )
+                        if pd.notna(supply_row.get('date_ref_adjusted')):
+                            option_text += f" (ETA: {pd.to_datetime(supply_row['date_ref_adjusted']).strftime('%Y-%m-%d')})"
+                        
+                        supply_options.append({
+                            'text': option_text,
+                            'supply_row': supply_row,
+                            'net_available': net_available
+                        })
+                    
+                    if supply_options:
+                        selected_idx = st.selectbox(
+                            "Select Supply",
+                            range(len(supply_options)),
+                            format_func=lambda x: supply_options[x]['text'],
+                            key=f"supply_select_{line_key}_{idx}"
+                        )
+                    else:
+                        st.warning("No more supply sources available")
+                        selected_idx = None
+                
+                with add_col2:
+                    # Quantity input with smart suggestion
+                    if selected_idx is not None:
+                        selected_option = supply_options[selected_idx]
+                        selected_supply = selected_option['supply_row']
+                        net_available = selected_option['net_available']
+                        
+                        # Smart quantity suggestion
+                        max_qty = min(net_available, remaining)
+                        suggested_qty = max_qty  # Auto-suggest maximum possible
+                        
+                        qty_input = st.number_input(
+                            "Quantity",
+                            min_value=0.0,
+                            max_value=float(max_qty),
+                            value=float(suggested_qty),
+                            step=1.0,
+                            key=f"qty_input_{line_key}_{idx}",
+                            help=f"Max: {max_qty:.0f} (min of available {net_available:.0f} and needed {remaining:.0f})"
+                        )
+                
+                with add_col3:
+                    # ETD adjustment
+                    if selected_idx is not None:
+                        default_etd = pd.to_datetime(alloc_row.get('allocated_etd', alloc_row['etd']))
+                        
+                        # Get supply ETA as reference
+                        supply_eta = None
+                        if pd.notna(selected_supply.get('date_ref_adjusted')):
+                            supply_eta = pd.to_datetime(selected_supply['date_ref_adjusted'])
+                        elif pd.notna(selected_supply.get('date_ref')):
+                            supply_eta = pd.to_datetime(selected_supply['date_ref'])
+                        
+                        # Default to later of allocation ETD or supply ETA
+                        if supply_eta and supply_eta > default_etd:
+                            suggested_etd = supply_eta
+                            st.caption("📅 Adjusted to supply ETA")
+                        else:
+                            suggested_etd = default_etd
+                        
+                        adjusted_etd = st.date_input(
+                            "ETD",
+                            value=suggested_etd,
+                            key=f"etd_input_{line_key}_{idx}",
+                            help="Delivery ETD for this supply allocation"
+                        )
+                
+                with add_col4:
+                    # Add button
+                    if selected_idx is not None and st.button("➕ Add", key=f"add_btn_{line_key}_{idx}"):
+                        if qty_input > 0:
+                            # Add to mapping
+                            new_allocation = {
+                                'supply_id': selected_supply['source_id'],
+                                'source_type': selected_supply['source_type'],
+                                'reference': selected_supply['reference'],
+                                'quantity': qty_input,
+                                'etd': adjusted_etd,
+                                'available_qty': selected_supply['available_qty']
+                            }
+                            st.session_state['supply_mapping_details'][line_key]['allocations'].append(new_allocation)
+                            st.session_state['supply_mapping_details'][line_key]['total_mapped'] += qty_input
+                            st.rerun()
+            
+            # Show current mappings
+            if st.session_state['supply_mapping_details'][line_key]['allocations']:
+                st.markdown("**📋 Current Mappings:**")
+                
+                for i, mapping in enumerate(st.session_state['supply_mapping_details'][line_key]['allocations']):
+                    map_col1, map_col2, map_col3, map_col4 = st.columns([3, 1.5, 1.5, 1])
+                    
+                    with map_col1:
+                        st.write(f"• {mapping['source_type']} - {mapping['reference']}")
+                    with map_col2:
+                        st.write(f"📦 {mapping['quantity']:.0f} units")
+                    with map_col3:
+                        st.write(f"📅 {mapping['etd'].strftime('%Y-%m-%d')}")
+                    with map_col4:
+                        if st.button("🗑️", key=f"remove_{line_key}_{i}", help="Remove this mapping"):
+                            # Remove mapping
+                            st.session_state['supply_mapping_details'][line_key]['total_mapped'] -= mapping['quantity']
+                            st.session_state['supply_mapping_details'][line_key]['allocations'].pop(i)
+                            st.rerun()
+            
+            # Validation for this line
+            total_mapped = st.session_state['supply_mapping_details'][line_key]['total_mapped']
+            required_qty = alloc_row['allocated_qty']
+            
+            # Progress bar for this line
+            progress = min(total_mapped / required_qty, 1.0) if required_qty > 0 else 0
+            st.progress(progress)
+            
+            if total_mapped < required_qty:
+                st.warning(f"⚠️ Incomplete: {total_mapped:.0f}/{required_qty:.0f} mapped")
+                all_mappings_valid = False
+            elif total_mapped > required_qty:
+                st.error(f"❌ Over-mapped: {total_mapped:.0f}/{required_qty:.0f}")
+                all_mappings_valid = False
+            else:
+                st.success(f"✅ Complete: {total_mapped:.0f}/{required_qty:.0f} mapped")
     
-    with col2:
-        # Allocation mode distribution
-        mode_summary = allocation_results.groupby('allocation_mode').agg({
-            'allocated_qty': 'sum'
-        }).reset_index()
+    # Convert to final supply_mapping format for database
+    if all_mappings_valid:
+        # Build supply_mapping for save
+        st.session_state['supply_mapping'] = {}
         
-        fig2 = go.Figure(data=[go.Pie(
-            labels=mode_summary['allocation_mode'],
-            values=mode_summary['allocated_qty'],
-            hole=.3,
-            marker=dict(colors=['#1f77b4', '#ff7f0e'])
-        )])
-        fig2.update_layout(title='Allocation by Mode')
-        st.plotly_chart(fig2, use_container_width=True)
+        for line_key, details in st.session_state['supply_mapping_details'].items():
+            if details['allocations']:
+                # For simple case with one supply per line
+                if len(details['allocations']) == 1:
+                    alloc = details['allocations'][0]
+                    st.session_state['supply_mapping'][line_key] = {
+                        'source_type': alloc['source_type'],
+                        'source_id': alloc['supply_id']
+                    }
+                else:
+                    # For multiple supplies per line
+                    # Note: Current database structure may need enhancement to support this
+                    # For now, we'll use the first supply as primary
+                    primary_alloc = details['allocations'][0]
+                    st.session_state['supply_mapping'][line_key] = {
+                        'source_type': primary_alloc['source_type'],
+                        'source_id': primary_alloc['supply_id']
+                    }
+                    
+                    # Store additional info in session for future enhancement
+                    st.session_state['supply_mapping'][line_key]['multiple_sources'] = [
+                        {
+                            'source_type': alloc['source_type'],
+                            'source_id': alloc['supply_id'],
+                            'quantity': alloc['quantity'],
+                            'etd': alloc['etd']
+                        }
+                        for alloc in details['allocations']
+                    ]
     
-    # Next button
+    # Summary section
+    st.markdown("---")
+    st.markdown("### 📊 Mapping Summary")
+    
+    summary_col1, summary_col2, summary_col3, summary_col4 = st.columns(4)
+    
+    with summary_col1:
+        total_lines = len(allocation_results)
+        mapped_lines = len([
+            k for k, v in st.session_state['supply_mapping_details'].items() 
+            if v['total_mapped'] > 0
+        ])
+        complete_lines = len([
+            k for k, v in st.session_state['supply_mapping_details'].items() 
+            if v['total_mapped'] == allocation_results[allocation_results['demand_line_id'].astype(str) == k]['allocated_qty'].sum()
+        ])
+        
+        st.metric("Lines Mapped", f"{mapped_lines}/{total_lines}")
+        if complete_lines == total_lines:
+            st.caption("✅ All complete")
+        else:
+            st.caption(f"✅ {complete_lines} complete")
+    
+    with summary_col2:
+        total_required = allocation_results['allocated_qty'].sum()
+        total_mapped = sum([
+            v['total_mapped'] 
+            for v in st.session_state['supply_mapping_details'].values()
+        ])
+        
+        # Color coding
+        if total_mapped == total_required:
+            st.success(f"Total: {total_mapped:.0f}/{total_required:.0f}")
+        elif total_mapped < total_required:
+            st.warning(f"Total: {total_mapped:.0f}/{total_required:.0f}")
+        else:
+            st.error(f"Total: {total_mapped:.0f}/{total_required:.0f}")
+    
+    with summary_col3:
+        # Count supply sources used
+        unique_supplies = set()
+        for details in st.session_state['supply_mapping_details'].values():
+            for alloc in details['allocations']:
+                unique_supplies.add(f"{alloc['source_type']}_{alloc['supply_id']}")
+        
+        st.metric("Supply Sources", len(unique_supplies))
+        st.caption("Unique sources used")
+    
+    with summary_col4:
+        if all_mappings_valid and mapped_lines == total_lines:
+            st.success("✅ Ready to proceed")
+            st.caption("All validations passed")
+        else:
+            st.error("❌ Incomplete mappings")
+            incomplete_count = total_lines - complete_lines
+            if incomplete_count > 0:
+                st.caption(f"{incomplete_count} lines incomplete")
+    
+    # Navigation buttons
     st.markdown("---")
     col1, col2, col3 = st.columns([2, 1, 2])
-    with col2:
-        if st.button("Next ➡️", type="primary", use_container_width=True):
+    
+    with col1:
+        if st.button("← Previous", use_container_width=True):
+            st.session_state['allocation_step'] = 4
+            st.rerun()
+    
+    with col3:
+        if st.button(
+            "Next ➡️", 
+            type="primary", 
+            use_container_width=True,
+            disabled=not all_mappings_valid
+        ):
             st.session_state['allocation_step'] = 6
             st.rerun()
-
 
 def show_step5_confirm():
     """Step 5: Confirm and save allocation (for SOFT allocation)"""
@@ -1231,7 +1345,8 @@ def show_step5_confirm():
     # Get draft data
     draft = st.session_state.get('draft_allocation', {})
     results = draft.get('results', pd.DataFrame())
-    
+    excluded_lines = draft.get('excluded_lines', pd.DataFrame())
+
     if results.empty:
         st.error("No allocation results found")
         return
@@ -1245,6 +1360,13 @@ def show_step5_confirm():
     # === SECTION 1: Allocation Summary ===
     st.markdown("##### 📊 Allocation Summary")
     
+    # Show excluded lines summary if any
+    if not excluded_lines.empty:
+        st.info(f"""
+        ℹ️ **Note**: {len(excluded_lines)} line(s) with 0 allocation were excluded from this plan.
+        Only {len(results)} valid lines will be saved.
+        """)
+
     col1, col2 = st.columns(2)
     
     with col1:
@@ -1252,7 +1374,9 @@ def show_step5_confirm():
         st.write(f"**Method:** {draft.get('method', 'Unknown')}")
         st.write(f"**Type:** {draft.get('allocation_type', 'SOFT')}")
         st.write(f"**Products:** {len(results['pt_code'].unique())}")
-        st.write(f"**Orders:** {len(results)}")
+        st.write(f"**Valid Orders:** {len(results)}")
+        if not excluded_lines.empty:
+            st.write(f"**Excluded Orders:** {len(excluded_lines)}")
     
     with col2:
         st.write(f"**Total Allocated:** {format_number(results['allocated_qty'].sum())}")
@@ -1490,13 +1614,8 @@ def prepare_allocation_details_for_db(results: pd.DataFrame, draft: Dict,
         df['legal_entity_name'] = ''
     
     # === 3. ALLOCATION MODE ===
-    # Handle MIXED type where each row might have different mode
-    if draft.get('allocation_type') == 'MIXED' and 'allocation_mode' in df.columns:
-        # Keep existing allocation_mode for MIXED type
-        pass
-    else:
-        # Set uniform allocation_mode for SOFT/HARD
-        df['allocation_mode'] = draft.get('allocation_type', 'SOFT')
+    # Set uniform allocation_mode for SOFT/HARD (no more MIXED)
+    df['allocation_mode'] = draft.get('allocation_type', 'SOFT')
     
     # === 4. DEMAND TYPE MAPPING ===
     if 'source_type' in df.columns:
@@ -1977,64 +2096,68 @@ def build_allocation_context(draft: Dict, results: pd.DataFrame) -> Dict:
     }
 
 
-def show_step6_confirm_with_mapping():
-    """Step 6: Confirm allocation with supply mapping (for HARD allocation)"""
+def show_step6_final_confirm():
+    """Step 6: Final confirmation for HARD allocation"""
     st.markdown("#### ✅ Confirm Allocation Plan (with Supply Mapping)")
     
     # Get data
-    allocation_results = st.session_state.get('temp_allocation_results', pd.DataFrame())
+    allocation_results = st.session_state.get('draft_allocation', {}).get('results', pd.DataFrame())
+    excluded_lines = st.session_state.get('draft_allocation', {}).get('excluded_lines', pd.DataFrame())
     supply_mapping = st.session_state.get('supply_mapping', {})
-    draft = st.session_state.get('draft_allocation', {})
     
     if allocation_results.empty:
         st.error("No allocation results found")
         return
     
+    # Show excluded lines info if any
+    if not excluded_lines.empty:
+        st.info(f"""
+        ℹ️ **Note**: {len(excluded_lines)} line(s) with 0 allocation were excluded.
+        Only {len(allocation_results)} valid lines with supply mapping will be saved.
+        """)
+    
     # Add supply mapping info to results
     allocation_results = allocation_results.copy()
     
-    # Initialize with SOFT
-    allocation_results['allocation_mode'] = 'SOFT'
+    # Update with supply mapping
+    allocation_results['allocation_mode'] = 'HARD'  # All are HARD
     allocation_results['supply_source_type'] = None
     allocation_results['supply_source_id'] = None
     
-    # Update with HARD mappings
     for demand_key, mapping in supply_mapping.items():
         mask = allocation_results['demand_line_id'].astype(str) == str(demand_key)
-        allocation_results.loc[mask, 'allocation_mode'] = 'HARD'
         allocation_results.loc[mask, 'supply_source_type'] = mapping.get('source_type')
         allocation_results.loc[mask, 'supply_source_id'] = mapping.get('source_id')
     
     # Store in draft
     st.session_state['draft_allocation']['results'] = allocation_results
     
-    # Use the same confirmation interface
+    # Use the same confirmation interface as SOFT
     show_step5_confirm()
     
     # Add HARD allocation specific section
-    if supply_mapping:
-        st.markdown("---")
-        st.markdown("##### 🔒 HARD Allocation Mapping Summary")
+    st.markdown("---")
+    st.markdown("##### 🔒 HARD Allocation Mapping Summary")
+    
+    mapping_summary = []
+    for demand_id, mapping in supply_mapping.items():
+        detail = allocation_results[allocation_results['demand_line_id'].astype(str) == str(demand_id)]
+        if not detail.empty:
+            row = detail.iloc[0]
+            mapping_summary.append({
+                'Product': row['pt_code'],
+                'Customer': row.get('customer', row.get('customer_name', '')),
+                'Allocated Qty': f"{row['allocated_qty']:.0f}",
+                'Supply Type': mapping['source_type'],
+                'Supply ID': mapping['source_id'],
+                'Mode': '🔒 HARD'
+            })
+    
+    if mapping_summary:
+        mapping_df = pd.DataFrame(mapping_summary)
+        st.dataframe(mapping_df, use_container_width=True, hide_index=True)
         
-        mapping_summary = []
-        for demand_id, mapping in supply_mapping.items():
-            detail = allocation_results[allocation_results['demand_line_id'].astype(str) == str(demand_id)]
-            if not detail.empty:
-                row = detail.iloc[0]
-                mapping_summary.append({
-                    'Product': row['pt_code'],
-                    'Customer': row.get('customer', row.get('customer_name', '')),
-                    'Allocated Qty': f"{row['allocated_qty']:.0f}",
-                    'Supply Type': mapping['source_type'],
-                    'Supply ID': mapping['source_id'],
-                    'Mode': '🔒 HARD'
-                })
-        
-        if mapping_summary:
-            mapping_df = pd.DataFrame(mapping_summary)
-            st.dataframe(mapping_df, use_container_width=True, hide_index=True)
-            
-            st.success(f"✅ {len(mapping_df)} items will be HARD allocated to specific supply sources")
+        st.success(f"✅ {len(mapping_df)} items will be HARD allocated to specific supply sources")
 
 
 def export_allocation_preview(results: pd.DataFrame, context: Dict):
@@ -2946,7 +3069,7 @@ ALLOCATION_METHODS = {
 ALLOCATION_TYPES = {
     'SOFT': '🌊 Soft Allocation - Flexible quantity allocation',
     'HARD': '🔒 Hard Allocation - Lock specific supply batches',
-    'MIXED': '🔀 Mixed - Combination of soft and hard'
+    # 'MIXED': '🔀 Mixed - Combination of soft and hard'
 }
 
 # Update ALLOCATION_STATUS_COLORS constant
