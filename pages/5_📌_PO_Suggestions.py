@@ -1,3 +1,4 @@
+# pages/5_📌_PO_Suggestions.py
 import streamlit as st
 import sys
 from pathlib import Path
@@ -7,72 +8,67 @@ sys.path.append(str(Path(__file__).parent.parent))
 
 from utils.auth import AuthManager
 
-# Authentication check
+# === Page Config ===
+st.set_page_config(
+    page_title="PO Suggestions - SCM",
+    page_icon="📌",
+    layout="wide"
+)
+
+# === Authentication Check ===
 auth_manager = AuthManager()
 if not auth_manager.check_session():
     st.switch_page("pages/0_🔐_Login.py")
     st.stop()
 
-from datetime import datetime
-
-# === Page Config ===
-st.set_page_config(
-    page_title="PO Suggestions & Reallocation - SCM",
-    page_icon="📌",
-    layout="wide"
-)
-
-
-# === Help Section ===
-with st.expander("ℹ️ Understanding PO Suggestions & Reallocation", expanded=True):
-    st.markdown("""
-    ### PO Suggestions Logic
-    
-    **Order Quantity Calculation:**
-    - Base: Current shortage quantity
-    - Plus: Safety stock buffer
-    - Rounded: To practical order sizes
-    - Future: Consider MOQ, SPQ, EOQ
-    
-    **Lead Time Categories:**
-    - **Urgent**: Air freight, 7 days
-    - **Standard**: Regular shipping, 30 days
-    - **Economic**: Sea freight, 60 days
-    
-    **Safety Stock Methods:**
-    - **Fixed Days**: X days of average demand
-    - **Percentage**: X% above shortage
-    - **Statistical**: Based on demand variability
-    - **Custom**: Product-specific rules
-    
-    ### Reallocation Benefits
-    
-    **When to Reallocate:**
-    - Surplus in one location, shortage in another
-    - Transfer cost < new purchase cost
-    - Time critical situations
-    - Expiring inventory
-    
-    **Considerations:**
-    - Transportation costs
-    - Handling complexity
-    - Tax implications
-    - System updates
-    
-    ### Combined Strategy
-    
-    **Optimization Approach:**
-    1. First: Use available surplus (reallocation)
-    2. Then: Order remaining shortage (PO)
-    3. Result: Minimum cost and time
-    
-    **Success Factors:**
-    - Accurate inventory data
-    - Good inter-entity coordination
-    - Reliable transportation
-    - Clear communication
-    """)
-
-# Footer
+# === Header ===
+st.title("📌 PO Suggestions")
 st.markdown("---")
-st.caption(f"Analysis completed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
+# === Coming Soon Message ===
+col1, col2, col3 = st.columns([1, 2, 1])
+
+with col2:
+    st.markdown("""
+    ## 🚀 Coming Soon!
+    
+    ### AI-Powered Purchase Order Recommendations
+    
+    We're building an intelligent system that will:
+    
+    #### 📊 **Smart Analysis**
+    - Analyze demand patterns and forecast future needs
+    - Calculate optimal order quantities (EOQ)
+    - Consider lead times and safety stock requirements
+    
+    #### 🤖 **AI Features**
+    - Machine learning-based demand prediction
+    - Intelligent supplier selection
+    - Automated PO generation from GAP analysis
+    - Natural language queries for PO insights
+    
+    #### 🎯 **Key Benefits**
+    - Reduce stockouts by 30%
+    - Optimize inventory costs
+    - Automate repetitive procurement tasks
+    - Data-driven decision making
+    
+    ---
+    
+    **Expected Launch: Q4 2025**
+    
+    📧 Questions? Contact the SCM team
+    """)
+    
+    # Simple beta signup
+    with st.expander("🔔 Get notified when available"):
+        email = st.text_input("Email for updates:", placeholder="your.email@company.com")
+        if st.button("Notify Me", type="primary"):
+            if email:
+                st.success("✅ We'll notify you when PO Suggestions launches!")
+            else:
+                st.error("Please enter your email")
+
+# === Footer ===
+st.markdown("---")
+st.caption("SCM Control Center v1.0")
