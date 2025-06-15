@@ -419,11 +419,19 @@ class AllocationManager:
             Tuple[Dict, pd.DataFrame]: Plan dict and details DataFrame
         """
         try:
-            # Get plan header with JSON extraction
+            # Get plan header with display_status from summary view
             plan_query = """
                 SELECT 
                     ap.*, 
                     u.username as creator_name,
+                    -- Get display_status from summary view
+                    vaps.display_status,
+                    vaps.draft_count,
+                    vaps.allocated_count,
+                    vaps.delivered_count,
+                    vaps.cancelled_count,
+                    vaps.total_count,
+                    vaps.fulfillment_rate,
                     -- Extract allocation_method from multiple possible JSON paths
                     COALESCE(
                         JSON_UNQUOTE(JSON_EXTRACT(ap.allocation_context, '$.allocation_method')),
@@ -438,6 +446,7 @@ class AllocationManager:
                     ) as allocation_type
                 FROM allocation_plans ap
                 LEFT JOIN users u ON ap.creator_id = u.id
+                LEFT JOIN v_allocation_plans_summary vaps ON ap.id = vaps.id
                 WHERE ap.id = :allocation_id
             """
             
@@ -480,8 +489,8 @@ class AllocationManager:
             # Add cancellation summary to plan
             plan['cancellation_summary'] = self.cancellation_manager.get_plan_cancellation_summary(allocation_id)
             
-            # Log successful retrieval
-            logger.info(f"Retrieved allocation plan {allocation_id} with {len(details_df)} details")
+            # Log successful retrieval with display_status
+            logger.info(f"Retrieved allocation plan {allocation_id} with {len(details_df)} details, display_status: {plan.get('display_status')}")
             
             return plan, details_df
             
