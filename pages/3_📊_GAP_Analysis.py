@@ -1529,7 +1529,7 @@ def show_gap_summary(gap_df, display_options, df_demand_filtered=None, df_supply
             )
     
     # === LEVEL 2: Expandable Details ===
-    with st.expander("📈 View Detailed Analysis", expanded=shortage_products > 0 or products_with_backlog > 0):
+    with st.expander("📈 View Detailed Analysis", expanded=bool(shortage_products > 0 or products_with_backlog > 0)):
         
         if shortage_products > 0 or products_with_backlog > 0:
             # Quick action summary
