@@ -1006,6 +1006,59 @@ class DataManager:
             logger.error(f"Error loading allocations: {str(e)}")
             return pd.DataFrame()
 
+    @st.cache_data(ttl=300)
+    def load_allocations_data(_self, include_drafts: bool = False):
+        """
+        Load allocation data for period-based GAP calculation
+        
+        Args:
+            include_drafts: Whether to include DRAFT allocations
+            
+        Returns:
+            DataFrame with allocations grouped by product, period info
+        """
+        try:
+            engine = get_db_engine()
+            
+            if include_drafts:
+                status_filter = "status IN ('ALLOCATED', 'DRAFT')"
+            else:
+                status_filter = "status = 'ALLOCATED'"
+            
+            query = text(f"""
+                SELECT 
+                    ad.pt_code,
+                    ad.demand_reference_id,
+                    ad.demand_type,
+                    ad.allocated_etd,
+                    ad.legal_entity_name,
+                    ad.status,
+                    SUM(ad.allocated_qty) as total_allocated_qty,
+                    SUM(ad.delivered_qty) as total_delivered_qty,
+                    SUM(ad.allocated_qty - ad.delivered_qty) as undelivered_qty
+                FROM allocation_details ad
+                WHERE {status_filter}
+                AND ad.allocated_qty > ad.delivered_qty
+                GROUP BY 
+                    ad.pt_code, 
+                    ad.demand_reference_id, 
+                    ad.demand_type, 
+                    ad.allocated_etd, 
+                    ad.legal_entity_name,
+                    ad.status
+            """)
+            
+            df = pd.read_sql(query, engine)
+            
+            logger.info(f"Loaded {len(df)} allocation records (include_drafts={include_drafts})")
+            
+            return df
+            
+        except Exception as e:
+            logger.error(f"Error loading allocations data: {str(e)}")
+            return pd.DataFrame()
+
+
     def enhance_demand_with_allocations(self, demand_df: pd.DataFrame, 
                                     include_drafts: bool = False) -> pd.DataFrame:
         """Enhance demand data with allocation information
@@ -1201,196 +1254,14 @@ class DataManager:
             
             return demand_df
 
-
     def enhance_supply_with_allocations(self, supply_df: pd.DataFrame, 
                                     include_drafts: bool = False) -> pd.DataFrame:
         """
-        Enhance supply data with allocation information
-        
-        IMPORTANT: Only ALLOCATED status affects supply availability.
-        DRAFT allocations do NOT reduce available supply as they:
-        - Cannot trigger delivery requests
-        - Can be cancelled anytime
-        - Are not committed
-        
-        Args:
-            supply_df: Supply dataframe to enhance
-            include_drafts: DEPRECATED - kept for backward compatibility but has NO EFFECT
-                        on supply calculations. Only affects demand side.
-        
-        Returns:
-            Enhanced dataframe with:
-            - allocation_undelivered: Quantity allocated but not yet delivered (ALLOCATED only)
-            - available_quantity: Actual available supply (quantity - allocation_undelivered)
+        DEPRECATED: Supply allocation impact should be calculated at period level
+        Returns original dataframe without modification
         """
-        if supply_df.empty:
-            return supply_df
-        
-        try:
-            # Log deprecation warning if include_drafts is True
-            if include_drafts and st.session_state.get('debug_mode', False):
-                logger.warning(
-                    "include_drafts=True passed to enhance_supply_with_allocations, "
-                    "but this parameter does NOT affect supply availability calculation. "
-                    "Only ALLOCATED status reduces available supply."
-                )
-            
-            # Query ONLY ALLOCATED allocations
-            # Using the existing view which already filters correctly
-            allocations_query = text("""
-                SELECT 
-                    pt_code,
-                    legal_entity_name,
-                    SUM(undelivered_qty) as undelivered_qty
-                FROM active_allocations_view
-                WHERE undelivered_qty > 0
-                GROUP BY pt_code, legal_entity_name
-            """)
-            
-            # Alternative direct query if view is not available
-            # allocations_query = text("""
-            #     SELECT 
-            #         pt_code,
-            #         legal_entity_name,
-            #         SUM(allocated_qty - delivered_qty) as undelivered_qty
-            #     FROM allocation_details
-            #     WHERE status = 'ALLOCATED'
-            #       AND (allocated_qty - delivered_qty) > 0
-            #     GROUP BY pt_code, legal_entity_name
-            # """)
-            
-            # Execute query
-            engine = get_db_engine()
-            allocations_df = pd.read_sql(allocations_query, engine)
-            
-            # Log query results
-            if st.session_state.get('debug_mode', False):
-                logger.info(
-                    f"Supply allocations query returned {len(allocations_df)} "
-                    f"product-entity combinations with undelivered allocations"
-                )
-            
-            # If no allocations exist, add columns with zero values
-            if allocations_df.empty:
-                supply_df['allocation_undelivered'] = 0
-                supply_df['available_quantity'] = supply_df['quantity']
-                
-                if st.session_state.get('debug_mode', False):
-                    logger.info("No active allocations found - all supply is available")
-                
-                return supply_df
-            
-            # Rename columns for consistency
-            allocation_summary = allocations_df.rename(columns={
-                'legal_entity_name': 'legal_entity',
-                'undelivered_qty': 'allocation_undelivered'
-            })
-            
-            # Validate legal_entity exists in supply_df
-            if 'legal_entity' not in supply_df.columns:
-                logger.error(
-                    "legal_entity column missing in supply_df. "
-                    "Cannot match allocations without entity information."
-                )
-                # Fallback: add columns with zero values
-                supply_df['allocation_undelivered'] = 0
-                supply_df['available_quantity'] = supply_df['quantity']
-                return supply_df
-            
-            # Merge allocation data with supply
-            # Using left join to keep all supply records
-            supply_enhanced = supply_df.merge(
-                allocation_summary,
-                on=['pt_code', 'legal_entity'],
-                how='left',
-                suffixes=('', '_alloc')  # Avoid column name conflicts
-            )
-            
-            # Fill NaN with 0 for products without allocations
-            supply_enhanced['allocation_undelivered'] = (
-                supply_enhanced['allocation_undelivered'].fillna(0)
-            )
-            
-            # Calculate available quantity
-            # Available = Total Supply - Undelivered Allocations
-            supply_enhanced['available_quantity'] = (
-                supply_enhanced['quantity'] - supply_enhanced['allocation_undelivered']
-            ).clip(lower=0)  # Ensure non-negative
-            
-            # Add warning flag for over-allocated items
-            supply_enhanced['is_over_allocated'] = (
-                supply_enhanced['allocation_undelivered'] > supply_enhanced['quantity']
-            )
-            
-            # Calculate allocation percentage for visibility
-            supply_enhanced['allocation_percent'] = np.where(
-                supply_enhanced['quantity'] > 0,
-                (supply_enhanced['allocation_undelivered'] / supply_enhanced['quantity'] * 100).round(1),
-                0
-            )
-            
-            # Log summary statistics
-            if st.session_state.get('debug_mode', False):
-                total_supply = supply_enhanced['quantity'].sum()
-                total_allocated = supply_enhanced['allocation_undelivered'].sum()
-                total_available = supply_enhanced['available_quantity'].sum()
-                over_allocated_count = supply_enhanced['is_over_allocated'].sum()
-                
-                logger.info(
-                    f"Supply allocation summary: "
-                    f"Total Supply={total_supply:,.0f}, "
-                    f"Allocated Undelivered={total_allocated:,.0f}, "
-                    f"Available={total_available:,.0f}"
-                )
-                
-                if over_allocated_count > 0:
-                    logger.warning(
-                        f"Found {over_allocated_count} over-allocated items where "
-                        f"undelivered allocations exceed available supply"
-                    )
-                    
-                    # Log details of over-allocated items
-                    over_allocated_items = supply_enhanced[
-                        supply_enhanced['is_over_allocated']
-                    ][['pt_code', 'legal_entity', 'quantity', 'allocation_undelivered']]
-                    
-                    logger.warning(f"Over-allocated items:\n{over_allocated_items}")
-            
-            # Show UI warning if over-allocation detected
-            if supply_enhanced['is_over_allocated'].any():
-                over_allocated_value = supply_enhanced[
-                    supply_enhanced['is_over_allocated']
-                ]['quantity'].sum()
-                
-                st.warning(
-                    f"⚠️ Over-allocation detected: Some items have more allocations "
-                    f"than available supply. Total over-allocated value: "
-                    f"${over_allocated_value:,.0f}"
-                )
-            
-            # Clean up temporary columns if not in debug mode
-            if not st.session_state.get('debug_mode', False):
-                columns_to_drop = ['is_over_allocated', 'allocation_percent']
-                for col in columns_to_drop:
-                    if col in supply_enhanced.columns:
-                        supply_enhanced = supply_enhanced.drop(columns=[col])
-            
-            return supply_enhanced
-            
-        except Exception as e:
-            logger.error(
-                f"Error enhancing supply with allocations: {str(e)}", 
-                exc_info=True
-            )
-            
-            # Fallback: Return original with default values
-            supply_df['allocation_undelivered'] = 0
-            supply_df['available_quantity'] = supply_df['quantity']
-            
-            # Show error to user
-            st.error(
-                "⚠️ Could not load allocation data. "
-                "Showing total supply without allocation adjustments."
-            )
-            
-            return supply_df
+        logger.warning(
+            "enhance_supply_with_allocations is deprecated. "
+            "Supply allocation impact is now calculated during period processing."
+        )
+        return supply_df.copy()

@@ -833,7 +833,7 @@ def apply_filters_to_data(df_demand, df_supply, filters, selected_customers,
 # Trong 3_📊_GAP_Analysis.py
 def calculate_gap_with_carry_forward(df_demand, df_supply, period_type="Weekly", 
                                     use_adjusted_demand=True, use_adjusted_supply=True,
-                                    track_backlog=True):
+                                    track_backlog=True, include_drafts=False):
     """
     Enhanced version with proper backlog tracking
     
@@ -848,8 +848,9 @@ def calculate_gap_with_carry_forward(df_demand, df_supply, period_type="Weekly",
         return pd.DataFrame()
     
     # Get allocations data
-    allocations_df = data_manager.load_active_allocations()
-    
+    # allocations_df = data_manager.load_active_allocations()
+    allocations_df = data_manager.load_allocations_data(include_drafts=include_drafts)
+
     # Initialize processor
     processor = PeriodBasedGAPProcessor(period_type)
     
@@ -3138,16 +3139,11 @@ if st.button("🚀 Run GAP Analysis", type="primary", use_container_width=True):
                 include_drafts=include_drafts  # ✅ Fix: Pass the parameter
             )
             
-            # Enhance supply with allocations
-            df_supply_enhanced = data_manager.enhance_supply_with_allocations(
-                df_supply_all,
-                include_drafts=include_drafts
-            )
 
         # Apply filters on ENHANCED data
         df_demand_filtered, df_supply_filtered = apply_filters_to_data(
             df_demand_enhanced,  # Use enhanced
-            df_supply_enhanced,  # Use enhanced
+            df_supply_all,  # Use Original
             filters, 
             selected_sources.get("selected_customers", []),
             use_adjusted_demand,
@@ -3275,12 +3271,13 @@ if st.session_state.get('gap_analysis_ran', False):
             # Calculate GAP
             with st.spinner("Calculating supply-demand gaps..."):
                 gap_df = calculate_gap_with_carry_forward(
-                    df_demand_filtered_display, 
-                    df_supply_filtered_display, 
+                    df_demand_filtered_display, # Đã enhanced
+                    df_supply_filtered_display, # KHÔNG enhanced
                     current_period,
                     date_modes['demand'],
                     date_modes['supply'],
-                    track_backlog=calc_options.get('track_backlog', True)
+                    track_backlog=calc_options.get('track_backlog', True),
+                    include_drafts=calc_options.get('include_draft_allocations', False)
                 )
                 # Cache the results
                 st.session_state['gap_df_cached'] = gap_df

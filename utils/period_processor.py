@@ -22,10 +22,6 @@ class PeriodBasedGAPProcessor:
         """
         Process all data by period for GAP calculation
         
-        Key improvements:
-        1. Single pass processing - no double enhancement
-        2. Period-aligned from start
-        3. Proper allocation tracking by period
         """
         
         # Step 1: Add period column to all dataframes
@@ -150,30 +146,20 @@ class PeriodBasedGAPProcessor:
         return demand_df.groupby(['pt_code', 'period']).agg(agg_dict).reset_index()
     
     def _group_supply_by_period(self, supply_df: pd.DataFrame) -> pd.DataFrame:
-        """Group supply by product + period"""
         if supply_df.empty:
             return pd.DataFrame()
-            
-        # Use available_quantity if exists (from enhance_supply_with_allocations)
-        quantity_col = 'available_quantity' if 'available_quantity' in supply_df.columns else 'quantity'
         
-        # Define aggregation dict
+        # ALWAYS use 'quantity', NOT 'available_quantity'
+        quantity_col = 'quantity'  # Fixed
+        
         agg_dict = {
-            quantity_col: 'sum'
+            quantity_col: 'sum',
+            'product_name': 'first',
+            'package_size': 'first',
+            'standard_uom': 'first'
         }
         
-        # Include product info columns if they exist
-        if 'product_name' in supply_df.columns:
-            agg_dict['product_name'] = 'first'
-        if 'package_size' in supply_df.columns:
-            agg_dict['package_size'] = 'first'
-        if 'standard_uom' in supply_df.columns:
-            agg_dict['standard_uom'] = 'first'
-        
-        # Group by product and period
         result_df = supply_df.groupby(['pt_code', 'period']).agg(agg_dict).reset_index()
-        
-        # Rename quantity column
         result_df = result_df.rename(columns={quantity_col: 'supply_quantity'})
         
         return result_df
