@@ -1,3 +1,4 @@
+# === COMPLETE NEW VERSION - SIMPLIFIED ===
 # utils/period_processor.py
 import pandas as pd
 import logging
@@ -8,20 +9,18 @@ from utils.helpers import convert_to_period
 logger = logging.getLogger(__name__)
 
 class PeriodBasedGAPProcessor:
-    """Process all data by period for GAP calculation"""
+    """Process all data by period for GAP calculation - SIMPLIFIED"""
     
     def __init__(self, period_type: str = 'Weekly'):
         self.period_type = period_type
     
     def process_for_gap(self, 
                        demand_df: pd.DataFrame, 
-                       supply_df: pd.DataFrame, 
-                       allocations_df: pd.DataFrame,
+                       supply_df: pd.DataFrame,
                        use_adjusted_demand: bool = True,
                        use_adjusted_supply: bool = True) -> pd.DataFrame:
         """
-        Process all data by period for GAP calculation
-        
+        Process all data by period for GAP calculation - NO ALLOCATION NEEDED
         """
         
         # Step 1: Add period column to all dataframes
@@ -38,25 +37,14 @@ class PeriodBasedGAPProcessor:
             use_adjusted=use_adjusted_supply
         )
         
-        allocations_with_period = self._add_period_column(
-            allocations_df,
-            date_col='allocated_etd',
-            df_type='allocation'
-        )
-        
         # Step 2: Group by product + period
         demand_grouped = self._group_demand_by_period(demand_with_period)
         supply_grouped = self._group_supply_by_period(supply_with_period)
-        allocation_grouped = self._group_allocations_by_period(allocations_with_period)
         
-        # Step 3: Merge all data
-        period_data = self._merge_period_data(
-            demand_grouped,
-            supply_grouped, 
-            allocation_grouped
-        )
+        # Step 3: Merge data (NO ALLOCATION)
+        period_data = self._merge_period_data(demand_grouped, supply_grouped)
         
-        # Step 4: Calculate net values
+        # Step 4: Calculate net values (SIMPLIFIED)
         period_data = self._calculate_net_values(period_data)
         
         return period_data
@@ -123,11 +111,11 @@ class PeriodBasedGAPProcessor:
         return None
     
     def _group_demand_by_period(self, demand_df: pd.DataFrame) -> pd.DataFrame:
-        """Group demand by product + period"""
+        """Group demand by product + period - SIMPLIFIED"""
         if demand_df.empty:
             return pd.DataFrame()
             
-        # Include both original and unallocated demand
+        # Simple aggregation - demand_quantity is already net of delivered
         agg_dict = {
             'demand_quantity': 'sum',
             'product_name': 'first',
@@ -135,54 +123,32 @@ class PeriodBasedGAPProcessor:
             'standard_uom': 'first'
         }
         
-        # Add allocation columns if they exist
-        if 'unallocated_demand' in demand_df.columns:
-            agg_dict['unallocated_demand'] = 'sum'
-        if 'total_allocated' in demand_df.columns:
-            agg_dict['total_allocated'] = 'sum'
-        if 'total_delivered' in demand_df.columns:
-            agg_dict['total_delivered'] = 'sum'
-            
         return demand_df.groupby(['pt_code', 'period']).agg(agg_dict).reset_index()
     
     def _group_supply_by_period(self, supply_df: pd.DataFrame) -> pd.DataFrame:
+        """Group supply by product + period"""
         if supply_df.empty:
             return pd.DataFrame()
         
-        # ALWAYS use 'quantity', NOT 'available_quantity'
-        quantity_col = 'quantity'  # Fixed
-        
         agg_dict = {
-            quantity_col: 'sum',
+            'quantity': 'sum',
             'product_name': 'first',
             'package_size': 'first',
             'standard_uom': 'first'
         }
         
         result_df = supply_df.groupby(['pt_code', 'period']).agg(agg_dict).reset_index()
-        result_df = result_df.rename(columns={quantity_col: 'supply_quantity'})
+        result_df = result_df.rename(columns={'quantity': 'supply_quantity'})
         
         return result_df
 
-    def _group_allocations_by_period(self, allocations_df: pd.DataFrame) -> pd.DataFrame:
-        """Group allocations by product + period"""
-        if allocations_df.empty:
-            return pd.DataFrame()
-            
-        return allocations_df.groupby(['pt_code', 'period']).agg({
-            'total_allocated_qty': 'sum',
-            'total_delivered_qty': 'sum',
-            'undelivered_qty': 'sum'
-        }).reset_index()
-    
-
-    def _merge_period_data(self, demand_df: pd.DataFrame, supply_df: pd.DataFrame, 
-                        allocation_df: pd.DataFrame) -> pd.DataFrame:
-        """Merge all period data with proper handling of missing values"""
+    def _merge_period_data(self, demand_df: pd.DataFrame, 
+                          supply_df: pd.DataFrame) -> pd.DataFrame:
+        """Merge period data - SIMPLIFIED without allocation"""
         # Get all unique product-period combinations
         all_keys = set()
         
-        for df in [demand_df, supply_df, allocation_df]:
+        for df in [demand_df, supply_df]:
             if not df.empty and 'pt_code' in df.columns and 'period' in df.columns:
                 keys = df[['pt_code', 'period']].apply(tuple, axis=1)
                 all_keys.update(keys)
@@ -193,7 +159,7 @@ class PeriodBasedGAPProcessor:
         # Create base dataframe
         base_data = pd.DataFrame(list(all_keys), columns=['pt_code', 'period'])
         
-        # IMPORTANT: Get product info from BOTH demand and supply
+        # Get product info from BOTH demand and supply
         product_info_list = []
         
         # Get from demand first
@@ -203,7 +169,6 @@ class PeriodBasedGAPProcessor:
         
         # Get from supply (for supply-only products)
         if not supply_df.empty:
-            # Check if supply has product info columns
             supply_info_cols = ['pt_code']
             if 'product_name' in supply_df.columns:
                 supply_info_cols.append('product_name')
@@ -212,112 +177,64 @@ class PeriodBasedGAPProcessor:
             if 'standard_uom' in supply_df.columns:
                 supply_info_cols.append('standard_uom')
             
-            if len(supply_info_cols) > 1:  # Has more than just pt_code
+            if len(supply_info_cols) > 1:
                 supply_product_info = supply_df[supply_info_cols].drop_duplicates()
                 product_info_list.append(supply_product_info)
         
-        # Combine product info from all sources
+        # Combine product info
         if product_info_list:
-            # Concatenate all product info
             all_product_info = pd.concat(product_info_list, ignore_index=True)
-            
-            # Remove duplicates, keeping first (prioritize demand info)
             all_product_info = all_product_info.drop_duplicates(subset=['pt_code'], keep='first')
-            
-            # Merge with base data
             base_data = base_data.merge(all_product_info, on='pt_code', how='left')
-        else:
-            # Add empty columns if no product info available
-            base_data['product_name'] = ''
-            base_data['package_size'] = ''
-            base_data['standard_uom'] = ''
         
         # Merge demand data
         if not demand_df.empty:
-            # Drop product info columns to avoid conflicts
-            demand_cols_to_merge = [col for col in demand_df.columns 
-                                if col not in ['product_name', 'package_size', 'standard_uom']]
+            demand_cols = [col for col in demand_df.columns 
+                          if col not in ['product_name', 'package_size', 'standard_uom']]
             base_data = base_data.merge(
-                demand_df[demand_cols_to_merge],
+                demand_df[demand_cols],
                 on=['pt_code', 'period'],
                 how='left'
             )
         
         # Merge supply data
         if not supply_df.empty:
-            # Drop product info columns to avoid conflicts
-            supply_cols_to_merge = [col for col in supply_df.columns 
-                                if col not in ['product_name', 'package_size', 'standard_uom']]
+            supply_cols = [col for col in supply_df.columns 
+                          if col not in ['product_name', 'package_size', 'standard_uom']]
             base_data = base_data.merge(
-                supply_df[supply_cols_to_merge],
+                supply_df[supply_cols],
                 on=['pt_code', 'period'],
                 how='left'
             )
         
-        # Merge allocation data
-        if not allocation_df.empty:
-            base_data = base_data.merge(
-                allocation_df,
-                on=['pt_code', 'period'],
-                how='left',
-                suffixes=('', '_alloc')
-            )
-        
         # Fill NaN with 0 for numeric columns
-        numeric_cols = [
-            'demand_quantity', 'unallocated_demand', 'total_allocated', 'total_delivered',
-            'supply_quantity', 'total_allocated_qty', 'total_delivered_qty', 'undelivered_qty'
-        ]
-        
+        numeric_cols = ['demand_quantity', 'supply_quantity']
         for col in numeric_cols:
             if col in base_data.columns:
                 base_data[col] = base_data[col].fillna(0)
             else:
                 base_data[col] = 0
         
-        # Fill empty strings for text columns
-        text_cols = ['product_name', 'package_size', 'standard_uom']
-        for col in text_cols:
-            if col in base_data.columns:
-                base_data[col] = base_data[col].fillna('')
-            else:
-                base_data[col] = ''
-
         return base_data
 
-
     def _calculate_net_values(self, period_data: pd.DataFrame) -> pd.DataFrame:
-        """Calculate net values for GAP analysis"""
+        """Calculate net values for GAP analysis - SUPER SIMPLE"""
         df = period_data.copy()
         
-        # Calculate unallocated demand if not already present
-        if 'unallocated_demand' not in df.columns:
-            # Use allocation data if available
-            if 'total_allocated_qty' in df.columns:
-                df['unallocated_demand'] = df['demand_quantity'] - df['total_allocated_qty']
-            else:
-                df['unallocated_demand'] = df['demand_quantity']
-        
-        # Ensure non-negative
-        df['unallocated_demand'] = df['unallocated_demand'].clip(lower=0)
-        
-        # Calculate available supply (considering allocations)
-        if 'undelivered_qty' in df.columns:
-            df['available_supply'] = df['supply_quantity'] - df['undelivered_qty']
-        else:
-            df['available_supply'] = df['supply_quantity']
-        
-        # Ensure non-negative
-        df['available_supply'] = df['available_supply'].clip(lower=0)
-        
-        # Calculate GAP
-        df['gap_quantity'] = df['available_supply'] - df['unallocated_demand']
+        # Demand is already net of delivered (from view)
+        # Supply is available supply
+        # So GAP is simply:
+        df['gap_quantity'] = df['supply_quantity'] - df['demand_quantity']
         
         # Calculate fulfillment rate
         df['fulfillment_rate'] = df.apply(
-            lambda row: min(100, (row['available_supply'] / row['unallocated_demand'] * 100))
-            if row['unallocated_demand'] > 0 else 100,
+            lambda row: min(100, (row['supply_quantity'] / row['demand_quantity'] * 100))
+            if row['demand_quantity'] > 0 else 100,
             axis=1
         )
+        
+        # For carry forward logic, we need these columns
+        df['available_supply'] = df['supply_quantity']
+        df['unallocated_demand'] = df['demand_quantity']  # Already net
         
         return df

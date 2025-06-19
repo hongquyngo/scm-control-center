@@ -853,6 +853,8 @@ def apply_period_indicators(
     
     return display_df
 
+
+
 def format_pivot_with_periods(
     pivot_df: pd.DataFrame,
     period_type: str,

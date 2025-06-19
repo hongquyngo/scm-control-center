@@ -166,17 +166,6 @@ class DataManager:
         """
         return pd.read_sql(text(query), engine)
 
-    @st.cache_data(ttl=1800)
-    def load_active_allocations(_self):
-        """Load active allocations affecting supply"""
-        engine = get_db_engine()
-        query = """
-        SELECT * FROM active_allocations_view
-        WHERE undelivered_qty > 0
-        """
-        return pd.read_sql(text(query), engine)
-
-        # === Private Helper Methods ===
 
     def _is_bulk_cache_valid(self) -> bool:
         """Check if bulk cache is still valid"""
@@ -677,47 +666,32 @@ class DataManager:
         return insights
 
     # === Public Data Access Methods ===
-
     def get_demand_data(self, sources: List[str], include_converted: bool = False) -> pd.DataFrame:
-        """Get combined demand data with standardization"""
+        """Get combined demand data with standardization - SIMPLIFIED"""
         df_parts = []
         
         if "OC" in sources:
             df_oc = self.load_demand_oc()
             if not df_oc.empty:
                 df_oc["source_type"] = "OC"
-                # Standardize first
                 df_oc = self._standardize_demand_df(df_oc, is_forecast=False)
-                # Then apply time adjustments
                 df_oc = self._time_adjustment_integration.apply_adjustments(df_oc, "OC")
-                # Only append ONCE after both operations
                 df_parts.append(df_oc)
         
         if "Forecast" in sources:
             df_fc = self.load_demand_forecast()
             if not df_fc.empty:
                 df_fc["source_type"] = "Forecast"
-                # Standardize first
                 standardized_fc = self._standardize_demand_df(df_fc, is_forecast=True)
-                # Then apply time adjustments
                 standardized_fc = self._time_adjustment_integration.apply_adjustments(standardized_fc, "Forecast")
                 
                 if not include_converted and 'is_converted_to_oc' in standardized_fc.columns:
-                    # Handle multiple possible formats for converted status
                     converted_values = ['Yes', 'yes', 'Y', 'y', '1', 1, True, 'True', 'true']
-                    
-                    # Debug log
-                    if st.session_state.get('debug_mode', False):
-                        before_count = len(standardized_fc)
-                        converted_count = standardized_fc['is_converted_to_oc'].isin(converted_values).sum()
-                        logger.info(f"Filtering converted forecasts: {converted_count} out of {before_count}")
-                    
                     standardized_fc = standardized_fc[~standardized_fc["is_converted_to_oc"].isin(converted_values)]
                 
                 df_parts.append(standardized_fc)
         
         return pd.concat(df_parts, ignore_index=True) if df_parts else pd.DataFrame()
-
 
     # Add this fix to get_supply_data method in DataManager
     # This handles the case when some sources return empty dataframes
@@ -799,9 +773,9 @@ class DataManager:
         """Get adjustment status from integration layer"""
         return self._time_adjustment_integration.get_adjustment_status()
 
+
     def preload_all_data(self, force_refresh: bool = False) -> Dict[str, pd.DataFrame]:
-        """Parallel loading of all data types"""
-        # Check cache validity
+        """Parallel loading of all data types - SIMPLIFIED"""
         if not force_refresh and self._is_bulk_cache_valid():
             return self._cache
         
@@ -814,7 +788,6 @@ class DataManager:
             'supply_wh_transfer': self.load_pending_wh_transfer,
             'master_products': self.load_product_master,
             'master_customers': self.load_customer_master,
-            'active_allocations': self.load_active_allocations
         }
         
         with ThreadPoolExecutor(max_workers=5) as executor:
@@ -832,10 +805,9 @@ class DataManager:
                     logger.error(f"Error loading {key}: {str(e)}")
                     self._cache[key] = pd.DataFrame()
         
-        # Calculate insights after loading
         self._calculate_insights()
-        
         return self._cache
+
 
     def get_insights(self) -> Dict[str, Any]:
         """Get calculated insights across all data"""
@@ -982,286 +954,3 @@ class DataManager:
         
         return df
     
-    # Add these methods to DataManager class in data_manager.py
-
-    @st.cache_data(ttl=300)  # 5 minutes cache
-    def load_active_allocations(_self):
-        """Load active allocation details from view for demand matching"""
-        try:
-            engine = get_db_engine()
-            query = text("""
-                SELECT 
-                    *
-                FROM active_allocations_view
-                WHERE undelivered_qty > 0
-            """)
-            
-            df = pd.read_sql(query, engine)
-            
-            logger.info(f"Loaded {len(df)} active allocations with undelivered quantity")
-            
-            return df
-            
-        except Exception as e:
-            logger.error(f"Error loading allocations: {str(e)}")
-            return pd.DataFrame()
-
-    @st.cache_data(ttl=300)
-    def load_allocations_data(_self, include_drafts: bool = False):
-        """
-        Load allocation data for period-based GAP calculation
-        
-        Args:
-            include_drafts: Whether to include DRAFT allocations
-            
-        Returns:
-            DataFrame with allocations grouped by product, period info
-        """
-        try:
-            engine = get_db_engine()
-            
-            if include_drafts:
-                status_filter = "status IN ('ALLOCATED', 'DRAFT')"
-            else:
-                status_filter = "status = 'ALLOCATED'"
-            
-            query = text(f"""
-                SELECT 
-                    ad.pt_code,
-                    ad.demand_reference_id,
-                    ad.demand_type,
-                    ad.allocated_etd,
-                    ad.legal_entity_name,
-                    ad.status,
-                    SUM(ad.allocated_qty) as total_allocated_qty,
-                    SUM(ad.delivered_qty) as total_delivered_qty,
-                    SUM(ad.allocated_qty - ad.delivered_qty) as undelivered_qty
-                FROM allocation_details ad
-                WHERE {status_filter}
-                AND ad.allocated_qty > ad.delivered_qty
-                GROUP BY 
-                    ad.pt_code, 
-                    ad.demand_reference_id, 
-                    ad.demand_type, 
-                    ad.allocated_etd, 
-                    ad.legal_entity_name,
-                    ad.status
-            """)
-            
-            df = pd.read_sql(query, engine)
-            
-            logger.info(f"Loaded {len(df)} allocation records (include_drafts={include_drafts})")
-            
-            return df
-            
-        except Exception as e:
-            logger.error(f"Error loading allocations data: {str(e)}")
-            return pd.DataFrame()
-
-
-    def enhance_demand_with_allocations(self, demand_df: pd.DataFrame, 
-                                    include_drafts: bool = False) -> pd.DataFrame:
-        """Enhance demand data with allocation information
-        
-        Compatible with both Demand Analysis and GAP Analysis usage.
-        Adds allocation information including allocated quantities, delivery status,
-        and unallocated demand calculations.
-        
-        Args:
-            demand_df: Demand dataframe
-            include_drafts: Whether to include DRAFT allocations (default: False)
-        """
-        if demand_df.empty:
-            return demand_df
-        
-        try:
-            # Load allocations with DRAFT option support
-            engine = get_db_engine()
-            
-            if include_drafts:
-                # Include both ALLOCATED and DRAFT
-                allocations_query = text("""
-                    SELECT 
-                        pt_code,
-                        demand_type,
-                        demand_reference_id,
-                        SUM(CASE 
-                            WHEN status = 'ALLOCATED' THEN allocated_qty
-                            WHEN status = 'DRAFT' THEN allocated_qty
-                            ELSE 0 
-                        END) as total_allocated,
-                        SUM(CASE 
-                            WHEN status = 'ALLOCATED' THEN delivered_qty
-                            ELSE 0 
-                        END) as total_delivered,
-                        SUM(CASE 
-                            WHEN status = 'ALLOCATED' THEN (allocated_qty - delivered_qty)
-                            WHEN status = 'DRAFT' THEN allocated_qty
-                            ELSE 0 
-                        END) as allocation_undelivered
-                    FROM allocation_details
-                    WHERE status IN ('ALLOCATED', 'DRAFT')
-                    GROUP BY pt_code, demand_type, demand_reference_id
-                """)
-            else:
-                # Only ALLOCATED (use existing view)
-                allocations_query = text("""
-                    SELECT 
-                        pt_code,
-                        demand_type,
-                        demand_reference_id,
-                        SUM(total_allocated_qty) as total_allocated,
-                        SUM(total_delivered_qty) as total_delivered,
-                        SUM(undelivered_qty) as allocation_undelivered
-                    FROM active_allocations_view
-                    GROUP BY pt_code, demand_type, demand_reference_id
-                """)
-            
-            allocations_df = pd.read_sql(allocations_query, engine)
-            
-            # Initialize allocation columns with defaults
-            demand_df['total_allocated'] = 0
-            demand_df['total_delivered'] = 0
-            demand_df['allocation_undelivered'] = 0  # Changed from 'undelivered_allocated'
-            demand_df['allocation_numbers'] = ''
-            
-            # Keep original demand quantity for GAP analysis
-            demand_df['original_demand_qty'] = demand_df['demand_quantity'].copy()
-            
-            if allocations_df.empty:
-                # No allocations exist
-                demand_df['unallocated_demand'] = demand_df['demand_quantity']
-                demand_df['allocation_status'] = 'Not Allocated'
-                return demand_df
-            
-            # Create demand reference ID for matching (same logic as before)
-            if 'demand_line_id' in demand_df.columns:
-                demand_df['temp_ref_id'] = demand_df['demand_line_id'].str.extract(r'(\d+)_')[0]
-                demand_df['temp_ref_id'] = pd.to_numeric(demand_df['temp_ref_id'], errors='coerce')
-                
-                demand_df['temp_demand_type'] = demand_df['demand_line_id'].str.extract(r'_([A-Z]+)$')[0]
-                demand_df['temp_demand_type'] = demand_df['temp_demand_type'].map({
-                    'OC': 'OC',
-                    'FC': 'FORECAST'
-                }).fillna(demand_df['source_type'].map({'OC': 'OC', 'Forecast': 'FORECAST'}))
-            else:
-                # For Demand Analysis: Use existing reference fields
-                if 'ocd_id' in demand_df.columns:
-                    demand_df['temp_ref_id'] = pd.to_numeric(demand_df['ocd_id'], errors='coerce')
-                elif 'oc_id' in demand_df.columns:
-                    demand_df['temp_ref_id'] = pd.to_numeric(demand_df['oc_id'], errors='coerce')
-                elif 'forecast_line_id' in demand_df.columns:
-                    demand_df['temp_ref_id'] = pd.to_numeric(demand_df['forecast_line_id'], errors='coerce')
-                elif 'forecast_id' in demand_df.columns:
-                    demand_df['temp_ref_id'] = pd.to_numeric(demand_df['forecast_id'], errors='coerce')
-                else:
-                    demand_df['temp_ref_id'] = pd.to_numeric(
-                        demand_df.get('demand_number', pd.Series()).str.extract(r'(\d+)')[0], 
-                        errors='coerce'
-                    )
-                
-                demand_df['temp_demand_type'] = demand_df['source_type'].map({
-                    'OC': 'OC',
-                    'Forecast': 'FORECAST'
-                }).fillna('OC')
-            
-            # Log matching info in debug mode
-            if st.session_state.get('debug_mode', False):
-                logger.info(f"Demand enhancement - Reference IDs: {demand_df['temp_ref_id'].notna().sum()}/{len(demand_df)}")
-                logger.info(f"Include DRAFT allocations: {include_drafts}")
-                if include_drafts:
-                    logger.info("Including DRAFT allocations in calculation")
-            
-            # Merge allocations with demand
-            demand_enhanced = demand_df.merge(
-                allocations_df,
-                left_on=['pt_code', 'temp_demand_type', 'temp_ref_id'],
-                right_on=['pt_code', 'demand_type', 'demand_reference_id'],
-                how='left',
-                suffixes=('', '_alloc')
-            )
-            
-            # Update allocation columns with merged values
-            for col in ['total_allocated', 'total_delivered', 'allocation_undelivered']:
-                col_alloc = f'{col}_alloc'
-                if col_alloc in demand_enhanced.columns:
-                    mask = demand_enhanced[col_alloc].notna()
-                    demand_enhanced.loc[mask, col] = demand_enhanced.loc[mask, col_alloc]
-            
-            # Ensure numeric types
-            for col in ['total_allocated', 'total_delivered', 'allocation_undelivered', 'demand_quantity']:
-                demand_enhanced[col] = pd.to_numeric(demand_enhanced[col], errors='coerce').fillna(0)
-            
-            # Calculate unallocated demand
-            demand_enhanced['unallocated_demand'] = (
-                demand_enhanced['demand_quantity'] - demand_enhanced['total_allocated']
-            ).clip(lower=0)
-            
-            # Calculate allocation status with percentage
-            def get_allocation_status(row):
-                """Calculate allocation status with safety checks"""
-                try:
-                    if row['demand_quantity'] <= 0:
-                        return 'No Demand'
-                    elif row['total_allocated'] <= 0:
-                        return 'Not Allocated'
-                    elif row['total_allocated'] >= row['demand_quantity']:
-                        return 'Fully Allocated'
-                    else:
-                        pct = (row['total_allocated'] / row['demand_quantity'] * 100)
-                        return f'Partial ({pct:.0f}%)'
-                except:
-                    return 'Not Allocated'
-            
-            demand_enhanced['allocation_status'] = demand_enhanced.apply(get_allocation_status, axis=1)
-            
-            # Clean up temporary columns
-            temp_cols = ['temp_ref_id', 'temp_demand_type', 'demand_type', 'demand_reference_id']
-            for col in temp_cols:
-                if col in demand_enhanced.columns:
-                    demand_enhanced.drop(columns=[col], inplace=True)
-            
-            # Drop allocation merge columns
-            alloc_cols = [col for col in demand_enhanced.columns if col.endswith('_alloc')]
-            if alloc_cols:
-                demand_enhanced.drop(columns=alloc_cols, inplace=True)
-            
-            # Log summary in debug mode
-            if st.session_state.get('debug_mode', False):
-                allocation_summary = demand_enhanced.groupby('allocation_status').agg({
-                    'pt_code': 'count',
-                    'demand_quantity': 'sum',
-                    'total_allocated': 'sum'
-                })
-                logger.info(f"Allocation summary:\n{allocation_summary}")
-                
-                if include_drafts:
-                    logger.info("DRAFT allocations included in totals")
-            
-            return demand_enhanced
-            
-        except Exception as e:
-            logger.error(f"Error enhancing demand with allocations: {str(e)}", exc_info=True)
-            
-            # Return original with default values to ensure compatibility
-            demand_df['total_allocated'] = 0
-            demand_df['total_delivered'] = 0
-            demand_df['allocation_undelivered'] = 0  # Changed from 'undelivered_allocated'
-            demand_df['unallocated_demand'] = demand_df['demand_quantity']
-            demand_df['allocation_status'] = 'Not Allocated'
-            demand_df['allocation_numbers'] = ''
-            demand_df['original_demand_qty'] = demand_df['demand_quantity']
-            
-            return demand_df
-
-    def enhance_supply_with_allocations(self, supply_df: pd.DataFrame, 
-                                    include_drafts: bool = False) -> pd.DataFrame:
-        """
-        DEPRECATED: Supply allocation impact should be calculated at period level
-        Returns original dataframe without modification
-        """
-        logger.warning(
-            "enhance_supply_with_allocations is deprecated. "
-            "Supply allocation impact is now calculated during period processing."
-        )
-        return supply_df.copy()

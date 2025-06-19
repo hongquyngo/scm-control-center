@@ -833,13 +833,9 @@ def apply_filters_to_data(df_demand, df_supply, filters, selected_customers,
 # Trong 3_📊_GAP_Analysis.py
 def calculate_gap_with_carry_forward(df_demand, df_supply, period_type="Weekly", 
                                     use_adjusted_demand=True, use_adjusted_supply=True,
-                                    track_backlog=True, include_drafts=False):
+                                    track_backlog=True):
     """
-    Enhanced version with proper backlog tracking
-    
-    Args:
-        track_backlog: If True, tracks negative carry forward (unfulfilled demand)
-                      If False, uses original logic (only positive carry forward)
+    SIMPLIFIED version without allocation tracking
     """
     
     # Early return if both empty
@@ -847,19 +843,14 @@ def calculate_gap_with_carry_forward(df_demand, df_supply, period_type="Weekly",
         st.warning("No data available for GAP calculation")
         return pd.DataFrame()
     
-    # Get allocations data
-    # allocations_df = data_manager.load_active_allocations()
-    allocations_df = data_manager.load_allocations_data(include_drafts=include_drafts)
-
     # Initialize processor
     processor = PeriodBasedGAPProcessor(period_type)
     
-    # Process all data by period
+    # Process all data by period - NO ALLOCATIONS PARAMETER
     with st.spinner("Processing data by period..."):
         period_data = processor.process_for_gap(
             df_demand, 
             df_supply,
-            allocations_df,
             use_adjusted_demand,
             use_adjusted_supply
         )
@@ -892,16 +883,16 @@ def calculate_gap_with_carry_forward(df_demand, df_supply, period_type="Weekly",
         for idx, (_, row) in enumerate(product_data.iterrows()):
             # Store values at beginning of period
             begin_inventory = carry_forward
-            backlog_from_previous = backlog  # Backlog từ kỳ trước để display
+            backlog_from_previous = backlog
             
             if track_backlog:
                 # ENHANCED LOGIC: Track both positive and negative balances
                 
                 # Calculate effective demand (current demand + backlog from previous)
-                effective_demand = row['unallocated_demand'] + backlog
+                effective_demand = row['demand_quantity'] + backlog
                 
                 # Total available = current supply + carried forward inventory
-                total_available = row['available_supply'] + carry_forward
+                total_available = row['supply_quantity'] + carry_forward
                 
                 # Calculate gap
                 gap = total_available - effective_demand
@@ -914,7 +905,7 @@ def calculate_gap_with_carry_forward(df_demand, df_supply, period_type="Weekly",
                 else:
                     # Shortage: clear carry forward, set backlog to negative gap
                     carry_forward = 0
-                    backlog = abs(gap)  # This is the backlog for NEXT period
+                    backlog = abs(gap)
                 
                 # Calculate fulfillment rate based on effective demand
                 if effective_demand > 0:
@@ -924,11 +915,11 @@ def calculate_gap_with_carry_forward(df_demand, df_supply, period_type="Weekly",
                 
             else:
                 # ORIGINAL LOGIC: Only positive carry forward
-                total_available = row['available_supply'] + carry_forward
-                gap = total_available - row['unallocated_demand']
+                total_available = row['supply_quantity'] + carry_forward
+                gap = total_available - row['demand_quantity']
                 
-                if row['unallocated_demand'] > 0:
-                    fulfillment_rate = min(100, (total_available / row['unallocated_demand'] * 100))
+                if row['demand_quantity'] > 0:
+                    fulfillment_rate = min(100, (total_available / row['demand_quantity'] * 100))
                 else:
                     fulfillment_rate = 100 if total_available > 0 else 0
                 
@@ -936,7 +927,7 @@ def calculate_gap_with_carry_forward(df_demand, df_supply, period_type="Weekly",
                 carry_forward = max(0, gap)
                 
                 # No backlog tracking
-                effective_demand = row['unallocated_demand']
+                effective_demand = row['demand_quantity']
                 backlog_from_previous = 0
             
             # Determine status
@@ -955,8 +946,7 @@ def calculate_gap_with_carry_forward(df_demand, df_supply, period_type="Weekly",
                 'begin_inventory': begin_inventory,
                 'supply_in_period': row['supply_quantity'],
                 'total_available': total_available,
-                'original_demand_qty': row['demand_quantity'],
-                'total_demand_qty': effective_demand if track_backlog else row['unallocated_demand'],
+                'total_demand_qty': row['demand_quantity'],
                 'gap_quantity': gap,
                 'fulfillment_rate_percent': fulfillment_rate,
                 'fulfillment_status': status
@@ -964,10 +954,8 @@ def calculate_gap_with_carry_forward(df_demand, df_supply, period_type="Weekly",
             
             # Add backlog info if tracking
             if track_backlog:
-                # Show backlog FROM PREVIOUS period that was added to current demand
-                result_row['backlog_qty'] = backlog_from_previous  # Fixed: use stored value
+                result_row['backlog_qty'] = backlog_from_previous
                 result_row['effective_demand'] = effective_demand
-                # Optional: Track backlog that will go to NEXT period (for debugging)
                 result_row['backlog_to_next'] = backlog
             
             results.append(result_row)
@@ -979,19 +967,9 @@ def calculate_gap_with_carry_forward(df_demand, df_supply, period_type="Weekly",
         st.write(f"- Total rows: {len(gap_df)}")
         st.write(f"- Unique products: {gap_df['pt_code'].nunique()}")
         st.write(f"- Shortage rows: {len(gap_df[gap_df['gap_quantity'] < 0])}")
-        if track_backlog:
-            st.write(f"- Rows with backlog: {len(gap_df[gap_df['backlog_qty'] > 0])}")
-            # Debug: Show backlog progression
-            if st.checkbox("Show backlog progression", key="debug_backlog_progression"):
-                for product in gap_df['pt_code'].unique()[:3]:  # Show first 3 products
-                    st.write(f"\n**Product: {product}**")
-                    product_df = gap_df[gap_df['pt_code'] == product][
-                        ['period', 'original_demand_qty', 'backlog_qty', 'effective_demand', 
-                         'total_available', 'gap_quantity', 'backlog_to_next']
-                    ]
-                    st.dataframe(product_df, use_container_width=True)
     
     return gap_df
+
 
 def get_all_periods(demand_grouped, supply_grouped, period_type):
     """Get all unique periods sorted chronologically"""
@@ -1127,17 +1105,12 @@ def calculate_product_gap(product, all_periods, demand_grouped, supply_grouped):
 
 # === Display Options ===
 # Replace the entire get_gap_display_options function with these two functions:
-
 def get_gap_calculation_options():
-    """Get options that affect GAP calculation logic - must be set before running"""
+    """Get options that affect GAP calculation logic - SIMPLIFIED"""
     st.markdown("### ⚙️ Calculation Options")
     st.caption("These options affect how GAP is calculated. Changes require re-running the analysis.")
     
-    col1, col2, col3, col4 = st.columns(4)
-    
-    # Initialize defaults
-    if 'gap_period_type' not in st.session_state:
-        st.session_state['gap_period_type'] = "Weekly"
+    col1, col2, col3 = st.columns(3)
     
     with col1:
         period_type = st.selectbox(
@@ -1157,14 +1130,6 @@ def get_gap_calculation_options():
         )
     
     with col3:
-        include_draft_allocations = st.checkbox(
-            "📝 Include DRAFT allocations",
-            value=False,
-            key="gap_include_draft",
-            help="Include uncommitted allocations in calculation (may show conservative view)"
-        )
-    
-    with col4:
         track_backlog = st.checkbox(
             "📊 Track Backlog",
             value=True,
@@ -1175,7 +1140,6 @@ def get_gap_calculation_options():
     return {
         "period_type": period_type,
         "exclude_missing_dates": exclude_missing_dates,
-        "include_draft_allocations": include_draft_allocations,
         "track_backlog": track_backlog
     }
 
@@ -2111,122 +2075,6 @@ def show_date_status_comparison(df_demand, df_supply, use_adjusted_demand, use_a
         st.info("No date adjustments configured or no data available for comparison")
 
 
-def show_allocation_impact_summary(df_demand_enhanced):
-    """Show allocation impact with enhanced UI and progress indicators"""
-    if 'allocation_status' not in df_demand_enhanced.columns:
-        return
-        
-    st.markdown("#### 📦 Allocation Impact on Demand")
-    
-    # Calculate metrics
-    total_demand = df_demand_enhanced['demand_quantity'].sum()
-    total_allocated = df_demand_enhanced['total_allocated'].sum()
-    total_delivered = df_demand_enhanced['total_delivered'].sum()
-    total_unallocated = df_demand_enhanced['unallocated_demand'].sum()
-    
-    # Calculate rates
-    allocation_rate = (total_allocated / total_demand * 100) if total_demand > 0 else 0
-    delivery_rate = (total_delivered / total_allocated * 100) if total_allocated > 0 else 0
-    fulfillment_rate = (total_delivered / total_demand * 100) if total_demand > 0 else 0
-    
-    # Display metrics with context
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        st.metric(
-            "Original Demand",
-            format_number(total_demand),
-            help="Total demand quantity before allocation"
-        )
-    
-    with col2:
-        st.metric(
-            "Already Allocated",
-            format_number(total_allocated),
-            delta=f"{allocation_rate:.1f}%" if allocation_rate > 0 else None,
-            help="Quantity allocated in approved plans"
-        )
-    
-    with col3:
-        st.metric(
-            "Already Delivered", 
-            format_number(total_delivered),
-            delta=f"{delivery_rate:.1f}% of allocated" if total_allocated > 0 else None,
-            help="Quantity delivered to customers"
-        )
-    
-    with col4:
-        st.metric(
-            "Net Unallocated",
-            format_number(total_unallocated),
-            delta=f"{100 - allocation_rate:.1f}% remaining" if total_demand > 0 else None,
-            delta_color="inverse" if allocation_rate < 50 else "normal",
-            help="Quantity still needs allocation"
-        )
-    
-    # Visual progress indicators
-    if total_demand > 0:
-        st.markdown("##### Allocation Progress")
-        
-        # Overall progress bar
-        progress_col1, progress_col2 = st.columns([4, 1])
-        with progress_col1:
-            # Create stacked progress bar effect
-            fig_html = f"""
-            <div style="width: 100%; background-color: #f0f0f0; border-radius: 5px; overflow: hidden;">
-                <div style="width: {fulfillment_rate}%; background-color: #28a745; height: 25px; float: left; text-align: center; color: white; line-height: 25px;">
-                    {fulfillment_rate:.1f}% Delivered
-                </div>
-                <div style="width: {allocation_rate - fulfillment_rate}%; background-color: #ffc107; height: 25px; float: left; text-align: center; color: black; line-height: 25px;">
-                    {allocation_rate - fulfillment_rate:.1f}% Allocated
-                </div>
-                <div style="width: {100 - allocation_rate}%; background-color: #dc3545; height: 25px; float: left; text-align: center; color: white; line-height: 25px;">
-                    {100 - allocation_rate:.1f}% Unallocated
-                </div>
-            </div>
-            """
-            st.markdown(fig_html, unsafe_allow_html=True)
-        
-        with progress_col2:
-            st.caption(f"Total: {format_number(total_demand)}")
-        
-        # Status messages
-        if allocation_rate == 0:
-            st.warning("⚠️ No allocations created yet for this demand")
-        elif allocation_rate < 50:
-            st.info(f"📊 {allocation_rate:.1f}% allocated - significant gap remains")
-        elif allocation_rate < 100:
-            st.info(f"📊 {allocation_rate:.1f}% allocated - partial coverage")
-        else:
-            st.success("✅ Fully allocated")
-            if delivery_rate < 100:
-                st.info(f"🚚 {delivery_rate:.1f}% of allocated quantity has been delivered")
-    
-    # Show breakdown by allocation status if allocations exist
-    if total_allocated > 0:
-        with st.expander("View allocation details by status"):
-            status_summary = df_demand_enhanced.groupby('allocation_status').agg({
-                'pt_code': 'count',
-                'demand_quantity': 'sum',
-                'total_allocated': 'sum',
-                'total_delivered': 'sum',
-                'unallocated_demand': 'sum'
-            }).rename(columns={'pt_code': 'Products'})
-            
-            # Format the summary
-            for col in ['demand_quantity', 'total_allocated', 'total_delivered', 'unallocated_demand']:
-                if col in status_summary.columns:
-                    status_summary[col] = status_summary[col].apply(lambda x: format_number(x))
-            
-            st.dataframe(status_summary, use_container_width=True)
-            
-            # Show products by status
-            if st.checkbox("Show products by allocation status", key="gap_show_products_by_status"):
-                for status in df_demand_enhanced['allocation_status'].unique():
-                    products = df_demand_enhanced[df_demand_enhanced['allocation_status'] == status]['pt_code'].unique()
-                    if len(products) > 0:
-                        st.caption(f"**{status}**: {', '.join(products[:10])}{' ...' if len(products) > 10 else ''}")
-
 # === GAP Detail Display Functions ===
 
 def apply_gap_detail_filter(display_df: pd.DataFrame, filter_option: str, display_options: Dict,
@@ -2272,8 +2120,8 @@ def prepare_gap_detail_display(display_df: pd.DataFrame, display_options: Dict,
     
     # Add Period Status column
     period_type = display_options.get("period_type", "Weekly")
-    display_df['Period Status'] = display_df['period'].apply(
-        lambda x: "🔴 Past" if is_past_period(str(x), period_type) else "✅ Future"
+    display_df['period'] = display_df['period'].apply(
+        lambda x: f"{x} 🔴" if is_past_period(str(x), period_type) else x
     )
     
     # Add Product Type column if we have the data
@@ -2319,8 +2167,7 @@ def prepare_gap_detail_display(display_df: pd.DataFrame, display_options: Dict,
         "product_name", 
         "package_size", 
         "standard_uom", 
-        "period",
-        "Period Status"
+        "period"
     ]
     
     # Add inventory/supply columns
@@ -2402,6 +2249,7 @@ def prepare_gap_detail_display(display_df: pd.DataFrame, display_options: Dict,
     
     return display_df[final_column_order]
 
+
 def format_gap_display_df(df: pd.DataFrame, display_options: Dict) -> pd.DataFrame:
     """Format GAP dataframe for display with backlog support"""
     df = df.copy()
@@ -2449,7 +2297,9 @@ def format_gap_display_df(df: pd.DataFrame, display_options: Dict) -> pd.DataFra
         "supply_in_period": "Supply In",
         "total_available": "Total Available",
         "total_demand_qty": "Demand Qty",
+        "effective_demand": "Effective Demand",
         "gap_quantity": "GAP",
+        "backlog_qty":"Backlog",
         "fulfillment_status": "Status"
     }
     
@@ -2500,8 +2350,8 @@ def highlight_gap_rows_enhanced(row):
                 except:
                     pass
         
-        # Check period status
-        if 'Period Status' in row.index and "🔴" in str(row['Period Status']):
+       # Check if past period by looking for 🔴 icon in period column
+        if 'period' in row.index and "🔴" in str(row['period']):
             # Past period - light gray background
             return ["background-color: #f0f0f0"] * len(row)
         
@@ -2554,7 +2404,6 @@ def show_gap_detail_table(gap_df, display_filters, df_demand_filtered=None, df_s
     else:
         st.dataframe(formatted_df, use_container_width=True, height=600)
 
-# REPLACE toàn bộ function show_gap_pivot_view
 
 def show_gap_pivot_view(gap_df, display_options):
     """Show GAP pivot view with past period indicators and styling options"""
@@ -2649,8 +2498,6 @@ def show_gap_pivot_view(gap_df, display_options):
     # Show totals with indicators
     show_gap_totals_with_indicators(display_df, display_options["period_type"])
 
-
-# ADD this function sau show_gap_pivot_view
 
 def show_gap_totals_with_indicators(df_summary: pd.DataFrame, period: str):
     """Show period totals for GAP with past period indicators"""
@@ -3128,22 +2975,10 @@ if st.button("🚀 Run GAP Analysis", type="primary", use_container_width=True):
                 selected_sources["exclude_expired"]
             )
 
-        # IMPORTANT: Enhance BEFORE filtering
-        with st.spinner("Enhancing data with allocation info..."):
-            # Get include_drafts option
-            include_drafts = calculation_options.get("include_draft_allocations", False)
-            
-            # Enhance demand with allocations - PASS include_drafts parameter
-            df_demand_enhanced = data_manager.enhance_demand_with_allocations(
-                df_demand_all,
-                include_drafts=include_drafts  # ✅ Fix: Pass the parameter
-            )
-            
-
         # Apply filters on ENHANCED data
         df_demand_filtered, df_supply_filtered = apply_filters_to_data(
-            df_demand_enhanced,  # Use enhanced
-            df_supply_all,  # Use Original
+            df_demand_all, 
+            df_supply_all, 
             filters, 
             selected_sources.get("selected_customers", []),
             use_adjusted_demand,
@@ -3256,12 +3091,6 @@ if st.session_state.get('gap_analysis_ran', False):
             date_modes['supply']
         )
         
-        # Show allocation impact
-        df_demand_enhanced = data_manager.enhance_demand_with_allocations(
-            df_demand_filtered_display,
-            include_drafts=calc_options.get("include_draft_allocations", False)
-        )
-        show_allocation_impact_summary(df_demand_enhanced)
         
         # Check if we need to recalculate GAP based on period change
         current_period = calc_options["period_type"]
@@ -3271,13 +3100,12 @@ if st.session_state.get('gap_analysis_ran', False):
             # Calculate GAP
             with st.spinner("Calculating supply-demand gaps..."):
                 gap_df = calculate_gap_with_carry_forward(
-                    df_demand_filtered_display, # Đã enhanced
-                    df_supply_filtered_display, # KHÔNG enhanced
+                    df_demand_filtered_display, 
+                    df_supply_filtered_display, 
                     current_period,
                     date_modes['demand'],
                     date_modes['supply'],
                     track_backlog=calc_options.get('track_backlog', True),
-                    include_drafts=calc_options.get('include_draft_allocations', False)
                 )
                 # Cache the results
                 st.session_state['gap_df_cached'] = gap_df
@@ -3429,12 +3257,7 @@ DisplayComponents.show_help_section(
    - **Demand Dates**: Controls ETD adjustments
    - **Supply Dates**: Controls arrival/ready date adjustments per source
    - Mix and match based on your analysis needs
-   
-   **Allocation Awareness:**
-   - Supply is adjusted for allocated but undelivered quantities
-   - Demand shows both original and unallocated amounts
-   - GAP calculation uses net unallocated demand
-   
+     
    **Carry-Forward Logic:**
    - Excess inventory from one period carries to the next
    - Only positive inventory is carried forward
