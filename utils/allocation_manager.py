@@ -181,20 +181,18 @@ class AllocationManager:
             with self.engine.connect() as conn:
                 # 1. Check if plan exists and get basic info
                 plan_query = text("""
-                    SELECT 
-                        ap.id,
-                        ap.allocation_number,
-                        vaps.display_status,
-                        vaps.total_count,
-                        vaps.draft_count,
-                        vaps.allocated_count,
-                        ap.notes,
-                        JSON_UNQUOTE(JSON_EXTRACT(ap.allocation_context, '$.allocation_info.type')) as allocation_type
-                    FROM allocation_plans ap
-                    LEFT JOIN v_allocation_plans_summary vaps ON ap.id = vaps.id
-                    WHERE ap.id = :allocation_id
-                """)
-                
+                                    SELECT 
+                                        id,
+                                        allocation_number,
+                                        display_status,
+                                        total_count,
+                                        draft_count,
+                                        allocated_count,
+                                        notes,
+                                        allocation_type
+                                    FROM v_allocation_plans_summary
+                                    WHERE id = :allocation_id
+                                """)
                 result = conn.execute(plan_query, {'allocation_id': allocation_id})
                 plan = result.fetchone()
                 
@@ -319,62 +317,265 @@ class AllocationManager:
                 
                 # 7. Check allocation type specific validations
                 allocation_type = plan_dict.get('allocation_type', 'SOFT')
-                
-                if allocation_type == 'HARD':
-                    # For HARD validate supply availability
-                    supply_validation_query = text("""
-                        SELECT 
-                            ad.id,
-                            ad.pt_code,
-                            ad.allocated_qty,
-                            ad.supply_source_type,
-                            ad.supply_source_id,
-                            -- Check if supply source still exists and has enough quantity
-                            CASE 
-                                WHEN ad.supply_source_type = 'Inventory' THEN (
-                                    SELECT ih.quantity_actual 
-                                    FROM inventory_history ih 
-                                    WHERE ih.id = ad.supply_source_id 
-                                    AND ih.delete_flag = 0
-                                )
-                                WHEN ad.supply_source_type = 'Pending PO' THEN (
-                                    SELECT pol.quantity - COALESCE(pol.received_quantity, 0)
-                                    FROM purchase_order_lines pol 
-                                    WHERE pol.id = ad.supply_source_id 
-                                    AND pol.delete_flag = 0
-                                )
-                                -- Add other supply types as needed
-                                ELSE NULL
-                            END as available_qty
-                        FROM allocation_details ad
-                        WHERE ad.allocation_plan_id = :allocation_id
-                        AND ad.allocation_mode = 'HARD'
-                        AND ad.status = 'DRAFT'
-                    """)
-                    
-                    supply_result = conn.execute(supply_validation_query, {'allocation_id': allocation_id})
-                    supply_issues = []
-                    
-                    for row in supply_result:
-                        supply_dict = dict(row._mapping) if hasattr(row, '_mapping') else dict(zip(supply_result.keys(), row))
+
+                # Note: This validation checks supply availability for both SOFT and HARD allocations
+                # - HARD: Validates specific mapped supply source
+                # - SOFT: Validates total available supply by product/entity
+                # This is a "soft validation" - actual availability will be verified at delivery time
+
+                supply_validation_query = text("""
+                    SELECT 
+                        ad.id,
+                        ad.pt_code,
+                        ad.product_id,
+                        ad.legal_entity_name,
+                        ad.allocated_qty,
+                        ad.allocation_mode,
+                        ad.supply_source_type,
+                        ad.supply_source_id,
                         
-                        if supply_dict['available_qty'] is None:
-                            supply_issues.append(
-                                f"{supply_dict['pt_code']}: Supply source not found"
+                        -- For HARD: Check specific supply source
+                        CASE 
+                            WHEN ad.allocation_mode = 'HARD' THEN
+                                CASE 
+                                    -- 1. INVENTORY
+                                    WHEN ad.supply_source_type = 'Inventory' THEN (
+                                        SELECT ih.remain 
+                                        FROM inventory_histories ih 
+                                        WHERE ih.id = ad.supply_source_id 
+                                        AND ih.delete_flag = 0
+                                    )
+                                    
+                                    -- 2. PENDING PO
+                                    WHEN ad.supply_source_type = 'Pending PO' THEN (
+                                        SELECT ppo.quantity - COALESCE(
+                                            (SELECT SUM(ad2.arrival_quantity) 
+                                            FROM arrival_details ad2
+                                            WHERE ad2.product_purchase_order_id = ppo.id
+                                            AND ad2.delete_flag = 0), 0
+                                        )
+                                        FROM product_purchase_orders ppo
+                                        WHERE ppo.id = ad.supply_source_id 
+                                        AND ppo.delete_flag = 0
+                                    )
+                                    
+                                    -- 3. PENDING CAN
+                                    WHEN ad.supply_source_type = 'Pending CAN' THEN (
+                                        SELECT pending_quantity
+                                        FROM can_pending_stockin_view cps
+                                        WHERE cps.can_line_id = ad.supply_source_id
+                                    )
+                                    
+                                    -- 4. PENDING WH TRANSFER
+                                    WHEN ad.supply_source_type = 'Pending WH Transfer' THEN (
+                                        SELECT sowtd.transfer_quantity
+                                        FROM stock_out_warehouse_transfer_details sowtd
+                                        JOIN stock_out_warehouse_transfer sowt 
+                                            ON sowtd.warehouse_transfer_stock_out_id = sowt.id
+                                        WHERE sowtd.id = ad.supply_source_id
+                                        AND sowt.finish = 0
+                                    )
+                                    
+                                    ELSE NULL
+                                END
+                            
+                            -- For SOFT: Check total available supply
+                            WHEN ad.allocation_mode = 'SOFT' THEN (
+                                SELECT SUM(available_qty) FROM (
+                                    -- 1. INVENTORY
+                                    SELECT SUM(idv.remaining_quantity) as available_qty
+                                    FROM inventory_detailed_view idv
+                                    WHERE idv.pt_code = ad.pt_code
+                                    AND idv.owning_company_name = ad.legal_entity_name
+                                    
+                                    UNION ALL
+                                    
+                                    -- 2. PENDING PO
+                                    SELECT SUM(pofv.pending_standard_arrival_quantity) as available_qty
+                                    FROM purchase_order_full_view pofv
+                                    WHERE pofv.pt_code = ad.pt_code
+                                    AND pofv.legal_entity = ad.legal_entity_name
+                                    AND pofv.pending_standard_arrival_quantity > 0
+                                    
+                                    UNION ALL
+                                    
+                                    -- 3. PENDING CAN
+                                    SELECT SUM(cpsv.pending_quantity) as available_qty
+                                    FROM can_pending_stockin_view cpsv
+                                    WHERE cpsv.pt_code = ad.pt_code
+                                    AND cpsv.consignee = ad.legal_entity_name
+                                    
+                                    UNION ALL
+                                    
+                                    -- 4. PENDING WH TRANSFER (incoming)
+                                    SELECT SUM(wtdv.transfer_quantity) as available_qty
+                                    FROM warehouse_transfer_details_view wtdv
+                                    JOIN warehouses to_wh ON wtdv.to_warehouse = to_wh.name
+                                    JOIN companies to_company ON to_wh.company_id = to_company.id
+                                    WHERE wtdv.pt_code = ad.pt_code
+                                    AND to_company.english_name = ad.legal_entity_name
+                                    AND wtdv.is_completed = 0
+                                ) supply_summary
                             )
-                        elif supply_dict['available_qty'] < supply_dict['allocated_qty']:
+                        END as available_qty,
+                        
+                        -- Additional info for better error messages
+                        CASE 
+                            WHEN ad.allocation_mode = 'SOFT' THEN (
+                                -- Get breakdown by supply type for SOFT
+                                SELECT JSON_OBJECT(
+                                    'inventory', COALESCE(SUM(CASE WHEN source_type = 'INV' THEN qty END), 0),
+                                    'pending_po', COALESCE(SUM(CASE WHEN source_type = 'PO' THEN qty END), 0),
+                                    'pending_can', COALESCE(SUM(CASE WHEN source_type = 'CAN' THEN qty END), 0),
+                                    'pending_wht', COALESCE(SUM(CASE WHEN source_type = 'WHT' THEN qty END), 0)
+                                )
+                                FROM (
+                                    SELECT 'INV' as source_type, SUM(remaining_quantity) as qty
+                                    FROM inventory_detailed_view
+                                    WHERE pt_code = ad.pt_code AND owning_company_name = ad.legal_entity_name
+                                    
+                                    UNION ALL
+                                    
+                                    SELECT 'PO', SUM(pending_standard_arrival_quantity)
+                                    FROM purchase_order_full_view
+                                    WHERE pt_code = ad.pt_code AND legal_entity = ad.legal_entity_name
+                                    AND pending_standard_arrival_quantity > 0
+                                    
+                                    UNION ALL
+                                    
+                                    SELECT 'CAN', SUM(pending_quantity)
+                                    FROM can_pending_stockin_view
+                                    WHERE pt_code = ad.pt_code AND consignee = ad.legal_entity_name
+                                    
+                                    UNION ALL
+                                    
+                                    SELECT 'WHT', SUM(wtdv.transfer_quantity)
+                                    FROM warehouse_transfer_details_view wtdv
+                                    JOIN warehouses to_wh ON wtdv.to_warehouse = to_wh.name
+                                    JOIN companies to_company ON to_wh.company_id = to_company.id
+                                    WHERE wtdv.pt_code = ad.pt_code
+                                    AND to_company.english_name = ad.legal_entity_name
+                                    AND wtdv.is_completed = 0
+                                ) supply_breakdown
+                            )
+                            ELSE NULL
+                        END as supply_breakdown
+                        
+                    FROM allocation_details ad
+                    WHERE ad.allocation_plan_id = :allocation_id
+                    AND ad.status = 'DRAFT'
+                """)
+
+                # Execute query
+                supply_result = conn.execute(supply_validation_query, {'allocation_id': allocation_id})
+                supply_issues = []
+                soft_supply_warnings = []
+
+                for row in supply_result:
+                    supply_dict = dict(row._mapping) if hasattr(row, '_mapping') else dict(zip(supply_result.keys(), row))
+                    
+                    # Check if supply is sufficient
+                    available_qty = supply_dict.get('available_qty', 0) or 0
+                    allocated_qty = supply_dict['allocated_qty']
+                    
+                    if supply_dict['allocation_mode'] == 'HARD':
+                        # HARD allocation validation
+                        if available_qty is None or available_qty == 0:
+                            supply_issues.append(
+                                f"{supply_dict['pt_code']}: Supply source not found or empty "
+                                f"(Type: {supply_dict['supply_source_type']}, ID: {supply_dict['supply_source_id']})"
+                            )
+                        elif available_qty < allocated_qty:
                             supply_issues.append(
                                 f"{supply_dict['pt_code']}: Insufficient supply "
-                                f"(need {supply_dict['allocated_qty']}, available {supply_dict['available_qty']})"
+                                f"(need {allocated_qty:.2f}, available {available_qty:.2f}) "
+                                f"for {supply_dict['supply_source_type']} ID: {supply_dict['supply_source_id']}"
                             )
                     
-                    if supply_issues:
-                        errors.append(f"Supply availability issues for HARD allocations:")
-                        for issue in supply_issues[:5]:
-                            errors.append(f"  - {issue}")
-                        if len(supply_issues) > 5:
-                            errors.append(f"  ... and {len(supply_issues) - 5} more")
-                
+                    elif supply_dict['allocation_mode'] == 'SOFT':
+                        # SOFT allocation validation
+                        if available_qty < allocated_qty:
+                            # Parse supply breakdown if available
+                            breakdown_msg = ""
+                            if supply_dict.get('supply_breakdown'):
+                                try:
+                                    import json
+                                    breakdown = json.loads(supply_dict['supply_breakdown'])
+                                    breakdown_parts = []
+                                    if breakdown.get('inventory', 0) > 0:
+                                        breakdown_parts.append(f"Inventory: {breakdown['inventory']:.0f}")
+                                    if breakdown.get('pending_po', 0) > 0:
+                                        breakdown_parts.append(f"PO: {breakdown['pending_po']:.0f}")
+                                    if breakdown.get('pending_can', 0) > 0:
+                                        breakdown_parts.append(f"CAN: {breakdown['pending_can']:.0f}")
+                                    if breakdown.get('pending_wht', 0) > 0:
+                                        breakdown_parts.append(f"Transfer: {breakdown['pending_wht']:.0f}")
+                                    
+                                    if breakdown_parts:
+                                        breakdown_msg = f" [Breakdown: {', '.join(breakdown_parts)}]"
+                                except:
+                                    pass
+                            
+                            soft_supply_warnings.append(
+                                f"{supply_dict['pt_code']} at {supply_dict['legal_entity_name']}: "
+                                f"Insufficient total supply (need {allocated_qty:.2f}, available {available_qty:.2f})"
+                                f"{breakdown_msg}"
+                            )
+
+                # Group allocations by product/entity for SOFT summary
+                if allocation_type == 'SOFT':
+                    # Additional aggregate check for SOFT allocations
+                    aggregate_check_query = text("""
+                        SELECT 
+                            pt_code,
+                            legal_entity_name,
+                            SUM(allocated_qty) as total_allocated,
+                            COUNT(*) as order_count
+                        FROM allocation_details
+                        WHERE allocation_plan_id = :allocation_id
+                        AND status = 'DRAFT'
+                        AND allocation_mode = 'SOFT'
+                        GROUP BY pt_code, legal_entity_name
+                    """)
+                    
+                    agg_result = conn.execute(aggregate_check_query, {'allocation_id': allocation_id})
+                    
+                    for row in agg_result:
+                        agg_dict = dict(row._mapping) if hasattr(row, '_mapping') else dict(zip(agg_result.keys(), row))
+                        
+                        # Add summary info to warnings if needed
+                        if any(f"{agg_dict['pt_code']} at {agg_dict['legal_entity_name']}" in warning 
+                            for warning in soft_supply_warnings):
+                            # Find and update the warning with order count
+                            for i, warning in enumerate(soft_supply_warnings):
+                                if f"{agg_dict['pt_code']} at {agg_dict['legal_entity_name']}" in warning:
+                                    soft_supply_warnings[i] = warning.replace(
+                                        "Insufficient total supply",
+                                        f"Insufficient total supply for {agg_dict['order_count']} orders"
+                                    )
+
+                # Compile errors
+                if supply_issues:
+                    errors.append(f"Supply availability issues for HARD allocations:")
+                    for issue in supply_issues[:5]:
+                        errors.append(f"  - {issue}")
+                    if len(supply_issues) > 5:
+                        errors.append(f"  ... and {len(supply_issues) - 5} more")
+
+                if soft_supply_warnings:
+                    # For SOFT, we may want to treat as warnings rather than hard errors
+                    # Depending on business rules, you can choose to:
+                    # Option 1: Add as errors (strict validation)
+                    errors.append(f"Supply availability warnings for SOFT allocations:")
+                    for warning in soft_supply_warnings[:5]:
+                        errors.append(f"  - {warning}")
+                    if len(soft_supply_warnings) > 5:
+                        errors.append(f"  ... and {len(soft_supply_warnings) - 5} more")
+                    
+                    # Option 2: Log as warnings only (lenient validation)
+                    # for warning in soft_supply_warnings:
+                    #     logger.warning(f"SOFT allocation warning: {warning}")
+
                 # 8. Business rule validations
                 # Check if all items have same allocation mode for SOFT/HARD types
                 if allocation_type in ['SOFT', 'HARD']:
@@ -401,6 +602,9 @@ class AllocationManager:
                     logger.info(f"Allocation plan {allocation_id} passed validation")
                 else:
                     logger.warning(f"Allocation plan {allocation_id} failed validation with {len(errors)} errors")
+                    # Log chi tiết từng error
+                    for error in errors:
+                        logger.warning(f"  - {error}")
                 
                 return is_valid, errors
                 

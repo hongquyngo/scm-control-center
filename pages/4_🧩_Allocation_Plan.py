@@ -57,7 +57,6 @@ from utils.allocation_wizard_components import (
 # Configure logging
 logger = logging.getLogger(__name__)
 
-
 # === Functions Implementation ===
 
 # Update the show_allocation_list function in 4_🧩_Allocation_Plan.py
@@ -362,7 +361,7 @@ def show_all_allocation_plans():
         show_confirm_key = f'show_allocate_confirm_{row["id"]}'
         if st.session_state.get(show_confirm_key, False):
             with st.container():
-                st.markdown("---")
+                # st.markdown("---")
                 st.warning(f"⚠️ Confirm Allocation for {row['allocation_number']}")
                 st.write("Once allocated, the plan cannot be edited. Only cancellation is allowed.")
                 st.write(f"Allocating {row.get('total_count', 0)} items")
@@ -685,7 +684,6 @@ def show_step2_choose_method():
             st.session_state['allocation_step'] = 3
             st.rerun()
 
-
 def show_step3_set_parameters():
     """Step 3: Set allocation parameters based on method"""
     st.markdown("#### ⚙️ Set Allocation Parameters")
@@ -956,7 +954,6 @@ def show_step4_preview():
             else:
                 st.session_state['allocation_step'] = 5  # Go to confirm
             st.rerun()
-
 
 def show_step5_map_supply():
     """Step 5: Map supply sources for HARD allocation with advanced features"""
@@ -1412,7 +1409,6 @@ def show_step5_confirm():
     st.markdown("---")
     show_action_buttons(results, draft, allocation_number)
 
-
 def show_plan_header_tab(allocation_number: str, draft: Dict):
     """Show plan header information"""
     st.markdown("**Allocation Plan Table:**")
@@ -1450,7 +1446,6 @@ def show_plan_header_tab(allocation_number: str, draft: Dict):
     
     plan_df = pd.DataFrame(plan_data)
     st.dataframe(plan_df, use_container_width=True, hide_index=True)
-
 
 def show_allocation_details_tab(results: pd.DataFrame, draft: Dict):
     """Show allocation details preview"""
@@ -1490,7 +1485,6 @@ def show_allocation_details_tab(results: pd.DataFrame, draft: Dict):
     # Show field mapping
     with st.expander("View Database Field Mapping"):
         show_field_mapping_table(draft, detail_preview)
-
 
 def get_customer_mapping_from_cache() -> Dict[str, str]:
     """Get customer name to code mapping from cached data"""
@@ -1852,7 +1846,6 @@ def show_field_mapping_table(draft: Dict, detail_preview: pd.DataFrame):
     mapping_df = pd.DataFrame(field_mapping)
     st.dataframe(mapping_df, use_container_width=True, hide_index=True)
 
-
 def show_snapshot_context_tab(draft: Dict, results: pd.DataFrame):
     """Show snapshot context JSON"""
     st.markdown("**Allocation Context (JSON):**")
@@ -1873,7 +1866,6 @@ def show_snapshot_context_tab(draft: Dict, results: pd.DataFrame):
         file_name=f"allocation_context_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
         mime="application/json"
     )
-
 
 def show_full_preview_tab(results: pd.DataFrame):
     """Show full data preview with search and pagination"""
@@ -1936,7 +1928,6 @@ def show_full_preview_tab(results: pd.DataFrame):
         height=400
     )
 
-
 def show_validation_summary(results: pd.DataFrame):
     """Show pre-save validation summary"""
     st.markdown("##### ✅ Pre-Save Validation")
@@ -1996,7 +1987,6 @@ def show_validation_summary(results: pd.DataFrame):
         else:
             st.success("✅ All required fields OK")
 
-
 def show_action_buttons(results: pd.DataFrame, draft: Dict, allocation_number: str):
     """Show action buttons for save/export/cancel"""
     col1, col2, col3, col4 = st.columns(4)
@@ -2052,7 +2042,6 @@ def show_action_buttons(results: pd.DataFrame, draft: Dict, allocation_number: s
             st.session_state['selected_allocation_products'] = []
             st.rerun()
 
-
 def build_allocation_context(draft: Dict, results: pd.DataFrame) -> Dict:
     """Build complete allocation context for snapshot"""
     return {
@@ -2094,7 +2083,6 @@ def build_allocation_context(draft: Dict, results: pd.DataFrame) -> Dict:
             'total_orders': len(results)
         }
     }
-
 
 def show_step6_final_confirm():
     """Step 6: Final confirmation for HARD allocation"""
@@ -2159,7 +2147,6 @@ def show_step6_final_confirm():
         
         st.success(f"✅ {len(mapping_df)} items will be HARD allocated to specific supply sources")
 
-
 def export_allocation_preview(results: pd.DataFrame, context: Dict):
     """Export allocation preview to Excel"""
     import io
@@ -2205,7 +2192,6 @@ def export_allocation_preview(results: pd.DataFrame, context: Dict):
         file_name=f"allocation_preview_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
-
 
 def save_allocation(status):
     """Save allocation plan to database using prepared data"""
@@ -2285,8 +2271,6 @@ def save_allocation(status):
             with st.expander("🐛 Error Details", expanded=True):
                 st.code(traceback.format_exc())
 
-
-
 def cleanup_allocation_session_state():
     """Clean up allocation-related session state after save"""
     keys_to_remove = [
@@ -2323,7 +2307,6 @@ def cleanup_allocation_session_state():
     st.session_state['draft_allocation'] = {}
     st.session_state['selected_allocation_products'] = []
 
-
 def show_save_success_summary(allocation_id: int, allocation_number: str, detail_data: pd.DataFrame):
     """Show summary after successful save"""
     with st.expander("📊 Allocation Summary", expanded=True):
@@ -2345,7 +2328,6 @@ def show_save_success_summary(allocation_id: int, allocation_number: str, detail
                 hard_count = len(detail_data[detail_data['allocation_mode'] == 'HARD'])
                 if hard_count > 0:
                     st.metric("HARD Allocations", hard_count)
-
 
 def show_post_save_actions(allocation_id: int):
     """Show action buttons after successful save"""
@@ -2375,7 +2357,6 @@ def show_post_save_actions(allocation_id: int):
         if st.button("GAP Analysis", use_container_width=True):
             st.switch_page("pages/3_📊_GAP_Analysis.py")
 
-
 def export_allocation_results(results_df):
     """Export allocation results to Excel"""
     excel_data = convert_df_to_excel(results_df)
@@ -2386,7 +2367,6 @@ def export_allocation_results(results_df):
         file_name=f"allocation_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
-
 
 def show_view_allocation():
     """View allocation plan details with cancellation support"""
@@ -2774,7 +2754,6 @@ def show_view_allocation():
     if st.session_state.get('show_bulk_cancel', False):
         show_bulk_cancel_dialog()
 
-
 def show_bulk_cancel_dialog():
     """Show bulk cancellation dialog"""
     selected_ids = st.session_state.get('selected_cancel_ids', [])
@@ -2827,7 +2806,6 @@ def show_bulk_cancel_dialog():
                 del st.session_state['show_bulk_cancel']
                 del st.session_state['selected_cancel_ids']
                 st.rerun()
-
 
 def export_allocation_details(plan, details):
     """Export allocation plan with details"""
@@ -3089,6 +3067,7 @@ def get_allocation_manager():
     return AllocationManager()
 
 allocation_manager = get_allocation_manager()
+
 
 # === Debug Mode Toggle ===
 col_debug1, col_debug2 = st.columns([6, 1])
