@@ -49,90 +49,474 @@ class DataManager:
     
     @st.cache_data(ttl=1800)
     def load_demand_oc(_self):
-        """Load OC (Order Confirmation) pending delivery data"""
+        """
+        Load OC (Order Confirmation) pending delivery data
+        
+        Hàm này load dữ liệu các đơn hàng đang chờ giao (pending delivery) từ view outbound_oc_pending_delivery_view
+        
+        Các trường dữ liệu được load:
+        
+        === THÔNG TIN SẢN PHẨM ===
+        1. product_name: Tên sản phẩm
+        2. pt_code: Mã PT của sản phẩm
+        3. brand: Tên thương hiệu (brand_name)
+        4. package_size: Kích thước đóng gói
+        
+        === THÔNG TIN DÒNG ĐƠN HÀNG (OC Line) ===
+        5. ocd_id: ID của chi tiết đơn hàng (order_confirmation_details.id)
+        6. oc_number: Số đơn hàng xác nhận (OC number)
+        7. customer_po_number: Số PO của khách hàng
+        
+        === THÔNG TIN KHÁCH HÀNG & PHÁP NHÂN ===
+        8. customer: Tên khách hàng tiếng Anh (buyer.english_name)
+        9. customer_code: Mã khách hàng (buyer.company_code)
+        10. legal_entity: Tên pháp nhân bán hàng (seller.english_name)
+        
+        === THÔNG TIN NGÀY THÁNG ===
+        11. oc_date: Ngày tạo đơn hàng xác nhận
+        12. etd: Ngày dự kiến giao hàng (Expected Time of Delivery)
+        
+        === THÔNG TIN ĐƠN VỊ & SỐ LƯỢNG ===
+        13. standard_uom: Đơn vị tính chuẩn (Unit of Measurement)
+        14. selling_uom: Đơn vị bán hàng
+        15. uom_conversion: Tỷ lệ quy đổi giữa selling_uom và standard_uom
+        16. selling_quantity: Số lượng bán (theo selling_uom) sau khi trừ hủy
+        17. standard_quantity: Số lượng chuẩn (theo standard_uom) sau khi trừ hủy
+        18. total_delivered_selling_quantity: Tổng số lượng đã giao (theo selling_uom)
+        19. total_delivered_standard_quantity: Tổng số lượng đã giao (theo standard_uom)
+        20. pending_selling_delivery_quantity: Số lượng chờ giao (theo selling_uom)
+        21. pending_standard_delivery_quantity: Số lượng chờ giao (theo standard_uom)
+        
+        === TRẠNG THÁI GIAO HÀNG ===
+        22. delivery_status: Trạng thái giao hàng ('Not Delivered', 'Partially Delivered', 'Unknown')
+        
+        === THÔNG TIN GIÁ & TIỀN ===
+        23. selling_unit_price: Đơn giá bán (theo selling_uom)
+        24. total_amount_usd: Tổng giá trị đơn hàng tính bằng USD (sau khi trừ hủy)
+        25. delivered_amount_usd: Giá trị đã giao tính bằng USD
+        26. outstanding_amount_usd: Giá trị còn lại chưa giao tính bằng USD
+        
+        Lưu ý:
+        - View chỉ lấy các đơn hàng có pending delivery (chưa giao hoàn toàn)
+        - Số lượng đã được điều chỉnh sau khi trừ các phần hủy (cancellation)
+        - Dữ liệu được sắp xếp theo outstanding_amount_usd giảm dần và oc_date mới nhất
+        """
         engine = get_db_engine()
         query = "SELECT * FROM prostechvn.outbound_oc_pending_delivery_view;"
         df = pd.read_sql(text(query), engine)
         
-        # Debug logging
-        if st.session_state.get('debug_mode', False):
-            logger.info(f"Loaded OC data: {len(df)} rows")
-            if 'etd' in df.columns:
-                logger.info(f"OC ETD range: {df['etd'].min()} to {df['etd'].max()}")
+        print("Loaded OC pending delivery data successfully ")
+        print(df.info())
         
         return df
-    
+
+
     @st.cache_data(ttl=1800)
     def load_demand_forecast(_self):
-        """Load customer demand forecast data"""
+        """
+        Load customer demand forecast data
+        
+        Hàm này load dữ liệu dự báo nhu cầu từ khách hàng từ view customer_demand_forecast_full_view
+        
+        Các trường dữ liệu được load:
+        
+        === THÔNG TIN ĐỊNH DANH & CƠ BẢN ===
+        1. forecast_line_id: ID của dòng dự báo (demand_forecast_details.id)
+        2. forecast_number: Số dự báo (fc_number)
+        3. customer_po_number: Số PO của khách hàng
+        4. creator: Email người tạo dự báo
+        5. forecast_date: Ngày tạo dự báo (fc_date)
+        
+        === THÔNG TIN KHÁCH HÀNG ===
+        6. customer: Tên khách hàng tiếng Anh (buyer.english_name)
+        7. customer_code: Mã khách hàng (buyer.company_code)
+        8. registration_code: Mã đăng ký doanh nghiệp
+        9. local_name: Tên khách hàng bằng tiếng địa phương
+        10. customer_id: ID khách hàng (buyer.id)
+        
+        === THÔNG TIN NGƯỜI BÁN ===
+        11. legal_entity: Tên pháp nhân bán hàng (seller.english_name)
+        12. entity_id: ID pháp nhân bán (seller.id)
+        
+        === THÔNG TIN SẢN PHẨM ===
+        13. product_name: Tên sản phẩm
+        14. product_id: ID sản phẩm
+        15. brand: Tên thương hiệu (brand_name)
+        16. pt_code: Mã PT của sản phẩm
+        17. package_size: Kích thước đóng gói
+        18. standard_uom: Đơn vị tính chuẩn của sản phẩm
+        19. hs_code: Mã HS (Harmonized System) cho hải quan
+        20. shelf_life: Hạn sử dụng (kết hợp số và đơn vị thời gian)
+        21. storage_condition: Điều kiện bảo quản
+        22. vietnamese_name: Tên sản phẩm tiếng Việt (vn_custom_name)
+        23. legacy_code: Mã sản phẩm cũ (legacy_pt_code)
+        24. customer_product_code: Mã sản phẩm của khách hàng
+        
+        === ĐƠN VỊ & GIÁ CẢ ===
+        25. selling_uom: Đơn vị bán hàng
+        26. uom_conversion: Tỷ lệ quy đổi giữa selling_uom và standard_uom
+        27. selling_unit_price: Đơn giá bán (theo selling_uom)
+        28. currency: Mã tiền tệ (currency.code)
+        
+        === TỶ GIÁ ===
+        29. usd_exchange_rate: Tỷ giá trung bình USD sang currency
+        30. standard_unit_price_usd: Đơn giá chuẩn tính bằng USD
+        
+        === SỐ LƯỢNG & THUẾ ===
+        31. vat_percent: Phần trăm thuế VAT
+        32. standard_quantity: Số lượng theo đơn vị chuẩn
+        33. selling_quantity: Số lượng theo đơn vị bán
+        
+        === TÍNH TOÁN GIÁ TRỊ ===
+        34. total_amount: Tổng giá trị (selling_unit_price × selling_quantity)
+        35. total_amount_usd: Tổng giá trị tính bằng USD
+        
+        === ĐIỀU KHOẢN GIAO HÀNG & THANH TOÁN ===
+        36. etd: Ngày dự kiến giao hàng (Expected Time of Delivery)
+        37. payment_term: Điều khoản thanh toán (payment_terms.name)
+        38. delivery_term: Điều khoản giao hàng (trade_terms.name)
+        
+        === TRẠNG THÁI CHUYỂN ĐỔI ===
+        39. is_converted_to_oc: Đã chuyển thành Order Confirmation chưa ('Yes'/'No')
+        
+        Lưu ý:
+        - View lấy tất cả dòng forecast không bị xóa (delete_flag = 0)
+        - Tỷ giá USD được tính trung bình từ bảng exchange_rates
+        - Trường is_converted_to_oc giúp phân biệt forecast đã được chuyển thành đơn hàng thực tế
+        - standard_unit_price_usd được tính từ unit_price chia cho tỷ giá
+        """
         engine = get_db_engine()
         query = "SELECT * FROM prostechvn.customer_demand_forecast_full_view;"
         df = pd.read_sql(text(query), engine)
         
-        # Debug: Check data format
-        if st.session_state.get('debug_mode', False) and 'is_converted_to_oc' in df.columns:
-            logger.info(f"Forecast is_converted_to_oc dtype: {df['is_converted_to_oc'].dtype}")
-            logger.info(f"Forecast is_converted_to_oc unique values: {df['is_converted_to_oc'].unique()}")
-            logger.info(f"Forecast is_converted_to_oc value counts: {df['is_converted_to_oc'].value_counts().to_dict()}")
-        
+        print("Loaded customer demand forecast data successfully ")
+        print(df.info())
+
         return df
     
+
     @st.cache_data(ttl=1800)
     def load_inventory(_self):
-        """Load current inventory data"""
+        """
+        Load current inventory data
+        
+        Hàm này load dữ liệu tồn kho hiện tại từ view inventory_detailed_view
+        Chỉ lấy các dòng còn tồn kho (remain > 0) với type là stockIn, stockInOpeningBalance hoặc stockInProduction
+        
+        Các trường dữ liệu được load:
+        
+        === THÔNG TIN INVENTORY ===
+        1. inventory_history_id: ID của lịch sử tồn kho (inventory_histories.id)
+        2. product_id: ID sản phẩm
+        
+        === THÔNG TIN SẢN PHẨM ===
+        3. product_name: Tên sản phẩm (products.name)
+        4. description: Mô tả sản phẩm
+        5. package_size: Kích thước đóng gói
+        6. standard_uom: Đơn vị tính chuẩn (products.uom)
+        7. pt_code: Mã PT của sản phẩm
+        8. legacy_code: Mã sản phẩm cũ (legacy_pt_code)
+        9. brand: Tên thương hiệu (brand_name)
+        
+        === THÔNG TIN LÔ HÀNG ===
+        10. batch_number: Số lô (batch_no)
+        11. expiry_date: Ngày hết hạn (định dạng YYYY-MM-DD)
+        
+        === THÔNG TIN KHO & VỊ TRÍ ===
+        12. warehouse_name: Tên kho (warehouses.name)
+        13. warehouse_owner_id: ID công ty sở hữu kho (warehouses.company_id)
+        14. warehouse_owner_name: Tên công ty sở hữu kho
+        15. location: Vị trí lưu trữ (Zone-Rack-Bin hoặc legacy location)
+        
+        === THÔNG TIN SỐ LƯỢNG ===
+        16. initial_stock_in_quantity: Số lượng nhập kho ban đầu (quantity)
+        17. remaining_quantity: Số lượng còn lại hiện tại (remain)
+            
+        === THÔNG TIN CÔNG TY SỞ HỮU HÀNG ===
+        18. owning_company_id: ID công ty sở hữu hàng hóa
+                            - stockInOpeningBalance: luôn = 1
+                            - stockIn: lấy từ stock_in.company_id (có thể NULL)
+                            - stockInProduction: lấy từ manufacturing_orders.entity_id (có thể NULL)
+                            - NULL: Cần kiểm tra và bổ sung thông tin
+        19. owning_company_name: Tên công ty sở hữu hàng hóa (NULL nếu owning_company_id là NULL)
+        20. same_owner_flag: Cờ kiểm tra sở hữu
+                            - '✔ Same': Cùng chủ sở hữu kho và hàng
+                            - '⚠ Mismatch': Khác chủ sở hữu
+                            - NULL: Thiếu thông tin (khi owning_company_id hoặc warehouse_owner_id là NULL)
+        
+        === THÔNG TIN GIÁ TRỊ ===
+        21. average_landed_cost_usd: Chi phí trung bình đã bao gồm các chi phí phụ (USD/đơn vị)
+        22. inventory_value_usd: Giá trị tồn kho (remaining_quantity × average_landed_cost_usd)
+        
+        === THÔNG TIN THỜI GIAN ===
+        23. days_in_warehouse: Số ngày lưu kho (tính từ created_date đến hiện tại)
+        
+        Lưu ý:
+        - View chỉ lấy các dòng có tồn kho thực tế (remain > 0)
+        - Xét ba loại nhập kho:
+        + stockIn: Nhập kho thông thường từ mua hàng
+        + stockInOpeningBalance: Tồn đầu kỳ
+        + stockInProduction: Nhập kho từ sản xuất
+        - Giá trị tồn kho được tính theo average landed cost từ view avg_landed_cost_looker_view
+        - Location có thể là format mới (Zone-Rack-Bin) hoặc legacy location cho dữ liệu cũ
+        - Dữ liệu được sắp xếp theo tên sản phẩm (product_name ASC)
+        """
         engine = get_db_engine()
         query = "SELECT * FROM prostechvn.inventory_detailed_view"
         df = pd.read_sql(text(query), engine)
-        # Reset index to avoid reindexing issues
-        df = df.reset_index(drop=True)
+
+        print("Loaded inventory data successfully ")
+        print(df.info())
+
         return df
-    
+
+
     @st.cache_data(ttl=1800)
     def load_pending_can(_self):
-        """Load pending CAN (Container Arrival Note) data"""
+        """
+        Load pending CAN (Container Arrival Note) data
+        
+        Hàm này load dữ liệu các mặt hàng đang chờ nhập kho từ Container Arrival Notes
+        Chỉ hiển thị các items chưa được nhập kho hoàn toàn (arrival_quantity > total_stocked_in)
+        
+        Các trường dữ liệu được load:
+        
+        === THÔNG TIN CAN (Container Arrival Note) ===
+        1. arrival_note_number: Số phiếu nhận hàng
+        2. creator: Email người tạo CAN
+        3. can_line_id: ID chi tiết dòng CAN (arrival_details.id)
+        4. arrival_date: Ngày hàng đến (định dạng DATE)
+        
+        === THÔNG TIN ĐƠN MUA HÀNG (PO) ===
+        5. po_number: Số đơn mua hàng
+        6. vendor: Nhà cung cấp (shipper.english_name)
+        7. consignee: Bên nhận hàng (consignee.english_name)
+        
+        === THÔNG TIN SẢN PHẨM ===
+        8. product_name: Tên sản phẩm
+        9. brand: Tên thương hiệu (brand_name)
+        10. package_size: Kích thước đóng gói
+        11. pt_code: Mã PT của sản phẩm
+        12. hs_code: Mã HS cho hải quan
+        13. shelf_life: Hạn sử dụng (format: số + đơn vị + '(s)')
+        14. standard_uom: Đơn vị tính chuẩn
+        
+        === SỐ LƯỢNG & ĐƠN VỊ ===
+        15. buying_uom: Đơn vị mua hàng (purchaseuom)
+        16. uom_conversion: Tỷ lệ quy đổi giữa buying_uom và standard_uom
+        17. buying_quantity: Số lượng mua (theo buying_uom)
+        18. standard_quantity: Số lượng chuẩn (theo standard_uom)
+        
+        === THÔNG TIN CHI PHÍ ===
+        19. buying_unit_cost: Đơn giá mua (format: giá + currency code)
+        20. standard_unit_cost: Đơn giá chuẩn (format: giá + currency code)
+        21. landed_cost: Chi phí đã đến kho (format: giá + currency code hoặc 'N/A')
+        22. usd_landed_cost_currency_exchange_rate: Tỷ giá USD sang landed cost currency
+        23. landed_cost_usd: Chi phí đã đến kho tính bằng USD (NULL nếu không có tỷ giá hợp lệ)
+        
+        === LUỒNG SỐ LƯỢNG ===
+        24. arrival_quantity: Số lượng đã đến kho
+        25. total_stocked_in: Tổng số lượng đã nhập kho
+        
+        === PHÂN TÍCH HÀNG CHỜ NHẬP ===
+        26. pending_quantity: Số lượng chờ nhập kho (arrival_quantity - total_stocked_in)
+        27. pending_value_usd: Giá trị hàng chờ nhập tính bằng USD (NULL nếu không có tỷ giá)
+        28. pending_percent: Phần trăm hàng chờ nhập (pending_quantity / arrival_quantity * 100)
+        29. days_since_arrival: Số ngày kể từ khi hàng đến
+        
+        === TRẠNG THÁI ===
+        30. stocked_in_status: Trạng thái nhập kho (luôn là 'pending' trong view này)
+        31. can_status: Trạng thái tổng thể của CAN
+                    - 'stocked_in': Đã nhập kho hoàn toàn
+                    - 'pending': Đang chờ xử lý
+                    - 'partially_stocked_in': Đã nhập kho một phần
+                    - 'warehouse_arrival': Đã đến kho
+                    - 'on_delivery': Đang vận chuyển
+        
+        Lưu ý:
+        - View chỉ hiển thị các items chưa nhập kho hoàn toàn (có pending quantity > 0)
+        - Sử dụng CTEs để tối ưu performance: pre-aggregate stocked quantities và pre-filter pending items
+        - An toàn xử lý NULL và division by zero cho các phép tính
+        - Tỷ giá USD được kiểm tra > 0 trước khi tính toán
+        - Dữ liệu sắp xếp theo arrival_note_number DESC, can_line_id ASC
+        """
         engine = get_db_engine()
         query = "SELECT * FROM prostechvn.can_pending_stockin_view"
         df = pd.read_sql(text(query), engine)
-        # Reset index to avoid reindexing issues
-        df = df.reset_index(drop=True)
-        return df
-        
 
-    # Replace load_pending_po in DataManager with this version that keeps all lines
+        print("Loaded pending can data successfully ")
+        print(df.info())
+
+        return df
+            
 
     @st.cache_data(ttl=1800)
     def load_pending_po(_self):
-        """Load pending Purchase Order data - keep all lines without aggregation"""
+        """
+        Hàm này load dữ liệu các dòng PO chưa nhận hàng đầy đủ từ view purchase_order_full_view
+        Chỉ lấy các dòng có pending_standard_arrival_quantity > 0 (còn hàng chưa nhận)
+        
+        Các trường dữ liệu được load:
+        
+        === THÔNG TIN ĐỊNH DANH PO ===
+        1. po_line_id: ID dòng PO (product_purchase_orders.id)
+        2. po_number: Số PO nội bộ
+        3. external_ref_number: Số PO từ hệ thống khác (nếu có)
+        4. po_date: Ngày tạo PO (format YYYY-MM-DD)
+        5. created_by: Email người tạo PO
+        
+        === THÔNG TIN NHÀ CUNG CẤP & PHÁP NHÂN ===
+        6. vendor_name: Tên nhà cung cấp (seller.english_name)
+        7. legal_entity: Tên pháp nhân mua hàng (buyer.english_name)
+        
+        === THÔNG TIN SẢN PHẨM ===
+        8. product_name: Tên sản phẩm
+        9. pt_code: Mã PT của sản phẩm
+        10. brand: Tên thương hiệu (brand_name)
+        11. package_size: Kích thước đóng gói
+        12. hs_code: Mã HS cho hải quan
+        13. vn_custom_name: Tên sản phẩm cho hải quan VN
+        14. legacy_pt_code: Mã sản phẩm cũ
+        15. vendor_product_code: Mã sản phẩm của nhà cung cấp
+        16. shelf_life: Hạn sử dụng (format: số + đơn vị + '(s)')
+        17. storage_condition: Điều kiện bảo quản
+        
+        === ĐƠN VỊ & CHUYỂN ĐỔI ===
+        18. standard_uom: Đơn vị tính chuẩn
+        19. buying_uom: Đơn vị mua hàng (purchaseuom)
+        20. uom_conversion: Tỷ lệ chuyển đổi giữa buying_uom và standard_uom
+        
+        === SỐ LƯỢNG & GIÁ ===
+        21. moq: Số lượng đặt hàng tối thiểu (minimum_order_quantity)
+        22. spq: Số lượng đóng gói chuẩn (standard_pack_quantity)
+        23. buying_quantity: Số lượng mua (theo buying_uom)
+        24. standard_quantity: Số lượng chuẩn (theo standard_uom)
+        25. purchase_unit_cost: Đơn giá mua (theo buying_uom)
+        26. standard_unit_cost: Đơn giá chuẩn (theo standard_uom)
+        
+        === TỔNG GIÁ TRỊ PO ===
+        27. total_amount: Tổng giá trị PO (purchase_unit_cost × buying_quantity)
+        28. currency: Mã tiền tệ
+        29. usd_exchange_rate: Tỷ giá USD
+        30. total_amount_usd: Tổng giá trị PO tính bằng USD
+        
+        === THÔNG TIN NHẬN HÀNG & HÓA ĐƠN ===
+        31. total_standard_arrived_quantity: Tổng số lượng đã nhận (standard UOM)
+        32. total_buying_invoiced_quantity: Tổng số lượng đã xuất hóa đơn (buying UOM)
+        33. last_invoice_date: Ngày xuất hóa đơn gần nhất
+        34. ci_numbers: Danh sách số Commercial Invoice (cách nhau bởi dấu phẩy)
+        
+        === SỐ LƯỢNG PENDING ===
+        35. pending_standard_arrival_quantity: Số lượng chờ nhận hàng (standard UOM)
+        36. pending_buying_invoiced_quantity: Số lượng chờ xuất hóa đơn (buying UOM)
+        
+        === GIÁ TRỊ ĐÃ XỬ LÝ & CÒN LẠI ===
+        37. invoiced_amount_usd: Giá trị đã xuất hóa đơn (USD)
+        38. outstanding_invoiced_amount_usd: Giá trị chưa xuất hóa đơn (USD)
+        39. arrival_amount_usd: Giá trị hàng đã nhận (USD)
+        40. outstanding_arrival_amount_usd: Giá trị hàng chưa nhận (USD)
+        
+        === NGÀY DỰ KIẾN ===
+        41. etd: Ngày giao hàng dự kiến (Expected Time of Delivery)
+        42. eta: Ngày hàng đến dự kiến (Expected Time of Arrival)
+        
+        === ĐIỀU KHOẢN ===
+        43. payment_term: Điều khoản thanh toán
+        44. trade_term: Điều khoản thương mại
+        45. vat_gst_percent: Phần trăm thuế VAT/GST
+        
+        === TRẠNG THÁI ===
+        46. status: Trạng thái tổng thể của dòng PO
+                    - 'COMPLETED': Đã nhận và xuất hóa đơn đầy đủ
+                    - 'PENDING': Chưa nhận và chưa xuất hóa đơn
+                    - 'PENDING_INVOICING': Đã nhận nhưng chưa xuất hóa đơn
+                    - 'PENDING_RECEIPT': Đã xuất hóa đơn nhưng chưa nhận
+                    - 'IN_PROCESS': Đang xử lý (nhận hoặc xuất hóa đơn một phần)
+                    - 'PARTIAL_STATUS': Trạng thái khác
+        
+        Lưu ý:
+        - Chỉ lấy các dòng PO có pending_standard_arrival_quantity > 0 (còn hàng chưa nhận)
+        - Sử dụng CTE để tối ưu performance khi aggregate arrival và invoice data
+        - Tránh duplicate khi JOIN nhiều bảng bằng cách aggregate riêng
+        - Dữ liệu được sắp xếp theo thời gian tạo mới nhất (created_date DESC)
+        - Không aggregate các dòng PO - giữ nguyên từng dòng chi tiết
+        """
         engine = get_db_engine()
         query = """
         SELECT * FROM prostechvn.purchase_order_full_view
         WHERE pending_standard_arrival_quantity > 0
         """
         df = pd.read_sql(text(query), engine)
-        
-        # Reset index to ensure no duplicates
-        df = df.reset_index(drop=True)
-        
-        # NO AGGREGATION - Keep all lines as-is
-        # This ensures we don't lose any important information
-        # Each PO line represents a real transaction that should be visible
-        
-        logger.info(f"Loaded {len(df)} PO lines (no aggregation)")
-        
+
+        print("Loaded pending po data successfully ")
+        print(df.info())
+
         return df
+
 
     @st.cache_data(ttl=1800)
     def load_pending_wh_transfer(_self):
-        """Load pending Warehouse Transfer data"""
+        """
+        Load pending Warehouse Transfer data
+        
+        Hàm này load dữ liệu các lệnh chuyển kho đang chờ xử lý từ view warehouse_transfer_details_view
+        Chỉ lấy các lệnh chuyển kho chưa hoàn thành (is_completed = 0)
+        
+        Các trường dữ liệu được load:
+        
+        === THÔNG TIN CHUYỂN KHO ===
+        1. warehouse_transfer_line_id: ID chi tiết dòng chuyển kho (stock_out_warehouse_transfer_details.id)
+        2. transfer_date: Ngày tạo lệnh chuyển kho (stock_out_warehouse_transfer.created_date)
+        
+        === THÔNG TIN SẢN PHẨM ===
+        3. product_id: ID sản phẩm
+        4. product_name: Tên sản phẩm
+        5. product_description: Mô tả sản phẩm
+        6. package_size: Kích thước đóng gói
+        7. standard_uom: Đơn vị tính chuẩn
+        8. pt_code: Mã PT của sản phẩm
+        9. legacy_code: Mã sản phẩm cũ (legacy_pt_code)
+        10. brand: Tên thương hiệu (brand_name)
+        11. batch_number: Số lô hàng (inventory_histories.batch_no)
+        12. expiry_date: Ngày hết hạn (format YYYY-MM-DD)
+        
+        === THÔNG TIN CÔNG TY SỞ HỮU ===
+        13. owning_company_id: ID công ty sở hữu hàng hóa
+        14. owning_company_name: Tên công ty sở hữu hàng hóa
+        
+        === SỐ LƯỢNG & GIÁ TRỊ ===
+        15. transfer_quantity: Số lượng chuyển kho
+        16. average_landed_cost_usd: Chi phí trung bình đã bao gồm các chi phí phụ (USD/đơn vị)
+        17. warehouse_transfer_value_usd: Giá trị hàng chuyển kho (transfer_quantity × average_landed_cost_usd)
+        
+        === THÔNG TIN KHO ===
+        18. from_warehouse: Tên kho chuyển đi (từ inventory_histories.warehouse_id)
+        19. to_warehouse: Tên kho nhận (từ stock_out_warehouse_transfer_details.to_warehouse_id)
+        
+        === TRẠNG THÁI ===
+        20. is_completed: Trạng thái hoàn thành
+                        - 1: Đã hoàn thành chuyển kho
+                        - 0: Đang trong quá trình chuyển kho
+        
+        Lưu ý:
+        - View chỉ lấy các lệnh chuyển kho chưa hoàn thành (is_completed = 0)
+        - Giá trị chuyển kho được tính theo average landed cost từ view avg_landed_cost_looker_view
+        - Thông tin batch và expiry date được lấy từ inventory_histories của hàng được chuyển
+        - Mỗi dòng đại diện cho một chi tiết chuyển kho (một sản phẩm trong lệnh chuyển)
+        - Chỉ lấy các inventory histories không bị xóa (delete_flag = 0)
+        """
         engine = get_db_engine()
         query = """
         SELECT * FROM prostechvn.warehouse_transfer_details_view wtdv
         WHERE wtdv.is_completed = 0
         """
         df = pd.read_sql(text(query), engine)
-        # Reset index to avoid reindexing issues
-        df = df.reset_index(drop=True)
+        
+        print("Loaded pending wh transfer data successfully ")
+        print(df.info())
+
         return df
+
 
     @st.cache_data(ttl=3600)
     def load_product_master(_self):
@@ -156,15 +540,66 @@ class DataManager:
         LEFT JOIN brands b ON p.brand_id = b.id
         WHERE p.delete_flag = 0
         """
-        return pd.read_sql(text(query), engine)
+        df = pd.read_sql(text(query), engine)
+
+        print("Loaded product master data successfully ")
+        print(df.info())
+
+        return df
+
 
     @st.cache_data(ttl=3600)
     def load_customer_master(_self):
-        """Load customer master data"""
+        """
+        Load customer master data
+        
+        Hàm này load dữ liệu tổng hợp khách hàng từ view customer_master_view
+        Chỉ lấy các companies có type là 'Customer' và không bị xóa (delete_flag = 0)
+        
+        Các trường dữ liệu được load:
+        
+        === THÔNG TIN KHÁCH HÀNG CƠ BẢN ===
+        1. customer_id: ID khách hàng (companies.id)
+        2. customer_name: Tên khách hàng tiếng Anh (english_name)
+        3. customer_code: Mã khách hàng (company_code)
+        4. registration_code: Mã đăng ký doanh nghiệp
+        5. local_name: Tên khách hàng bằng tiếng địa phương
+        
+        === THÔNG TIN HẠN MỨC TÍN DỤNG ===
+        6. credit_limit: Hạn mức tín dụng (từ term_and_conditions.limit_credit)
+        7. credit_limit_currency: Mã tiền tệ của hạn mức tín dụng
+        8. payment_term_days: Điều khoản thanh toán (payment_terms.name)
+        
+        === THÔNG TIN TỶ GIÁ & QUY ĐỔI ===
+        9. usd_exchange_rate: Tỷ giá trung bình USD sang credit_limit_currency
+                            - Lấy từ bảng exchange_rates với from_currency_code = 'USD'
+                            - Mặc định = 1 nếu không có tỷ giá
+        10. credit_limit_usd: Hạn mức tín dụng quy đổi sang USD
+                            - Nếu currency là USD: giữ nguyên credit_limit
+                            - Nếu currency khác: credit_limit / usd_exchange_rate
+        
+        === THÔNG TIN HỆ THỐNG ===
+        11. created_date: Ngày tạo khách hàng
+        12. modified_date: Ngày cập nhật gần nhất
+        13. delete_flag: Cờ xóa (luôn = 0 trong view này)
+        
+        Lưu ý:
+        - View chỉ lấy companies có company_type = 'Customer'
+        - JOIN với term_and_conditions để lấy thông tin credit limit và payment terms
+        - Tỷ giá USD được tính trung bình từ tất cả exchange rates không bị xóa
+        - Credit limit USD được tính toán tự động dựa trên tỷ giá
+        - Cache time dài hơn (3600s = 1 giờ) vì dữ liệu master ít thay đổi
+        """
         engine = get_db_engine()
         query = """SELECT * FROM prostechvn.customer_master_view;
         """
-        return pd.read_sql(text(query), engine)
+        df = pd.read_sql(text(query), engine)
+        
+        print("Loaded customer master data successfully ")
+        print(df.info())
+
+
+        return df
 
 
     def _is_bulk_cache_valid(self) -> bool:
