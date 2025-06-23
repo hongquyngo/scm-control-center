@@ -1,653 +1,720 @@
-# pages/7_📚_User_Guide.py
+# pages/7_📖_User_Guide.py
+
 import streamlit as st
-import sys
+from datetime import datetime
+import base64
 from pathlib import Path
-import pandas as pd
 
-# Add parent directory to path for imports
-sys.path.append(str(Path(__file__).parent.parent))
-
-from utils.auth import AuthManager
-from utils.display_components import DisplayComponents
-
-# === Page Config ===
+# Page config
 st.set_page_config(
-    page_title="User Guide - SCM",
-    page_icon="📚",
+    page_title="User Guide - SCM Control Center",
+    page_icon="📖",
     layout="wide"
 )
 
-# === Authentication Check ===
-auth_manager = AuthManager()
-if not auth_manager.check_session():
-    st.switch_page("pages/0_🔐_Login.py")
-    st.stop()
+# Initialize session state for navigation
+if 'guide_section' not in st.session_state:
+    st.session_state.guide_section = 'overview'
 
-# === Custom CSS ===
-st.markdown("""
-<style>
-    .guide-section {
-        background-color: #f0f2f6;
-        padding: 20px;
-        border-radius: 10px;
-        margin: 10px 0;
-    }
-    .term-card {
-        background-color: white;
-        padding: 15px;
-        border-radius: 8px;
-        margin: 10px 0;
-        border-left: 4px solid #366092;
-    }
-    .workflow-step {
-        background-color: #e8f4f8;
-        padding: 15px;
-        border-radius: 8px;
-        margin: 10px 0;
-        border-left: 4px solid #4CAF50;
-    }
-    .example-box {
-        background-color: #fff3cd;
-        padding: 15px;
-        border-radius: 8px;
-        margin: 10px 0;
-        border-left: 4px solid #ffc107;
-    }
-    .module-card {
-        text-align: center;
-        padding: 20px;
-        background: white;
-        border-radius: 10px;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        transition: transform 0.2s;
-        cursor: pointer;
-    }
-    .module-card:hover {
-        transform: translateY(-5px);
-        box-shadow: 0 4px 8px rgba(0,0,0,0.15);
-    }
-</style>
-""", unsafe_allow_html=True)
-
-# === Header ===
-st.title("📚 User Guide")
+# Header
+st.title("📖 User Guide - SCM Control Center")
 st.markdown("---")
 
-# === Navigation Tabs ===
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "🏠 Overview", 
-    "📖 Business Terms", 
-    "🔄 Module Workflows", 
-    "💡 Use Cases", 
-    "⚡ Quick Reference"
-])
+# Create navigation sidebar
+with st.sidebar:
+    st.markdown("### 📑 Navigation")
+    
+    # Overview
+    if st.button("🏠 Overview", use_container_width=True):
+        st.session_state.guide_section = 'overview'
+    
+    st.markdown("**Modules:**")
+    
+    # Module buttons
+    if st.button("📤 1. Demand Analysis", use_container_width=True):
+        st.session_state.guide_section = 'demand'
+        
+    if st.button("📦 2. Supply Analysis", use_container_width=True):
+        st.session_state.guide_section = 'supply'
+        
+    if st.button("📊 3. GAP Analysis", use_container_width=True):
+        st.session_state.guide_section = 'gap'
+        
+    if st.button("🧩 4. Allocation Plan", use_container_width=True):
+        st.session_state.guide_section = 'allocation'
+    
+    st.markdown("---")
+    
+    # Quick links
+    st.markdown("**Quick Links:**")
+    if st.button("⚡ Quick Start", use_container_width=True):
+        st.session_state.guide_section = 'quickstart'
+        
+    if st.button("❓ FAQs", use_container_width=True):
+        st.session_state.guide_section = 'faqs'
+    
+    st.markdown("---")
+    
+    # Download section
+    st.markdown("### 📥 Download Guide")
+    st.caption("Get offline PDF version")
+    
+    # Create download button for PDF (placeholder)
+    if st.button("📄 Download PDF Guide", use_container_width=True):
+        st.info("PDF download will be available soon")
 
-# === Tab 1: Overview ===
-with tab1:
-    st.markdown("## Welcome to SCM Control Center")
+# === Section Functions ===
+
+def show_overview_section():
+    """Show overview section"""
+    st.header("🏠 System Overview")
     
-    st.markdown("""
-    <div class="guide-section">
-    <h3>🎯 System Purpose</h3>
-    <p>The Supply Chain Management (SCM) Control Center is designed to help you:</p>
-    <ul>
-        <li>Monitor and analyze customer demand</li>
-        <li>Track inventory and supply sources</li>
-        <li>Identify gaps between supply and demand</li>
-        <li>Create optimal allocation plans</li>
-        <li>Generate purchase order recommendations</li>
-    </ul>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    # Module Overview
-    st.markdown("### 📋 System Modules")
-    
-    col1, col2, col3 = st.columns(3)
+    col1, col2 = st.columns([2, 1])
     
     with col1:
         st.markdown("""
-        <div class="module-card">
-            <h4>📊 Demand Analysis</h4>
-            <p>View and analyze customer orders, forecasts, and demand patterns</p>
-        </div>
-        """, unsafe_allow_html=True)
+        ### Welcome to SCM Control Center! 👋
         
-        st.markdown("""
-        <div class="module-card">
-            <h4>📥 Supply Analysis</h4>
-            <p>Monitor inventory levels, incoming supply, and expiry management</p>
-        </div>
-        """, unsafe_allow_html=True)
-    
+        SCM Control Center là hệ thống quản lý chuỗi cung ứng giúp bạn:
+        - 📊 **Phân tích** nhu cầu (Demand) và nguồn cung (Supply)
+        - 🔍 **Tìm ra** chênh lệch (GAP) giữa cung và cầu
+        - 📋 **Lập kế hoạch** phân bổ hàng hóa (Allocation)
+        - 📌 **Đề xuất** đơn hàng mua (PO Suggestions)
+        """)
+        
+        st.info("""
+        💡 **Quick Navigation Tips:**
+        - Use sidebar để chuyển giữa các modules
+        - Click vào các expanders để xem chi tiết
+        - Các emoji 🔴🟡🟢 chỉ mức độ ưu tiên
+        """)
+        
     with col2:
+        # Workflow diagram
+        st.markdown("### 🔄 Basic Workflow")
         st.markdown("""
-        <div class="module-card">
-            <h4>📊 GAP Analysis</h4>
-            <p>Compare demand vs supply to identify shortages and surpluses</p>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        st.markdown("""
-        <div class="module-card">
-            <h4>🧩 Allocation Plan</h4>
-            <p>Distribute available inventory to customer orders optimally</p>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    with col3:
-        st.markdown("""
-        <div class="module-card">
-            <h4>📌 PO Suggestions</h4>
-            <p>AI-powered purchase order recommendations (Coming Soon)</p>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        st.markdown("""
-        <div class="module-card">
-            <h4>⚙️ Settings</h4>
-            <p>Configure time adjustments and business rules</p>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    # User Information
-    st.markdown("### 👤 User Information")
-    st.info("""
-    The system tracks user login information including:
-    - Username and full name
-    - User role (stored in database)
-    - Login time and session duration
-    
-    All authenticated users currently have the same access level to all features.
-    """)
-
-# === Tab 2: Business Terms ===
-with tab2:
-    st.markdown("## Business Terminology")
-    
-    # Supply Chain Terms
-    st.markdown("### 📦 Supply Chain Terms")
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.markdown("""
-        <div class="term-card">
-            <h4>OC (Order Confirmation)</h4>
-            <p>Sales order confirmations from customers. These are confirmed orders with agreed delivery dates (ETD) and quantities.</p>
-            <p><b>Example:</b> Customer ABC confirmed order for 1000 units to be delivered on March 15</p>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        st.markdown("""
-        <div class="term-card">
-            <h4>Forecast</h4>
-            <p>Predicted future demand based on historical data or customer projections. Less certain than OC.</p>
-            <p><b>Example:</b> Expected demand of 5000 units in April based on last year's sales</p>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        st.markdown("""
-        <div class="term-card">
-            <h4>MOQ (Minimum Order Quantity)</h4>
-            <p>The smallest amount a supplier will accept for an order.</p>
-            <p><b>Example:</b> Supplier requires minimum 500 units per order</p>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    with col2:
-        st.markdown("""
-        <div class="term-card">
-            <h4>ETD (Expected Time of Delivery)</h4>
-            <p>The date when goods should be delivered to the customer.</p>
-            <p><b>Example:</b> Customer expects delivery by March 20, 2025</p>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        st.markdown("""
-        <div class="term-card">
-            <h4>ETA (Estimated Time of Arrival)</h4>
-            <p>When incoming supply is expected to arrive at your warehouse.</p>
-            <p><b>Example:</b> Purchase order expected to arrive on March 10, 2025</p>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        st.markdown("""
-        <div class="term-card">
-            <h4>SPQ (Standard Package Quantity)</h4>
-            <p>The standard packaging size from suppliers.</p>
-            <p><b>Example:</b> Products come in boxes of 50 units each</p>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    # System Status Terms
-    st.markdown("### 📊 System Status Terms")
-    
-    status_df = pd.DataFrame({
-        'Status': ['Shortage', 'Surplus', 'Balanced', 'Critical', 'Overdue'],
-        'Meaning': [
-            'Demand exceeds available supply',
-            'Supply exceeds demand',
-            'Supply matches demand perfectly',
-            'Urgent shortage requiring immediate action',
-            'Orders past their ETD date'
-        ],
-        'Visual Indicator': ['🔴 Red', '🟢 Green', '⚪ Gray', '🚨 Red Alert', '⚠️ Yellow'],
-        'Action Required': [
-            'Create PO or allocate available stock',
-            'Consider promotions or redistribution',
-            'Monitor for changes',
-            'Immediate allocation or expedite supply',
-            'Contact customer or expedite delivery'
-        ]
-    })
-    
-    st.dataframe(status_df, use_container_width=True, hide_index=True)
-    
-    # Allocation Terms
-    st.markdown("### 🧩 Allocation Terms")
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.markdown("""
-        <div class="term-card">
-            <h4>SOFT Allocation (90% cases)</h4>
-            <p>Flexible quantity allocation without locking specific batches. System automatically selects best supply at delivery time.</p>
-            <p><b>Use when:</b> Standard orders without specific batch requirements</p>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        st.markdown("""
-        <div class="term-card">
-            <h4>FCFS (First Come First Served)</h4>
-            <p>Allocation method that prioritizes orders with earliest ETD.</p>
-            <p><b>Best for:</b> Time-sensitive products or fair distribution</p>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    with col2:
-        st.markdown("""
-        <div class="term-card">
-            <h4>HARD Allocation (10% cases)</h4>
-            <p>Locks specific supply batches to customer orders. Cannot be changed after approval.</p>
-            <p><b>Use when:</b> Customer needs specific batch/origin/quality</p>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        st.markdown("""
-        <div class="term-card">
-            <h4>Pro-rata Allocation</h4>
-            <p>Distributes available supply proportionally based on demand quantities.</p>
-            <p><b>Example:</b> If supply is 50% of demand, each customer gets 50% of their order</p>
-        </div>
-        """, unsafe_allow_html=True)
-
-# === Tab 3: Module Workflows ===
-with tab3:
-    st.markdown("## Module Workflows")
-    
-    # Demand Analysis Workflow
-    with st.expander("📊 Demand Analysis Workflow", expanded=True):
-        st.markdown("""
-        <div class="workflow-step">
-            <h4>Step 1: Access Demand Analysis</h4>
-            <p>Navigate to Demand Analysis from the sidebar or main dashboard</p>
-        </div>
-        
-        <div class="workflow-step">
-            <h4>Step 2: Apply Filters</h4>
-            <ul>
-                <li>Select date range for analysis</li>
-                <li>Filter by products, customers, or entities</li>
-                <li>Choose demand types (OC/Forecast)</li>
-            </ul>
-        </div>
-        
-        <div class="workflow-step">
-            <h4>Step 3: Review Demand Data</h4>
-            <ul>
-                <li>Check total demand quantities</li>
-                <li>Identify overdue orders (past ETD)</li>
-                <li>Analyze demand distribution by product/customer</li>
-            </ul>
-        </div>
-        
-        <div class="workflow-step">
-            <h4>Step 4: Take Action</h4>
-            <ul>
-                <li>Export demand report for planning</li>
-                <li>Navigate to GAP Analysis for supply comparison</li>
-                <li>Create allocation plan for urgent orders</li>
-            </ul>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    # GAP Analysis Workflow
-    with st.expander("📊 GAP Analysis Workflow"):
-        st.markdown("""
-        <div class="workflow-step">
-            <h4>Step 1: Configure Analysis Parameters</h4>
-            <ul>
-                <li>Set period type (Daily/Weekly/Monthly)</li>
-                <li>Choose date modes for demand and supply</li>
-                <li>Apply product/customer filters</li>
-            </ul>
-        </div>
-        
-        <div class="workflow-step">
-            <h4>Step 2: Run GAP Analysis</h4>
-            <ul>
-                <li>Click "Run GAP Analysis" button</li>
-                <li>System calculates supply vs demand by period</li>
-                <li>Identifies shortages and surpluses</li>
-            </ul>
-        </div>
-        
-        <div class="workflow-step">
-            <h4>Step 3: Review Results</h4>
-            <ul>
-                <li>Check shortage summary for critical items</li>
-                <li>Review fulfillment rates by product</li>
-                <li>Analyze time-phased supply/demand balance</li>
-            </ul>
-        </div>
-        
-        <div class="workflow-step">
-            <h4>Step 4: Next Actions</h4>
-            <ul>
-                <li>Create Allocation Plan for products with shortage</li>
-                <li>Generate PO for items below safety stock</li>
-                <li>Export GAP report for management review</li>
-            </ul>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    # Allocation Plan Workflow
-    with st.expander("🧩 Allocation Plan Workflow"):
-        st.markdown("""
-        <div class="workflow-step">
-            <h4>Step 1: Create New Allocation</h4>
-            <ul>
-                <li>Click "Create New" from Allocation Plan page</li>
-                <li>System loads current GAP analysis data</li>
-            </ul>
-        </div>
-        
-        <div class="workflow-step">
-            <h4>Step 2: Select Products</h4>
-            <ul>
-                <li>Choose products for allocation</li>
-                <li>Can select shortage items, available items, or all</li>
-                <li>Review demand and supply for selected products</li>
-            </ul>
-        </div>
-        
-        <div class="workflow-step">
-            <h4>Step 3: Choose Allocation Method</h4>
-            <ul>
-                <li><b>FCFS:</b> For time-sensitive orders</li>
-                <li><b>Priority:</b> For VIP customers</li>
-                <li><b>Pro-rata:</b> For fair distribution</li>
-                <li><b>Manual:</b> For custom scenarios</li>
-            </ul>
-        </div>
-        
-        <div class="workflow-step">
-            <h4>Step 4: Configure Parameters</h4>
-            <ul>
-                <li>Set allocation type (SOFT/HARD)</li>
-                <li>Configure method-specific settings</li>
-                <li>Add notes and comments</li>
-            </ul>
-        </div>
-        
-        <div class="workflow-step">
-            <h4>Step 5: Review and Approve</h4>
-            <ul>
-                <li>Review allocation results</li>
-                <li>Make manual adjustments if needed</li>
-                <li>Save as draft or approve immediately</li>
-            </ul>
-        </div>
-        """, unsafe_allow_html=True)
-
-# === Tab 4: Use Cases ===
-with tab4:
-    st.markdown("## Common Use Cases & Examples")
-    
-    # Use Case 1: Shortage Handling
-    st.markdown("### 🔴 Use Case 1: Handling Product Shortage")
-    st.markdown("""
-    <div class="example-box">
-        <h4>Scenario:</h4>
-        <p>Product ABC has 500 units in stock but customer orders total 800 units for next week.</p>
-        
-        <h4>Steps to resolve:</h4>
-        <ol>
-            <li><b>Run GAP Analysis:</b> Identify the 300-unit shortage</li>
-            <li><b>Check Supply Pipeline:</b> Look for incoming POs or transfers</li>
-            <li><b>Create Allocation Plan:</b>
-                <ul>
-                    <li>Use Priority method if you have VIP customers</li>
-                    <li>Use FCFS for fair distribution</li>
-                    <li>Use Pro-rata to give each customer partial quantity</li>
-                </ul>
-            </li>
-            <li><b>Communicate:</b> Inform customers about partial fulfillment</li>
-            <li><b>Create PO:</b> Order additional 300+ units for future</li>
-        </ol>
-        
-        <h4>Result:</h4>
-        <p>All customers receive fair allocation based on chosen method, and future supply is secured.</p>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    # Use Case 2: Surplus Management
-    st.markdown("### 🟢 Use Case 2: Managing Surplus Inventory")
-    st.markdown("""
-    <div class="example-box">
-        <h4>Scenario:</h4>
-        <p>Product XYZ has 2000 units in stock but only 500 units of demand for next month.</p>
-        
-        <h4>Steps to resolve:</h4>
-        <ol>
-            <li><b>Run GAP Analysis:</b> Identify 1500-unit surplus</li>
-            <li><b>Check Expiry Dates:</b> Priority for near-expiry items</li>
-            <li><b>Actions to consider:</b>
-                <ul>
-                    <li>Offer promotions to increase demand</li>
-                    <li>Transfer to other locations with shortage</li>
-                    <li>Negotiate with customers for early delivery</li>
-                    <li>Adjust future PO quantities</li>
-                </ul>
-            </li>
-            <li><b>Monitor:</b> Track inventory aging and adjust strategy</li>
-        </ol>
-        
-        <h4>Result:</h4>
-        <p>Reduced holding costs and minimized expiry risk.</p>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    # Use Case 3: VIP Customer Priority
-    st.markdown("### ⭐ Use Case 3: VIP Customer Priority Allocation")
-    st.markdown("""
-    <div class="example-box">
-        <h4>Scenario:</h4>
-        <p>Limited stock of 1000 units with orders from both VIP and regular customers totaling 1500 units.</p>
-        
-        <h4>Steps to resolve:</h4>
-        <ol>
-            <li><b>Set Customer Priorities:</b>
-                <ul>
-                    <li>VIP Customers: Priority 10</li>
-                    <li>Regular Customers: Priority 5</li>
-                    <li>New Customers: Priority 1</li>
-                </ul>
-            </li>
-            <li><b>Create Allocation Plan:</b>
-                <ul>
-                    <li>Choose "Priority Based" method</li>
-                    <li>Set minimum allocation % if needed</li>
-                </ul>
-            </li>
-            <li><b>Review Results:</b>
-                <ul>
-                    <li>VIP customers get 100% fulfillment</li>
-                    <li>Regular customers get partial based on remaining</li>
-                </ul>
-            </li>
-        </ol>
-        
-        <h4>Result:</h4>
-        <p>Maintained VIP customer satisfaction while fairly distributing remaining stock.</p>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    # Use Case 4: Time-Sensitive Orders
-    st.markdown("### ⏰ Use Case 4: Time-Sensitive Order Management")
-    st.markdown("""
-    <div class="example-box">
-        <h4>Scenario:</h4>
-        <p>Multiple orders with different ETDs but limited supply arriving in batches.</p>
-        
-        <h4>Steps to resolve:</h4>
-        <ol>
-            <li><b>Apply Time Adjustments:</b>
-                <ul>
-                    <li>Set transportation lead time</li>
-                    <li>Add buffer days for safety</li>
-                </ul>
-            </li>
-            <li><b>Run GAP Analysis:</b> With daily period type</li>
-            <li><b>Create FCFS Allocation:</b>
-                <ul>
-                    <li>System prioritizes earliest ETD</li>
-                    <li>Ensures on-time delivery for urgent orders</li>
-                </ul>
-            </li>
-            <li><b>Monitor Execution:</b>
-                <ul>
-                    <li>Track allocation vs actual delivery</li>
-                    <li>Adjust future plans based on performance</li>
-                </ul>
-            </li>
-        </ol>
-        
-        <h4>Result:</h4>
-        <p>Minimized late deliveries and improved customer satisfaction.</p>
-    </div>
-    """, unsafe_allow_html=True)
-
-# === Tab 5: Quick Reference ===
-with tab5:
-    st.markdown("## Quick Reference Guide")
-    
-    # Common Tasks
-    st.markdown("### ✅ Common Tasks Checklist")
-    
-    tasks_df = pd.DataFrame({
-        'Task': [
-            'Check daily demand',
-            'Review inventory levels',
-            'Identify shortages',
-            'Create allocation plan',
-            'Export reports',
-            'Adjust time settings'
-        ],
-        'Module': [
-            'Demand Analysis',
-            'Supply Analysis',
-            'GAP Analysis',
-            'Allocation Plan',
-            'Any module',
-            'Settings'
-        ],
-        'Quick Steps': [
-            '1. Go to Demand Analysis → 2. Set date range → 3. Review summary',
-            '1. Go to Supply Analysis → 2. Check "Current Stock" metric',
-            '1. Run GAP Analysis → 2. Check shortage summary → 3. Sort by gap quantity',
-            '1. GAP Analysis → 2. Click "Create Allocation" → 3. Follow wizard',
-            '1. Look for 📥 export button → 2. Choose format → 3. Download',
-            '1. Go to Settings → 2. Adjust offsets → 3. Save settings'
-        ]
-    })
-    
-    st.dataframe(tasks_df, use_container_width=True, hide_index=True)
-    
-    # Keyboard Shortcuts
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.markdown("### ⌨️ Navigation Tips")
-        st.markdown("""
-        - Use sidebar to switch between modules
-        - Press 'R' to refresh data (when available)
-        - Use browser back button to return to previous page
-        - Bookmark frequently used pages
+        ```
+        1. Load Demand Data
+              ↓
+        2. Load Supply Data
+              ↓
+        3. Run GAP Analysis
+              ↓
+        4. Create Allocation
+              ↓
+        5. Generate Reports
+        ```
         """)
     
-    with col2:
-        st.markdown("### 💡 Best Practices")
+    # Key features
+    st.markdown("---")
+    st.markdown("### ⭐ Key Features")
+    
+    feature_cols = st.columns(4)
+    
+    with feature_cols[0]:
         st.markdown("""
-        - Run GAP Analysis daily for critical products
-        - Review allocation performance weekly
-        - Export reports for offline analysis
-        - Document special cases in notes
-        - Keep time adjustments updated
+        **📤 Demand Analysis**
+        - Order tracking
+        - Forecast management
+        - Customer analytics
+        """)
+        
+    with feature_cols[1]:
+        st.markdown("""
+        **📦 Supply Analysis**
+        - Inventory status
+        - Pending orders
+        - Expiry tracking
+        """)
+        
+    with feature_cols[2]:
+        st.markdown("""
+        **📊 GAP Analysis**
+        - Shortage detection
+        - Surplus identification
+        - Period planning
+        """)
+        
+    with feature_cols[3]:
+        st.markdown("""
+        **🧩 Allocation Plan**
+        - Smart distribution
+        - Multiple methods
+        - Credit control
+        """)
+
+def show_demand_section():
+    """Show demand analysis guide"""
+    st.header("📤 Demand Analysis Guide")
+    
+    # Quick intro
+    st.info("**Mục đích:** Theo dõi và phân tích nhu cầu từ khách hàng thông qua Order Confirmation (OC) và Forecast")
+    
+    # Data sources
+    with st.expander("📋 Data Sources", expanded=True):
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("""
+            **🔵 Order Confirmation (OC)**
+            - Đơn hàng đã xác nhận
+            - Chưa giao hoàn toàn
+            - Có ETD cụ thể
+            """)
+            
+        with col2:
+            st.markdown("""
+            **🟣 Forecast**
+            - Dự báo từ khách hàng
+            - Chưa chuyển thành OC
+            - ETD dự kiến
+            """)
+    
+    # Step by step guide
+    st.markdown("### 📝 How to Use")
+    
+    steps = [
+        ("1️⃣ Choose Data Source", 
+         "- **OC Only:** Chỉ xem đơn đã confirm\n- **Forecast Only:** Chỉ xem dự báo\n- **Both:** Xem cả hai (⚠️ careful với double counting!)"),
+        
+        ("2️⃣ Select Date Mode",
+         "- **Original:** Ngày gốc từ system\n- **Adjusted:** Ngày đã điều chỉnh theo rules"),
+        
+        ("3️⃣ Apply Filters",
+         "- **Smart Filters:** Interactive, tự động update\n- **Standard:** Traditional độc lập"),
+        
+        ("4️⃣ View Results",
+         "- **Summary:** Overview metrics\n- **Details:** Chi tiết từng dòng\n- **Grouped:** Theo Daily/Weekly/Monthly")
+    ]
+    
+    for title, content in steps:
+        with st.expander(title):
+            st.markdown(content)
+    
+    # Common issues
+    with st.expander("⚠️ Common Issues & Solutions"):
+        st.markdown("""
+        **🔴 Past ETD Orders**
+        - Đơn hàng quá hạn
+        - **Action:** Xử lý gấp hoặc update ETD
+        
+        **❌ Missing ETD**
+        - Thiếu ngày giao hàng
+        - **Action:** Liên hệ customer để bổ sung
+        
+        **⚠️ Converted Forecast**
+        - Forecast đã chuyển thành OC
+        - **Action:** Uncheck "Include Converted" để tránh tính 2 lần
         """)
     
-    # Troubleshooting
-    st.markdown("### 🔧 Troubleshooting")
-    
-    trouble_df = pd.DataFrame({
-        'Issue': [
-            'No data showing',
-            'GAP Analysis not running',
-            'Cannot create allocation',
-            'Export not working',
-            'Login issues'
-        ],
-        'Possible Cause': [
-            'Filters too restrictive',
-            'No demand/supply data',
-            'Insufficient permissions',
-            'Large dataset',
-            'Session expired'
-        ],
-        'Solution': [
-            'Check date range and remove filters',
-            'Ensure data is loaded in Demand/Supply first',
-            'Contact admin for role upgrade',
-            'Try filtering data before export',
-            'Log out and log in again'
-        ]
-    })
-    
-    st.dataframe(trouble_df, use_container_width=True, hide_index=True)
-    
-    # Contact Support
-    st.markdown("### 📞 Need Help?")
-    st.info("""
-    **For additional support:**
-    - 📧 Email: scm-support@company.com
-    - 📱 Hotline: +84 xxx xxx xxx
-    - 💬 Teams: SCM Support Channel
-    - 📋 Submit ticket: helpdesk.company.com
+    # Pro tips
+    st.success("""
+    💡 **Pro Tips:**
+    - Export Grouped View để làm báo cáo tuần/tháng
+    - Ưu tiên xử lý: Past ETD → Missing ETD → Future orders
+    - Regular check converted forecasts để avoid duplication
     """)
 
-# === Footer ===
+def show_supply_section():
+    """Show supply analysis guide"""
+    st.header("📦 Supply Analysis Guide")
+    
+    st.info("**Mục đích:** Theo dõi toàn bộ nguồn hàng có thể đáp ứng nhu cầu từ 4 nguồn khác nhau")
+    
+    # Supply sources
+    st.markdown("### 📋 Supply Sources")
+    
+    supply_tabs = st.tabs(["📦 Inventory", "📥 Pending CAN", "📄 Pending PO", "🚚 WH Transfer"])
+    
+    with supply_tabs[0]:
+        st.markdown("""
+        **Inventory - Tồn kho hiện tại**
+        - ✅ Available ngay (TODAY)
+        - 📍 Có vị trí kho cụ thể
+        - 📅 Track expiry date
+        - 💰 Có giá trị USD
+        
+        **Key Info:**
+        - Batch number & Expiry
+        - Zone-Rack-Bin location
+        - Days in warehouse
+        - Owner matching check
+        """)
+        
+    with supply_tabs[1]:
+        st.markdown("""
+        **Pending CAN - Hàng đã đến chờ nhập**
+        - 📦 Đã về kho nhưng chưa stock-in
+        - 🔗 Linked với PO number
+        - ⏱️ Track days since arrival
+        
+        **Warnings:**
+        - 🔴 > 7 days: Chậm nhập kho
+        - Check với warehouse team
+        """)
+        
+    with supply_tabs[2]:
+        st.markdown("""
+        **Pending PO - Đơn đặt hàng**
+        - 📄 Hàng đã đặt chưa về
+        - 📅 Có ETA dự kiến
+        - 💼 Track vendor & terms
+        
+        **Important:**
+        - MOQ & SPQ requirements
+        - Payment terms
+        - Lead time tracking
+        """)
+        
+    with supply_tabs[3]:
+        st.markdown("""
+        **WH Transfer - Chuyển kho**
+        - 🚚 Hàng đang di chuyển
+        - 🏭 From → To warehouse
+        - ⏱️ Transfer duration
+        
+        **Alerts:**
+        - 🔴 > 3 days: Check delay reason
+        - Update transfer status
+        """)
+    
+    # Expiry management
+    with st.expander("💀 Expiry Management"):
+        st.markdown("""
+        **Color Coding:**
+        - 💀 **Expired:** Hàng hết hạn → Xử lý ngay
+        - 🔴 **≤7 days:** Sắp hết hạn → Ưu tiên xuất
+        - 🟡 **≤30 days:** Cần theo dõi
+        - 🟢 **>30 days:** An toàn
+        
+        **Settings:**
+        - "Exclude Expired" = ON cho planning thực tế
+        - OFF để kiểm tra toàn bộ inventory
+        """)
+    
+    # Priority guide
+    st.success("""
+    💡 **Supply Priority Order:**
+    1. Inventory (sẵn có)
+    2. Pending CAN (sắp nhập)  
+    3. WH Transfer (đang chuyển)
+    4. Pending PO (chờ về)
+    """)
+
+def show_gap_section():
+    """Show GAP analysis guide"""
+    st.header("📊 GAP Analysis Guide")
+    
+    st.info("**Mục đích:** So sánh Supply vs Demand để tìm shortage/surplus và đưa ra action plans")
+    
+    # Key concepts
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown("### 📐 Calculation Options")
+        st.markdown("""
+        **Ảnh hưởng cách tính:**
+        - **Period Type:** Daily/Weekly/Monthly
+        - **Exclude Missing:** Bỏ records không có date
+        - **Track Backlog:** 
+          - ON: Shortage carry forward
+          - OFF: Each period độc lập
+        """)
+        
+    with col2:
+        st.markdown("### 🎯 Display Filters")
+        st.markdown("""
+        **Chỉ ảnh hưởng hiển thị:**
+        - **Matched:** Có cả D&S
+        - **Demand Only:** Cần PO
+        - **Supply Only:** Dead stock risk
+        - **Period filters:** Past/Future/Critical
+        """)
+    
+    # Workflow
+    st.markdown("### 🔄 GAP Analysis Workflow")
+    
+    workflow_steps = [
+        ("1️⃣ Select Data Sources",
+         "- Demand: OC/Forecast/Both\n- Supply: All 4 sources\n- Customer filter if needed"),
+        
+        ("2️⃣ Configure Settings",
+         "- Date modes (Original/Adjusted)\n- Period type & Backlog tracking\n- Filters (Entity/Product/Brand)"),
+        
+        ("3️⃣ Run Analysis",
+         "- Click 'Run GAP Analysis'\n- Wait for calculation\n- Check completion message"),
+        
+        ("4️⃣ Review Results",
+         "- Summary tab: Key metrics\n- Details tab: Product breakdown\n- Pivot view: Period summary"),
+        
+        ("5️⃣ Take Actions",
+         "- 🧩 Create Allocation (if products available)\n- 📌 Generate PO (if shortage)\n- 📤 Export reports")
+    ]
+    
+    for step, details in workflow_steps:
+        with st.expander(step):
+            st.markdown(details)
+    
+    # Backlog logic explanation
+    with st.expander("📚 Understanding Backlog Logic"):
+        tab1, tab2 = st.tabs(["Backlog OFF", "Backlog ON"])
+        
+        with tab1:
+            st.markdown("""
+            **Simple Mode - Each period independent:**
+            ```
+            Period 1: D=100, S=80 → GAP=-20 ❌
+            Period 2: D=50, S=100 → GAP=+50 ✅  
+            Period 3: D=60, S=20 → GAP=-40 ❌
+            ```
+            - Shortage không carry forward
+            - Surplus carry forward bình thường
+            """)
+            
+        with tab2:
+            st.markdown("""
+            **Enhanced Mode - Shortage accumulates:**
+            ```
+            Period 1: D=100, S=80 → GAP=-20 ❌ (Backlog=20)
+            Period 2: D=50+20, S=100 → GAP=+30 ✅
+            Period 3: D=40, S=20+30 → GAP=+10 ✅
+            ```
+            - Shortage chuyển sang period sau
+            - More realistic view
+            """)
+    
+    # Result interpretation
+    st.success("""
+    💡 **Action Priority:**
+    1. **Demand Only** → Create PO immediately
+    2. **Critical Shortage** (FR<50%) → Priority allocation
+    3. **Past Period** shortage → Urgent handling
+    4. **Future shortage** → Plan ahead
+    """)
+
+def show_allocation_section():
+    """Show allocation plan guide"""
+    st.header("🧩 Allocation Plan Guide")
+    
+    st.info("**Mục đích:** Phân bổ nguồn hàng cho đơn hàng dựa trên GAP Analysis results")
+    
+    # Allocation types
+    st.markdown("### 📋 Allocation Types")
+    
+    type_col1, type_col2 = st.columns(2)
+    
+    with type_col1:
+        st.markdown("""
+        **🌊 SOFT Allocation (90% cases)**
+        - Chỉ phân bổ số lượng
+        - System tự chọn nguồn khi giao
+        - Flexible điều chỉnh
+        - ✅ **Recommended mặc định**
+        """)
+        
+    with type_col2:
+        st.markdown("""
+        **🔒 HARD Allocation (10% special)**
+        - Lock specific batch/lot
+        - Cho yêu cầu xuất xứ/quality
+        - Không thể đổi sau approve
+        - ⚠️ **Chỉ khi thực sự cần**
+        """)
+    
+    # Allocation methods
+    st.markdown("### 🎯 Allocation Methods")
+    
+    method_tabs = st.tabs(["📅 FCFS", "⭐ Priority", "⚖️ Pro Rata", "✋ Manual"])
+    
+    with method_tabs[0]:
+        st.markdown("""
+        **First Come First Served**
+        - Ưu tiên ETD sớm nhất
+        - Fair & transparent
+        - Good for time-sensitive
+        
+        Example: ETD Jan 1 → Jan 5 → Jan 10
+        """)
+        
+    with method_tabs[1]:
+        st.markdown("""
+        **Priority Based**
+        - Set score 1-10 per customer
+        - VIP gets preference
+        - Strategic accounts
+        
+        Example: Priority 9 → 7 → 5
+        """)
+        
+    with method_tabs[2]:
+        st.markdown("""
+        **Pro Rata Distribution**
+        - Proportional to demand
+        - Equal treatment
+        - Can set minimum %
+        
+        Example: All get 50% if shortage
+        """)
+        
+    with method_tabs[3]:
+        st.markdown("""
+        **Manual Adjustment**
+        - Full control
+        - Start with pro-rata
+        - Adjust as needed
+        
+        Best for complex scenarios
+        """)
+    
+    # Creation workflow
+    st.markdown("### 📝 Create Allocation - Step by Step")
+    
+    steps_data = [
+        ("Step 1: Select Products", 
+         "- Use filters to find products\n- Can allocate ALL products\n- Not limited to shortage only"),
+        
+        ("Step 2: Choose Method & Type",
+         "- Pick allocation method\n- Select SOFT (default) or HARD\n- Consider business needs"),
+        
+        ("Step 3: Set Parameters",
+         "- Configure method settings\n- Credit limit check ON/OFF\n- Allow partial YES/NO"),
+        
+        ("Step 4: Preview & Adjust",
+         "- Review auto-calculation\n- Adjust quantities manually\n- Check warnings"),
+        
+        ("Step 5: [HARD only] Map Supply",
+         "- Select specific batches\n- Link to customer orders\n- Validate availability"),
+        
+        ("Step 6: Confirm & Save",
+         "- Final validation\n- Save as Draft or Approve\n- Export preview if needed")
+    ]
+    
+    for i, (title, content) in enumerate(steps_data, 1):
+        with st.expander(f"{title}"):
+            st.markdown(content)
+            if i == 4:
+                st.warning("⚠️ Lines with 0 quantity will be auto-excluded")
+    
+    # Best practices
+    with st.expander("💡 Best Practices & Tips"):
+        st.markdown("""
+        **Do's:**
+        - ✅ Use SOFT allocation by default
+        - ✅ Check credit limits warning
+        - ✅ Review excluded lines before save
+        - ✅ Document reasons in notes
+        
+        **Don'ts:**
+        - ❌ Use HARD without specific need
+        - ❌ Ignore validation warnings
+        - ❌ Forget to check zero allocations
+        - ❌ Edit after approval (can only cancel)
+        
+        **Remember:**
+        - Draft → Allocated is ONE-WAY
+        - Snapshot saves GAP context
+        - Partial cancel keeps plan active
+        - Full cancel releases all supply
+        """)
+
+def show_quickstart_section():
+    """Show quick start guide"""
+    st.header("⚡ Quick Start Guide")
+    
+    st.success("Follow these steps to get started quickly!")
+    
+    # Quick workflow
+    steps = [
+        {
+            "step": "1. Load Demand Data",
+            "action": "Go to Demand Analysis → Load OC + Forecast",
+            "time": "2 mins",
+            "icon": "📤"
+        },
+        {
+            "step": "2. Load Supply Data", 
+            "action": "Go to Supply Analysis → Select All Sources",
+            "time": "2 mins",
+            "icon": "📦"
+        },
+        {
+            "step": "3. Run GAP Analysis",
+            "action": "Go to GAP Analysis → Configure → Run",
+            "time": "3 mins",
+            "icon": "📊"
+        },
+        {
+            "step": "4. Review Results",
+            "action": "Check shortage/surplus → Identify actions",
+            "time": "5 mins",
+            "icon": "🔍"
+        },
+        {
+            "step": "5. Create Allocation",
+            "action": "If products available → Create allocation plan",
+            "time": "5 mins",
+            "icon": "🧩"
+        },
+        {
+            "step": "6. Export Reports",
+            "action": "Export results for team/management",
+            "time": "2 mins",
+            "icon": "📤"
+        }
+    ]
+    
+    # Display steps
+    total_time = 0
+    for step_info in steps:
+        col1, col2, col3 = st.columns([0.5, 3, 1])
+        
+        with col1:
+            st.markdown(f"### {step_info['icon']}")
+            
+        with col2:
+            st.markdown(f"**{step_info['step']}**")
+            st.caption(step_info['action'])
+            
+        with col3:
+            st.metric("Time", step_info['time'])
+            
+        total_time += int(step_info['time'].split()[0])
+        st.markdown("---")
+    
+    # Summary
+    st.info(f"⏱️ **Total estimated time: {total_time} minutes** for complete workflow")
+    
+    # Quick tips
+    st.markdown("### 🎯 Quick Tips")
+    
+    tip_cols = st.columns(3)
+    
+    with tip_cols[0]:
+        st.markdown("""
+        **🔴 Urgent Actions**
+        - Past ETD orders
+        - Expired inventory
+        - Credit limit breach
+        """)
+        
+    with tip_cols[1]:
+        st.markdown("""
+        **🟡 Important Checks**
+        - Converted forecasts
+        - Expiring products
+        - Pending allocations
+        """)
+        
+    with tip_cols[2]:
+        st.markdown("""
+        **🟢 Regular Tasks**
+        - Weekly GAP run
+        - Allocation review
+        - Report generation
+        """)
+
+def show_faqs_section():
+    """Show FAQs section"""
+    st.header("❓ Frequently Asked Questions")
+    
+    # Categorize FAQs
+    faq_categories = {
+        "General": [
+            ("What is SCM Control Center?",
+             "A supply chain management system that helps analyze demand vs supply, identify gaps, and create allocation plans."),
+            
+            ("Do I need to run all modules?",
+             "No, but recommended workflow is: Demand → Supply → GAP → Allocation for best results."),
+            
+            ("How often should I run GAP Analysis?",
+             "Weekly for regular planning, daily for critical products or urgent situations.")
+        ],
+        
+        "Demand Analysis": [
+            ("What's the difference between OC and Forecast?",
+             "OC = Confirmed orders, Forecast = Predictions. OC has higher priority."),
+            
+            ("How to avoid double counting?",
+             "When viewing Both, uncheck 'Include Converted Forecasts' or filter Forecast status = 'No'."),
+            
+            ("What if ETD is missing?",
+             "Contact customer to get ETD. System flags these as high priority issues.")
+        ],
+        
+        "Supply Analysis": [
+            ("Which supply source is most reliable?",
+             "Priority order: Inventory > Pending CAN > WH Transfer > Pending PO"),
+            
+            ("How to handle expired products?",
+             "Set 'Exclude Expired' = ON for planning. Review expired separately for disposal."),
+            
+            ("Why is my CAN not showing in inventory?",
+             "Check if stock-in completed. CAN > 7 days needs warehouse follow-up.")
+        ],
+        
+        "GAP Analysis": [
+            ("What's Track Backlog?",
+             "ON = Shortage accumulates to next period (realistic). OFF = Each period independent (simple)."),
+            
+            ("When to use different period types?",
+             "Daily = Short-term ops, Weekly = Regular planning, Monthly = Long-term strategy"),
+            
+            ("What does negative GAP mean?",
+             "Shortage - demand exceeds supply. Positive = Surplus.")
+        ],
+        
+        "Allocation Plan": [
+            ("SOFT vs HARD allocation?",
+             "SOFT (90%) = Flexible quantity only. HARD (10%) = Lock specific batch/lot."),
+            
+            ("Can I edit after approval?",
+             "No, only cancel allowed. Plan carefully before approving."),
+            
+            ("What happens to zero allocations?",
+             "Auto-excluded from plan. Review before saving."),
+            
+            ("How does credit limit work?",
+             "System checks customer credit vs allocation value. Can override with reason.")
+        ]
+    }
+    
+    # Display FAQs by category
+    for category, questions in faq_categories.items():
+        with st.expander(f"📌 {category}", expanded=True):
+            for question, answer in questions:
+                st.markdown(f"**Q: {question}**")
+                st.info(f"A: {answer}")
+                st.markdown("")
+
+
+# Main content area
+if st.session_state.guide_section == 'overview':
+    show_overview_section()
+elif st.session_state.guide_section == 'demand':
+    show_demand_section()
+elif st.session_state.guide_section == 'supply':
+    show_supply_section()
+elif st.session_state.guide_section == 'gap':
+    show_gap_section()
+elif st.session_state.guide_section == 'allocation':
+    show_allocation_section()
+elif st.session_state.guide_section == 'quickstart':
+    show_quickstart_section()
+elif st.session_state.guide_section == 'faqs':
+    show_faqs_section()
+
+
+# Footer
 st.markdown("---")
-col1, col2, col3 = st.columns([2, 2, 1])
+footer_cols = st.columns([2, 1, 1])
 
-with col1:
-    st.caption(f"SCM Control Center v1.0 - User Guide")
-
-with col2:
-    current_user = st.session_state.get('username', 'Guest')
-    user_role = st.session_state.get('user_role', 'user')
-    st.caption(f"Logged in as: {current_user} ({user_role})")
-
-with col3:
-    st.caption("Last updated: Jan 2025")
+with footer_cols[0]:
+    st.caption(f"Last updated: {datetime.now().strftime('%Y-%m-%d')} | Version 1.0")
+    
+with footer_cols[1]:
+    st.caption("Need help? Contact IT Support")
+    
+with footer_cols[2]:
+    if st.button("🔝 Back to Top"):
+        st.markdown('<a href="#user-guide-scm-control-center"></a>', unsafe_allow_html=True)
