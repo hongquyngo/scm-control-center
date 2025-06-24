@@ -44,13 +44,7 @@ from utils.period_processor import PeriodBasedGAPProcessor
 
 from typing import Tuple, Dict, Any, Optional, List
 
-def ensure_numeric_columns(df, columns):
-    """Ensure columns are numeric type to prevent Arrow errors"""
-    for col in columns:
-        if col in df.columns:
-            # Convert to numeric, replacing errors with 0
-            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-    return df
+
 
 
 
@@ -144,20 +138,12 @@ def load_and_prepare_demand_data(selected_demand_sources, include_converted):
         df = data_manager.get_demand_data(sources=selected_demand_sources, include_converted=include_converted)
 
         # ADD THIS - Fix numeric columns
-        numeric_cols = ['demand_quantity', 'buying_quantity', 'value_in_usd', 
-                       'total_allocated', 'total_delivered', 'undelivered_allocated']
+        numeric_cols = ['uom_conversion', 'selling_quantity', 'standard_quantity', 'total_delivered_selling_quantity', 'total_delivered_standard_quantity'
+                        'pending_selling_delivery_quantity','pending_standard_delivery_quantity', 'selling_unit_price', 'total_amount_usd'
+                        'demand_quantity', 'value_in_usd', 'standard_unit_price_usd', 'total_amount']
+
         df = ensure_numeric_columns(df, numeric_cols)
-        
-        if debug_mode and not df.empty:
-            st.write(f"🐛 Demand data shape: {df.shape}")
-            st.write(f"🐛 Demand columns: {df.columns.tolist()[:10]}...")  # Show first 10 columns
-            st.write(f"🐛 Unique products: {df['pt_code'].nunique()}")
-            
-            # Check for adjustment columns
-            adj_cols = [col for col in df.columns if '_adjusted' in col or '_original' in col]
-            if adj_cols:
-                st.write(f"🐛 Adjustment columns found: {adj_cols}")
-        
+
         return df
         
     except Exception as e:
@@ -172,18 +158,10 @@ def load_and_prepare_supply_data(selected_supply_sources, exclude_expired=True):
         df = data_manager.get_supply_data(sources=selected_supply_sources, exclude_expired=exclude_expired)
 
         # ADD THIS - Fix numeric columns
-        numeric_cols = ['quantity', 'buying_quantity', 'value_in_usd']
+        numeric_cols = ['quantity', 'buying_quantity', 'value_in_usd', 
+                        'purchase_unit_cost', 'days_in_transfer', 'days_since_arrival', 'days_until_expiry']
         df = ensure_numeric_columns(df, numeric_cols)
-        
-        if debug_mode and not df.empty:
-            st.write(f"🐛 Supply data shape: {df.shape}")
-            st.write(f"🐛 Supply sources: {df['source_type'].value_counts().to_dict()}")
-            
-            # Check for adjustment columns
-            adj_cols = [col for col in df.columns if '_adjusted' in col or '_original' in col]
-            if adj_cols:
-                st.write(f"🐛 Adjustment columns found: {adj_cols}")
-        
+
         return df
         
     except Exception as e:
@@ -192,6 +170,13 @@ def load_and_prepare_supply_data(selected_supply_sources, exclude_expired=True):
         return pd.DataFrame()
 
 
+def ensure_numeric_columns(df, columns):
+    """Ensure columns are numeric type to prevent Arrow errors"""
+    for col in columns:
+        if col in df.columns:
+            # Convert to numeric, replacing errors with 0
+            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+    return df
 
 # === Source Selection ===
 def select_gap_sources():
@@ -2112,29 +2097,32 @@ def apply_gap_detail_filter(display_df: pd.DataFrame, filter_option: str, displa
 
 def prepare_gap_detail_display(display_df: pd.DataFrame, display_options: Dict,
                               df_demand_filtered=None, df_supply_filtered=None) -> pd.DataFrame:
-    """Prepare GAP dataframe for detail display with backlog support"""
+    """Prepare GAP dataframe for detail display - SIMPLIFIED VERSION"""
     if display_df.empty:
         return display_df
     
     display_df = display_df.copy()
     
-    # Add Period Status column
+    # 1. Add Period Status indicator (🔴 for past periods)
     period_type = display_options.get("period_type", "Weekly")
     display_df['period'] = display_df['period'].apply(
-        lambda x: f"{x} 🔴" if is_past_period(str(x), period_type) else x
+        lambda x: f"🔴{x}" if is_past_period(str(x), period_type) else x
     )
     
-    # Add Product Type column if we have the data
+    # 2. Add Product Type column if we have demand/supply data
     if df_demand_filtered is not None and df_supply_filtered is not None:
         demand_products = set()
         supply_products = set()
         
+        # Extract unique products from demand
         if not df_demand_filtered.empty and 'pt_code' in df_demand_filtered.columns:
             demand_products = set(df_demand_filtered['pt_code'].unique())
         
+        # Extract unique products from supply
         if not df_supply_filtered.empty and 'pt_code' in df_supply_filtered.columns:
             supply_products = set(df_supply_filtered['pt_code'].unique())
         
+        # Only add Product Type if we have some products
         if demand_products or supply_products:
             def get_product_type(pt_code):
                 if pt_code in demand_products and pt_code in supply_products:
@@ -2147,10 +2135,11 @@ def prepare_gap_detail_display(display_df: pd.DataFrame, display_options: Dict,
             
             display_df['Product Type'] = display_df['pt_code'].apply(get_product_type)
     
-    # Add Backlog Status column if tracking backlog
+    # 3. Add Backlog Status column if tracking backlog
     if 'backlog_qty' in display_df.columns and display_options.get('track_backlog', True):
         def get_backlog_status(row):
             try:
+                # Handle formatted strings with commas
                 backlog = float(str(row.get('backlog_qty', 0)).replace(',', ''))
                 if backlog > 0:
                     return "⚠️ Has Backlog"
@@ -2161,151 +2150,119 @@ def prepare_gap_detail_display(display_df: pd.DataFrame, display_options: Dict,
         
         display_df['Backlog Status'] = display_df.apply(get_backlog_status, axis=1)
     
-    # Build display columns based on what's available and options
-    display_columns = [
-        "pt_code", 
-        "product_name", 
-        "package_size", 
-        "standard_uom", 
-        "period"
-    ]
+    # 4. Sort data by product and period
+    # Create temporary sort key based on period type
+    if period_type == "Weekly":
+        display_df['_sort_key'] = display_df['period'].str.replace(' 🔴', '').apply(parse_week_period)
+    elif period_type == "Monthly":
+        display_df['_sort_key'] = display_df['period'].str.replace(' 🔴', '').apply(parse_month_period)
+    else:  # Daily
+        display_df['_sort_key'] = pd.to_datetime(display_df['period'].str.replace(' 🔴', ''), errors='coerce')
     
-    # Add inventory/supply columns
-    display_columns.extend([
-        "begin_inventory", 
-        "supply_in_period", 
-        "total_available"
-    ])
+    # Sort by product code first, then by period
+    display_df = display_df.sort_values(['pt_code', '_sort_key'])
     
-    # Add demand columns based on backlog tracking
-    if 'backlog_qty' in display_df.columns and display_options.get('track_backlog', True):
-        # When tracking backlog, show original demand, backlog, and effective demand
-        display_columns.extend([
-            "original_demand_qty",
-            "backlog_qty", 
-            "effective_demand"
-        ])
-        # Rename for clarity in display
-        if 'original_demand_qty' in display_df.columns:
-            display_df = display_df.rename(columns={
-                'original_demand_qty': 'Period Demand',
-                'backlog_qty': 'Backlog from Previous',
-                'effective_demand': 'Total Demand (Period + Backlog)'
-            })
-            # Update column names in list
-            idx = display_columns.index("original_demand_qty")
-            display_columns[idx] = "Period Demand"
-            idx = display_columns.index("backlog_qty")
-            display_columns[idx] = "Backlog from Previous"
-            idx = display_columns.index("effective_demand")
-            display_columns[idx] = "Total Demand (Period + Backlog)"
-    else:
-        # Original logic - just show total demand
-        display_columns.append("total_demand_qty")
+    # Remove the temporary sort key
+    display_df = display_df.drop(columns=['_sort_key'])
     
-    # Add result columns
-    display_columns.extend([
-        "gap_quantity", 
-        "fulfillment_rate_percent", 
-        "fulfillment_status"
-    ])
+    # Reset index for clean display
+    display_df = display_df.reset_index(drop=True)
     
-    # Add optional columns if they exist
-    if 'Product Type' in display_df.columns:
-        display_columns.append('Product Type')
-    
-    if 'Backlog Status' in display_df.columns:
-        display_columns.append('Backlog Status')
-    
-    # Only include columns that exist in the dataframe
-    display_columns = [col for col in display_columns if col in display_df.columns]
-    
-    # Sort by period and product
-    if 'period' in display_df.columns and 'pt_code' in display_df.columns:
-        # Sort based on period type
-        if period_type == "Weekly":
-            display_df['sort_key'] = display_df['period'].apply(parse_week_period)
-        elif period_type == "Monthly":
-            display_df['sort_key'] = display_df['period'].apply(parse_month_period)
-        else:
-            display_df['sort_key'] = pd.to_datetime(display_df['period'])
-        
-        display_df = display_df.sort_values(['pt_code', 'sort_key'])
-        
-        # Remove sort key from final display
-        if 'sort_key' in display_df.columns:
-            display_df = display_df.drop(columns=['sort_key'])
-    
-    # Reorder columns for better readability
-    # Ensure key columns are at the beginning
-    key_columns = ['pt_code', 'product_name', 'period', 'Period Status']
-    other_columns = [col for col in display_columns if col not in key_columns]
-    
-    final_column_order = []
-    for col in key_columns:
-        if col in display_columns:
-            final_column_order.append(col)
-    final_column_order.extend(other_columns)
-    
-    return display_df[final_column_order]
+    return display_df
 
 
 def format_gap_display_df(df: pd.DataFrame, display_options: Dict) -> pd.DataFrame:
-    """Format GAP dataframe for display with backlog support"""
+    """Format GAP dataframe for display - WITH COLUMN REORDERING"""
+    if df.empty:
+        return df
+    
     df = df.copy()
     
-    # Define numeric columns to format
-    numeric_cols = [
+    # 1. Format numeric columns
+    numeric_format_cols = [
         "begin_inventory", 
         "supply_in_period", 
         "total_available", 
         "total_demand_qty", 
-        "gap_quantity", 
-        "original_demand_qty",
-        "Period Demand",  # Renamed column
-        "Backlog from Previous",  # Renamed column
-        "Total Demand (Period + Backlog)"  # Renamed column
+        "gap_quantity",
+        "backlog_qty",
+        "effective_demand",
+        "backlog_to_next"
     ]
     
-    # Add backlog columns if present (in case they weren't renamed)
-    if 'backlog_qty' in df.columns:
-        numeric_cols.append("backlog_qty")
-    if 'effective_demand' in df.columns:
-        numeric_cols.append("effective_demand")
-    
-    # Format numeric columns
-    for col in numeric_cols:
+    # Apply number formatting
+    for col in numeric_format_cols:
         if col in df.columns:
             df[col] = df[col].apply(lambda x: format_number(x))
     
-    # Format percentage column
+    # 2. Format percentage column
     if "fulfillment_rate_percent" in df.columns:
         df["fulfillment_rate_percent"] = df["fulfillment_rate_percent"].apply(
             lambda x: format_percentage(x)
         )
-        # Rename for better display
-        df = df.rename(columns={"fulfillment_rate_percent": "Fulfillment %"})
     
-    # Format other columns for better display
+    # 3. Reorder columns BEFORE renaming
+    # Define desired column order
+    column_order = [
+        "pt_code",
+        "product_name",
+        "package_size", 
+        "standard_uom",
+        "period",
+        "begin_inventory",
+        "supply_in_period",
+        "total_available",
+        "total_demand_qty",
+        "backlog_qty",           # Moved here
+        "effective_demand",      # Moved here
+        "gap_quantity",
+        "fulfillment_rate_percent",
+        "fulfillment_status",
+        "backlog_to_next"
+    ]
+    
+    # Add any metadata columns at the end
+    metadata_cols = ["Product Type", "Backlog Status"]
+    for col in df.columns:
+        if col not in column_order and col in metadata_cols:
+            column_order.append(col)
+    
+    # Reorder dataframe (only columns that exist)
+    existing_ordered_cols = [col for col in column_order if col in df.columns]
+    df = df[existing_ordered_cols]
+    
+    # 4. Rename columns for user-friendly display
     rename_map = {
         "pt_code": "PT Code",
-        "product_name": "Product Name",
+        "product_name": "Product", 
         "package_size": "Pack Size",
         "standard_uom": "UOM",
         "period": "Period",
-        "begin_inventory": "Begin Inventory",
+        "begin_inventory": "Begin Inv",
         "supply_in_period": "Supply In",
-        "total_available": "Total Available",
-        "total_demand_qty": "Demand Qty",
-        "effective_demand": "Effective Demand",
+        "total_available": "Available",
+        "total_demand_qty": "Demand",
+        "backlog_qty": "Backlog",
+        "effective_demand": "Total Need",
         "gap_quantity": "GAP",
-        "backlog_qty":"Backlog",
-        "fulfillment_status": "Status"
+        "fulfillment_rate_percent": "Fill %",
+        "fulfillment_status": "Status",
+        "backlog_to_next": "Carry Backlog",
+        # Metadata columns (if exist)
+        "Product Type": "Product Type",
+        "Backlog Status": "Backlog Status"
     }
     
-    # Apply rename only for columns that exist
+    # Only rename columns that exist
     rename_map_filtered = {k: v for k, v in rename_map.items() if k in df.columns}
     df = df.rename(columns=rename_map_filtered)
+    
+    # 5. Optional: Drop columns based on display options
+    if not display_options.get('track_backlog', True):
+        backlog_display_cols = ['Backlog', 'Total Need', 'Carry Backlog', 'Backlog Status']
+        cols_to_drop = [col for col in backlog_display_cols if col in df.columns]
+        if cols_to_drop:
+            df = df.drop(columns=cols_to_drop)
     
     return df
 
@@ -2382,7 +2339,6 @@ def show_gap_detail_table(gap_df, display_filters, df_demand_filtered=None, df_s
     if gap_df.empty:
         st.info("No data matches the selected filters.")
         return
-    
     # Show record count
     st.caption(f"Showing {len(gap_df):,} records")
     
@@ -2968,12 +2924,19 @@ if st.button("🚀 Run GAP Analysis", type="primary", use_container_width=True):
                 selected_sources["include_converted"]
             )
         
+        print("\n\n Loaded df_demand_all for GAP Analysis:")
+        df_demand_all.info()
+        
+
         # Load supply data
         with st.spinner("Loading supply data..."):
             df_supply_all = load_and_prepare_supply_data(
                 selected_sources["supply"], 
                 selected_sources["exclude_expired"]
             )
+
+        print("\n\n Loaded df_supply_all for GAP Analysis:")
+        df_supply_all.info()
 
         # Apply filters on ENHANCED data
         df_demand_filtered, df_supply_filtered = apply_filters_to_data(
@@ -2985,6 +2948,12 @@ if st.button("🚀 Run GAP Analysis", type="primary", use_container_width=True):
             use_adjusted_supply
         )
         
+        print('\n\nFiltered Demand DF Info (GAP Analysis):')
+        df_demand_filtered.info()
+
+        print('\n\nFiltered Supply DF info (GAP Analysis):')
+        df_supply_filtered.info()
+
         # Store filtered data
         st.session_state['gap_analysis_data'] = {
             'demand': df_demand_filtered,
@@ -3037,7 +3006,10 @@ if st.session_state.get('gap_analysis_ran', False):
                     df_demand_filtered_display = df_demand_filtered_display[mask]
                     if debug_mode:
                         st.write(f"🐛 Demand after date filter: {len(df_demand_filtered_display)} records")
-            
+        
+                print('df_demand_filtered_display info:')
+                df_demand_filtered_display.info()
+
             # Filter supply - safe check
             if not df_supply_filtered_display.empty:
                 # Check if source_type column exists
@@ -3064,9 +3036,15 @@ if st.session_state.get('gap_analysis_ran', False):
                     else:
                         df_supply_filtered_display = pd.DataFrame()
                 
+                print('df_supply_filtered_display info:')
+                df_supply_filtered_display.info()
+
+
                 if debug_mode:
                     st.write(f"🐛 Supply after date filter: {len(df_supply_filtered_display)} records")
-        
+
+
+
         # Final validation - check if we have data
         if df_demand_filtered_display.empty and df_supply_filtered_display.empty:
             st.error("❌ No data available after applying filters.")
@@ -3107,6 +3085,10 @@ if st.session_state.get('gap_analysis_ran', False):
                     date_modes['supply'],
                     track_backlog=calc_options.get('track_backlog', True),
                 )
+
+                print('gap_df info:')
+                gap_df.info()
+
                 # Cache the results
                 st.session_state['gap_df_cached'] = gap_df
                 st.session_state['gap_period_type_cache'] = current_period

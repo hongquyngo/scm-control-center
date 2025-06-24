@@ -886,14 +886,20 @@ def show_supply_detail_table(filtered_df: pd.DataFrame, use_adjusted_dates: bool
         DisplayComponents.show_no_data_message("No data to display")
         return
     
+    print("Detailed Supply DF info")
+    filtered_df.info()
+    print("\nDetailed Supply DF Sample Data")
+    print(filtered_df.head())
+    print(f"\nTotal rows: {len(filtered_df)}")
+
     try:
         # Define filter options FIRST
         filter_options = [
-            "Show All",
-            "Show Missing Original Date Only", 
-            "Show Past Original Date Only",
-            "Show Missing Adjusted Date Only",
-            "Show Past Adjusted Date Only"
+            "All",
+            "Missing Original Date Only", 
+            "Past Original Date Only",
+            "Missing Adjusted Date Only",
+            "Past Adjusted Date Only"
         ]
         
         # Create tabs for different source types
@@ -957,8 +963,10 @@ def display_supply_detail_for_source(df: pd.DataFrame, source_label: str,
         filter_options=filter_options,
         filter_apply_func=lambda df, opt: apply_supply_detail_filter(df, opt, date_columns_added),
         format_func=lambda df: format_supply_display_df_enhanced(df, date_columns_added),
-        style_func=lambda row: highlight_supply_issues_enhanced(row, date_columns_added),
-        height=600,
+        style_func= ((lambda row: highlight_supply_issues_enhanced(row, date_columns_added))
+                     if len(df) <= 50
+                     else None), 
+        height= 600,
         key_prefix=f"supply_{source_label.lower().replace(' ', '_')}"
     )
 
@@ -1008,7 +1016,7 @@ def get_date_columns_for_source(df: pd.DataFrame, source_type: str) -> List[str]
 def apply_supply_detail_filter(display_df: pd.DataFrame, filter_option: str, 
                              date_columns: List[str]) -> pd.DataFrame:
     """Apply filter to supply detail dataframe - UPDATED FOR UNIFIED DATES"""
-    if filter_option == "Show All":
+    if filter_option == "All":
         return prepare_supply_detail_display(display_df)
     
     today = pd.Timestamp.now().normalize()
@@ -1021,17 +1029,17 @@ def apply_supply_detail_filter(display_df: pd.DataFrame, filter_option: str,
     
     if is_all_view:
         # For All tab - use unified date columns
-        if filter_option == "Show Missing Original Date Only":
+        if filter_option == "Missing Original Date Only":
             if "unified_date" in display_df.columns:
                 date_series = pd.to_datetime(display_df["unified_date"], errors='coerce')
                 filter_mask = date_series.isna()
         
-        elif filter_option == "Show Past Original Date Only":
+        elif filter_option == "Past Original Date Only":
             if "unified_date" in display_df.columns:
                 date_series = pd.to_datetime(display_df["unified_date"], errors='coerce')
                 filter_mask = date_series.notna() & (date_series < today)
         
-        elif filter_option == "Show Missing Adjusted Date Only":
+        elif filter_option == "Missing Adjusted Date Only":
             if "unified_date_adjusted" in display_df.columns:
                 date_series = pd.to_datetime(display_df["unified_date_adjusted"], errors='coerce')
                 filter_mask = date_series.isna()
@@ -1039,7 +1047,7 @@ def apply_supply_detail_filter(display_df: pd.DataFrame, filter_option: str,
                 st.warning("Adjusted date column not available")
                 return pd.DataFrame()
                 
-        elif filter_option == "Show Past Adjusted Date Only":
+        elif filter_option == "Past Adjusted Date Only":
             if "unified_date_adjusted" in display_df.columns:
                 date_series = pd.to_datetime(display_df["unified_date_adjusted"], errors='coerce')
                 filter_mask = date_series.notna() & (date_series < today)
@@ -1058,17 +1066,17 @@ def apply_supply_detail_filter(display_df: pd.DataFrame, filter_option: str,
             elif '_original' not in col:  # Skip _original columns
                 base_date_col = col
         
-        if filter_option == "Show Missing Original Date Only":
+        if filter_option == "Missing Original Date Only":
             if base_date_col and base_date_col in display_df.columns:
                 date_series = pd.to_datetime(display_df[base_date_col], errors='coerce')
                 filter_mask = date_series.isna()
         
-        elif filter_option == "Show Past Original Date Only":
+        elif filter_option == "Past Original Date Only":
             if base_date_col and base_date_col in display_df.columns:
                 date_series = pd.to_datetime(display_df[base_date_col], errors='coerce')
                 filter_mask = date_series.notna() & (date_series < today)
         
-        elif filter_option == "Show Missing Adjusted Date Only":
+        elif filter_option == "Missing Adjusted Date Only":
             if adjusted_date_col and adjusted_date_col in display_df.columns:
                 date_series = pd.to_datetime(display_df[adjusted_date_col], errors='coerce')
                 filter_mask = date_series.isna()
@@ -1076,7 +1084,7 @@ def apply_supply_detail_filter(display_df: pd.DataFrame, filter_option: str,
                 st.warning("Adjusted date column not available")
                 return pd.DataFrame()
                 
-        elif filter_option == "Show Past Adjusted Date Only":
+        elif filter_option == "Past Adjusted Date Only":
             if adjusted_date_col and adjusted_date_col in display_df.columns:
                 date_series = pd.to_datetime(display_df[adjusted_date_col], errors='coerce')
                 filter_mask = date_series.notna() & (date_series < today)
@@ -1110,6 +1118,12 @@ def prepare_supply_detail_display(display_df: pd.DataFrame) -> pd.DataFrame:
     if display_df.empty:
         return display_df
     
+    print("Orginal Display Supply DF info:")
+    display_df.info()
+    print("\nOrginal Display Supply DF Sample Data:")
+    print(display_df.head())
+    
+
     # Get source type
     source_type = display_df["source_type"].iloc[0] if len(display_df["source_type"].unique()) == 1 else "All"
     
