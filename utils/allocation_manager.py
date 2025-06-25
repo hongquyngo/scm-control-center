@@ -1393,7 +1393,8 @@ class AllocationManager:
     def cancel_allocation_plan(self, allocation_id: int, reason: str = None, 
                             reason_category: str = 'BUSINESS_DECISION',
                             user_id: int = None) -> bool:
-        """Cancel allocation plan - handles both DRAFT and ALLOCATED plans
+        """
+        Cancel allocation plan - handles both DRAFT and ALLOCATED plans
         
         Args:
             allocation_id: ID of allocation plan to cancel
@@ -1415,12 +1416,19 @@ class AllocationManager:
             # 1. Get plan summary to determine status
             plan_query = text("""
                 SELECT 
-                    vaps.*,
+                    vaps.id,
+                    vaps.display_status,
+                    vaps.draft_count,
+                    vaps.allocated_count,
+                    vaps.delivered_count,
+                    vaps.cancelled_count,
+                    vaps.total_count,
                     ap.allocation_number,
-                    CONCAT(COALESCE(e.first_name, ''), ' ', COALESCE(e.last_name, '')) as creator_name
+                    ap.notes,
+                    u.username
                 FROM v_allocation_plans_summary vaps
                 JOIN allocation_plans ap ON vaps.id = ap.id
-                LEFT JOIN employees e ON vaps.creator_id = e.id
+                LEFT JOIN users u ON vaps.creator_id = u.id
                 WHERE vaps.id = :allocation_id
             """)
             
@@ -1431,16 +1439,25 @@ class AllocationManager:
                 logger.error(f"Allocation plan {allocation_id} not found")
                 return False
             
-            # Convert Row to dict for easier access
-            plan_dict = dict(plan._mapping) if hasattr(plan, '_mapping') else dict(zip(result.keys(), plan))
+            # Extract plan data using indices
+            plan_id = plan[0]
+            display_status = plan[1]
+            draft_count = plan[2]
+            allocated_count = plan[3]
+            delivered_count = plan[4]
+            cancelled_count = plan[5]
+            total_count = plan[6]
+            allocation_number = plan[7]
+            existing_notes = plan[8]
+            creator_username = plan[9]
             
-            logger.info(f"Cancelling allocation plan {plan_dict['allocation_number']} with status {plan_dict['display_status']}")
+            logger.info(f"Cancelling allocation plan {allocation_number} with status {display_status}")
             
             # 2. Get all details for this plan
             details_query = text("""
                 SELECT 
                     ad.id,
-                    ad.status as original_status,
+                    ad.status,
                     ad.allocated_qty,
                     ad.delivered_qty,
                     ad.pt_code,
@@ -1459,11 +1476,13 @@ class AllocationManager:
                 WHERE ad.allocation_plan_id = :allocation_id
             """)
             
-            details = conn.execute(details_query, {'allocation_id': allocation_id}).fetchall()
+            details_result = conn.execute(details_query, {'allocation_id': allocation_id})
+            details = details_result.fetchall()
             
             if not details:
                 logger.warning(f"No details found for allocation plan {allocation_id}")
-                return True  # Empty plan, consider it cancelled
+                trans.commit()
+                return True
             
             # 3. Process based on plan status
             cancelled_count = 0
@@ -1471,55 +1490,45 @@ class AllocationManager:
             
             # Set default reason if not provided
             if not reason:
-                reason = f"Allocation plan {plan_dict['allocation_number']} cancelled"
+                reason = f"Allocation plan {allocation_number} cancelled"
             
             # Get user name for audit
             user_query = text("""
-                SELECT CONCAT(COALESCE(first_name, ''), ' ', COALESCE(last_name, '')) as full_name 
-                FROM employees 
+                SELECT username 
+                FROM users 
                 WHERE id = :user_id AND delete_flag = 0
             """)
             user_result = conn.execute(user_query, {'user_id': user_id})
             user_row = user_result.fetchone()
-            cancelled_by_name = user_row['full_name'].strip() if user_row and user_row['full_name'] else f'User {user_id}'
             
+            # Use index access for single column result
+            cancelled_by_name = user_row[0] if user_row else f'User {user_id}'
+            
+            # Process each detail using indices
             for detail in details:
-                detail_dict = dict(detail._mapping) if hasattr(detail, '_mapping') else dict(zip(details_query.keys(), detail))
+                # Extract values using indices
+                detail_id = detail[0]
+                original_status = detail[1]
+                allocated_qty = detail[2]
+                delivered_qty = detail[3]
+                pt_code = detail[4]
+                customer_name = detail[5]
+                cancellable_qty = detail[6]
                 
                 # Handle DRAFT details
-                if detail_dict['original_status'] == 'DRAFT':
-                    # For DRAFT, we can either delete or mark as cancelled
-                    # Option 1: Delete (clean removal)
+                if original_status == 'DRAFT':
+                    # For DRAFT, delete the record
                     delete_query = text("""
                         DELETE FROM allocation_details 
                         WHERE id = :detail_id
                     """)
-                    conn.execute(delete_query, {'detail_id': detail_dict['id']})
+                    conn.execute(delete_query, {'detail_id': detail_id})
                     draft_deleted_count += 1
                     
-                    # Option 2: Create cancellation record even for DRAFT (for audit trail)
-                    # Uncomment if you want to keep DRAFT records with cancellation
-                    """
-                    cancel_insert = text('''
-                        INSERT INTO allocation_cancellations 
-                        (allocation_detail_id, allocation_plan_id, cancelled_qty, 
-                        reason, reason_category, cancelled_by_user_id, status)
-                        VALUES (:detail_id, :plan_id, :qty, 
-                                :reason, :category, :user_id, 'ACTIVE')
-                    ''')
-                    
-                    conn.execute(cancel_insert, {
-                        'detail_id': detail_dict['id'],
-                        'plan_id': allocation_id,
-                        'qty': detail_dict['allocated_qty'],
-                        'reason': f"{reason} (Draft item)",
-                        'category': reason_category,
-                        'user_id': user_id
-                    })
-                    """
+                    logger.debug(f"Deleted DRAFT detail {detail_id} for {pt_code}")
                     
                 # Handle ALLOCATED details with cancellable quantity
-                elif detail_dict['original_status'] == 'ALLOCATED' and detail_dict['cancellable_qty'] > 0:
+                elif original_status == 'ALLOCATED' and cancellable_qty > 0:
                     # Create cancellation record
                     cancel_insert = text("""
                         INSERT INTO allocation_cancellations 
@@ -1530,34 +1539,36 @@ class AllocationManager:
                     """)
                     
                     conn.execute(cancel_insert, {
-                        'detail_id': detail_dict['id'],
+                        'detail_id': detail_id,
                         'plan_id': allocation_id,
-                        'qty': detail_dict['cancellable_qty'],
+                        'qty': cancellable_qty,
                         'reason': reason,
                         'category': reason_category,
                         'user_id': user_id
                     })
                     cancelled_count += 1
                     
-                    logger.info(f"Cancelled {detail_dict['cancellable_qty']} qty for {detail_dict['pt_code']} - {detail_dict['customer_name']}")
-                
+                    logger.info(f"Cancelled {cancellable_qty} qty for {pt_code} - {customer_name}")
+                    
                 # Skip if already delivered or no cancellable quantity
-                elif detail_dict['delivered_qty'] >= detail_dict['allocated_qty']:
-                    logger.info(f"Skipping {detail_dict['pt_code']} - already delivered")
-                elif detail_dict['cancellable_qty'] <= 0:
-                    logger.info(f"Skipping {detail_dict['pt_code']} - no cancellable quantity")
+                elif delivered_qty >= allocated_qty:
+                    logger.info(f"Skipping {pt_code} - already delivered")
+                elif cancellable_qty <= 0:
+                    logger.info(f"Skipping {pt_code} - no cancellable quantity")
             
             # 4. Add plan-level cancellation note
-            if plan_dict.get('notes'):
-                updated_notes = f"{plan_dict['notes']}\n\n[CANCELLED {datetime.now().strftime('%Y-%m-%d %H:%M')}] {reason}"
-            else:
-                updated_notes = f"[CANCELLED {datetime.now().strftime('%Y-%m-%d %H:%M')}] {reason}"
+            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M')
+            cancellation_note = f"[CANCELLED {timestamp}] {reason} (by {cancelled_by_name})"
             
-            # Update plan notes
+            if existing_notes:
+                updated_notes = f"{existing_notes}\n\n{cancellation_note}"
+            else:
+                updated_notes = cancellation_note
+            
+            # Update plan notes (REMOVED updated_date)
             update_plan = text("""
                 UPDATE allocation_plans
-                SET notes = :notes,
-                    updated_date = NOW()
+                SET notes = :notes
                 WHERE id = :allocation_id
             """)
             
@@ -1570,14 +1581,12 @@ class AllocationManager:
             trans.commit()
             
             # Log summary
-            logger.info(f"""
-                Allocation plan {plan_dict['allocation_number']} cancelled successfully:
-                - Draft items deleted: {draft_deleted_count}
-                - Allocated items cancelled: {cancelled_count}
-                - Status was: {plan_dict['display_status']}
-                - Cancelled by: {cancelled_by_name}
-                - Reason: {reason}
-            """)
+            logger.info(f"Allocation plan {allocation_number} cancelled successfully:")
+            logger.info(f"- Draft items deleted: {draft_deleted_count}")
+            logger.info(f"- Allocated items cancelled: {cancelled_count}")
+            logger.info(f"- Status was: {display_status}")
+            logger.info(f"- Cancelled by: {cancelled_by_name}")
+            logger.info(f"- Reason: {reason}")
             
             return True
             
@@ -1589,7 +1598,6 @@ class AllocationManager:
             
         finally:
             conn.close()
-
 
     def bulk_cancel_allocation_plans(self, plan_ids: List[int], reason: str = None,
                                     reason_category: str = 'BUSINESS_DECISION',
@@ -1620,7 +1628,8 @@ class AllocationManager:
         return success_count, errors
 
     def validate_before_cancel(self, allocation_id: int) -> Tuple[bool, Dict[str, Any]]:
-        """Validate and get impact analysis before cancelling
+        """
+        Validate and get impact analysis before cancelling
         
         Args:
             allocation_id: Allocation plan ID
@@ -1633,30 +1642,45 @@ class AllocationManager:
                 # Get plan info
                 plan_query = text("""
                     SELECT 
-                        vaps.*,
-                        ap.allocation_number
+                        vaps.id,                    -- index 0
+                        vaps.display_status,         -- index 1
+                        vaps.total_count,           -- index 2
+                        vaps.draft_count,           -- index 3
+                        vaps.allocated_count,       -- index 4
+                        vaps.delivered_count,       -- index 5
+                        vaps.cancelled_count,       -- index 6
+                        ap.allocation_number        -- index 7
                     FROM v_allocation_plans_summary vaps
                     JOIN allocation_plans ap ON vaps.id = ap.id
                     WHERE vaps.id = :allocation_id
                 """)
                 
-                plan = conn.execute(plan_query, {'allocation_id': allocation_id}).fetchone()
+                result = conn.execute(plan_query, {'allocation_id': allocation_id})
+                plan = result.fetchone()
                 
                 if not plan:
                     return False, {'error': 'Plan not found'}
                 
-                plan_dict = dict(plan._mapping) if hasattr(plan, '_mapping') else dict(zip(plan.keys(), plan))
+                # Extract using indices
+                plan_id = plan[0]
+                display_status = plan[1]
+                total_count = plan[2]
+                draft_count = plan[3]
+                allocated_count = plan[4]
+                delivered_count = plan[5]
+                cancelled_count = plan[6]
+                allocation_number = plan[7]
                 
                 # Get impact analysis
                 impact_query = text("""
                     SELECT 
-                        COUNT(DISTINCT ad.id) as total_details,
-                        COUNT(DISTINCT CASE WHEN ad.status = 'DRAFT' THEN ad.id END) as draft_count,
-                        COUNT(DISTINCT CASE WHEN ad.status = 'ALLOCATED' THEN ad.id END) as allocated_count,
-                        COUNT(DISTINCT CASE WHEN ad.delivered_qty > 0 THEN ad.id END) as partial_delivered_count,
-                        SUM(ad.allocated_qty) as total_allocated_qty,
-                        SUM(ad.delivered_qty) as total_delivered_qty,
-                        SUM(
+                        COUNT(DISTINCT ad.id),              -- index 0: total_details
+                        COUNT(DISTINCT CASE WHEN ad.status = 'DRAFT' THEN ad.id END),      -- index 1: draft_count
+                        COUNT(DISTINCT CASE WHEN ad.status = 'ALLOCATED' THEN ad.id END),  -- index 2: allocated_count
+                        COUNT(DISTINCT CASE WHEN ad.delivered_qty > 0 THEN ad.id END),     -- index 3: partial_delivered_count
+                        SUM(ad.allocated_qty),              -- index 4: total_allocated_qty
+                        SUM(ad.delivered_qty),              -- index 5: total_delivered_qty
+                        SUM(                                -- index 6: total_cancellable_qty
                             CASE 
                                 WHEN ad.status = 'DRAFT' THEN ad.allocated_qty
                                 WHEN ad.status = 'ALLOCATED' THEN 
@@ -1669,43 +1693,54 @@ class AllocationManager:
                                     ), 0)
                                 ELSE 0
                             END
-                        ) as total_cancellable_qty,
-                        COUNT(DISTINCT ad.pt_code) as affected_products,
-                        COUNT(DISTINCT ad.customer_name) as affected_customers
+                        ),
+                        COUNT(DISTINCT ad.pt_code),         -- index 7: affected_products
+                        COUNT(DISTINCT ad.customer_name)    -- index 8: affected_customers
                     FROM allocation_details ad
                     WHERE ad.allocation_plan_id = :allocation_id
                 """)
                 
-                impact = conn.execute(impact_query, {'allocation_id': allocation_id}).fetchone()
-                impact_dict = dict(impact._mapping) if hasattr(impact, '_mapping') else dict(zip(impact.keys(), impact))
+                impact_result = conn.execute(impact_query, {'allocation_id': allocation_id})
+                impact = impact_result.fetchone()
+                
+                # Extract impact data
+                total_details = impact[0] or 0
+                impact_draft_count = impact[1] or 0
+                impact_allocated_count = impact[2] or 0
+                partial_delivered_count = impact[3] or 0
+                total_allocated_qty = float(impact[4] or 0)
+                total_delivered_qty = float(impact[5] or 0)
+                total_cancellable_qty = float(impact[6] or 0)
+                affected_products = impact[7] or 0
+                affected_customers = impact[8] or 0
                 
                 # Check if can cancel
                 can_cancel = True
                 warnings = []
                 
                 # Cannot cancel if all delivered
-                if impact_dict['total_delivered_qty'] >= impact_dict['total_allocated_qty']:
+                if total_delivered_qty >= total_allocated_qty:
                     can_cancel = False
                     warnings.append("All quantities already delivered")
                 
                 # Warning if partial deliveries exist
-                if impact_dict['partial_delivered_count'] > 0:
-                    warnings.append(f"{impact_dict['partial_delivered_count']} items have partial deliveries")
+                if partial_delivered_count > 0:
+                    warnings.append(f"{partial_delivered_count} items have partial deliveries")
                 
                 # Build impact analysis
                 analysis = {
                     'can_cancel': can_cancel,
                     'plan_info': {
-                        'allocation_number': plan_dict['allocation_number'],
-                        'status': plan_dict['display_status'],
-                        'total_items': impact_dict['total_details']
+                        'allocation_number': allocation_number,
+                        'status': display_status,
+                        'total_items': total_count
                     },
                     'impact': {
-                        'draft_items_to_delete': impact_dict['draft_count'],
-                        'allocated_items_to_cancel': impact_dict['allocated_count'],
-                        'quantity_to_release': float(impact_dict['total_cancellable_qty'] or 0),
-                        'affected_products': impact_dict['affected_products'],
-                        'affected_customers': impact_dict['affected_customers']
+                        'draft_items_to_delete': impact_draft_count,
+                        'allocated_items_to_cancel': impact_allocated_count,
+                        'quantity_to_release': total_cancellable_qty,
+                        'affected_products': affected_products,
+                        'affected_customers': affected_customers
                     },
                     'warnings': warnings
                 }
@@ -1715,7 +1750,6 @@ class AllocationManager:
         except Exception as e:
             logger.error(f"Error validating cancellation: {str(e)}")
             return False, {'error': str(e)}
-
 
     def cancel_allocation_detail(self, detail_id: int, quantity: float, 
                             reason: str, reason_category: str, user_id: int = None) -> Tuple[bool, str]:

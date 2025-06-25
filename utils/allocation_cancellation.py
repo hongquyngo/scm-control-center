@@ -55,10 +55,10 @@ class AllocationCancellationManager:
                 return False, "Cancel quantity must be greater than 0"
             
             # Get user name for audit - Fixed to use employees table with concat
-            user_query = text("SELECT CONCAT(COALESCE(first_name, ''), ' ', COALESCE(last_name, '')) as full_name FROM employees WHERE id = :user_id AND delete_flag = 0")
+            user_query = text("SELECT username FROM users WHERE id = :user_id AND delete_flag = 0")
             user_result = conn.execute(user_query, {'user_id': user_id})
             user_row = user_result.fetchone()
-            cancelled_by_name = user_row['full_name'].strip() if user_row and user_row['full_name'] else f'User {user_id}'
+            cancelled_by_name = user_row[0] if user_row else f'User {user_id}'
             
             # Insert cancellation record - REMOVED cancelled_by_name field that doesn't exist
             cancel_insert = text("""
@@ -148,10 +148,10 @@ class AllocationCancellationManager:
                 return False, "Cannot reverse - some quantity already delivered"
             
             # Get user name for audit
-            user_query = text("SELECT CONCAT(COALESCE(first_name, ''), ' ', COALESCE(last_name, '')) as full_name FROM employees WHERE id = :user_id AND delete_flag = 0")
+            user_query = text("SELECT username FROM users WHERE id = :user_id AND delete_flag = 0")
             user_result = conn.execute(user_query, {'user_id': user_id})
             user_row = user_result.fetchone()
-            reversed_by_name = user_row['full_name'].strip() if user_row and user_row['full_name'] else f'User {user_id}'
+            reversed_by_name = user_row[0] if user_row else f'User {user_id}'
             
             # Reverse the cancellation - Fixed field name
             reverse_update = text("""
@@ -197,18 +197,18 @@ class AllocationCancellationManager:
             # Fixed table references and join
             query = """
                 SELECT 
-                    ac.*,
-                    ad.pt_code,
-                    ad.customer_name,
-                    ad.allocated_qty as original_allocated,
-                    ad.delivered_qty,
-                    CONCAT(COALESCE(e1.first_name, ''), ' ', COALESCE(e1.last_name, '')) as cancelled_by,
-                    CONCAT(COALESCE(e2.first_name, ''), ' ', COALESCE(e2.last_name, '')) as reversed_by
-                FROM allocation_cancellations ac
-                JOIN allocation_details ad ON ac.allocation_detail_id = ad.id
-                LEFT JOIN employees e1 ON ac.cancelled_by_user_id = e1.id AND e1.delete_flag = 0
-                LEFT JOIN employees e2 ON ac.reversed_by_user_id = e2.id AND e2.delete_flag = 0
-                WHERE 1=1
+                        ac.*,
+                        ad.pt_code,
+                        ad.customer_name,
+                        ad.allocated_qty as original_allocated,
+                        ad.delivered_qty,
+                        u1.username as cancelled_by,
+                        u2.username as reversed_by
+                    FROM allocation_cancellations ac
+                    JOIN allocation_details ad ON ac.allocation_detail_id = ad.id
+                    LEFT JOIN users u1 ON ac.cancelled_by_user_id = u1.id AND u1.delete_flag = 0
+                    LEFT JOIN users u2 ON ac.reversed_by_user_id = u2.id AND u2.delete_flag = 0
+                    WHERE 1=1
             """
             
             params = {}
