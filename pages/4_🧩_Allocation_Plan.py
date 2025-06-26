@@ -507,7 +507,16 @@ def show_step1_select_products():
     try:
         # Get and validate data
         gap_data, demand_filtered, supply_filtered = get_allocation_data()
+
+        print("gap_data for allocation info:")
+        gap_data.info()
         
+        print("\ndemand_filtered for allocation  info:")
+        demand_filtered.info()
+
+        print("\nsupply_filtered for allocation  info:")
+        supply_filtered.info()
+
         if gap_data.empty:
             show_no_data_message()
             return

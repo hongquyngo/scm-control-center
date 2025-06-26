@@ -535,8 +535,10 @@ def show_no_filtered_data_message(filter_type, use_smart_filters):
     ]):
         st.caption("💡 Try clearing some advanced filters to see more products.")
 
+
 def prepare_product_summary(filtered_data):
-    """Prepare product summary data với package_size và uom từ gap_data"""
+    """Prepare product summary data với xử lý đúng cho carry forward logic"""
+    
     # Initialize empty DataFrame để tránh UnboundLocalError
     product_summary = pd.DataFrame()
     
@@ -551,51 +553,115 @@ def prepare_product_summary(filtered_data):
             st.write(list(filtered_data.columns))
             st.write(f"🐛 Number of rows: {len(filtered_data)}")
         
-        # Prepare demand column - check multiple possible column names
-        demand_col = None
-        possible_demand_cols = ['original_demand_qty', 'total_demand_qty', 'demand_quantity']
+        # Check if we have carry forward data
+        has_carry_forward = 'supply_in_period' in filtered_data.columns
         
-        for col in possible_demand_cols:
-            if col in filtered_data.columns:
-                demand_col = col
-                break
-        
-        # If no demand column found, create one
-        if demand_col is None:
-            st.warning("⚠️ No demand column found, using total_demand_qty as fallback")
-            filtered_data['original_demand_qty'] = filtered_data.get('total_demand_qty', 0)
-            demand_col = 'original_demand_qty'
+        if has_carry_forward:
+            # === CARRY FORWARD LOGIC ===
+            if st.session_state.get('debug_mode', False):
+                st.write("🐛 Using carry forward logic for aggregation")
+            
+            # Sort data by product and period first
+            filtered_data_sorted = filtered_data.sort_values(['pt_code', 'period'])
+            
+            # Get first period inventory for each product
+            first_period_inventory = (
+                filtered_data_sorted
+                .groupby('pt_code')['begin_inventory']
+                .first()
+                .to_dict()
+            )
+            
+            # Build aggregation dict for carry forward data
+            agg_dict = {
+                'supply_in_period': 'sum',           # Sum actual new supply only
+                'total_demand_qty': 'sum',           # Sum original demand (no backlog)
+                'fulfillment_rate_percent': 'mean',  # Average fulfillment
+                'package_size': 'first',             # Package info
+                'standard_uom': 'first'              # UOM info
+            }
+            
+            # Check if effective_demand exists (when backlog tracking is on)
+            if 'effective_demand' in filtered_data.columns:
+                agg_dict['effective_demand'] = 'sum'  # Total demand including backlog
+            
+            # Remove columns that don't exist
+            agg_dict = {k: v for k, v in agg_dict.items() if k in filtered_data.columns}
+            
+            # Group by product
+            product_summary = filtered_data.groupby(['pt_code', 'product_name']).agg(agg_dict).reset_index()
+            
+            # Calculate true total supply = sum(supply_in_period) + first period inventory
+            product_summary['total_available_supply'] = (
+                product_summary['supply_in_period'] + 
+                product_summary['pt_code'].map(first_period_inventory).fillna(0)
+            )
+            
+            # Rename columns for consistency
+            product_summary = product_summary.rename(columns={
+                'supply_in_period': 'period_supply_sum',      # New supply in periods
+                'total_available_supply': 'available_supply_sum',  # Total available
+                'total_demand_qty': 'period_demand_sum'       # Original demand
+            })
+            
+            # Debug carry forward calculation
+            if st.session_state.get('debug_mode', False):
+                for pt_code in product_summary['pt_code'].head(3):
+                    first_inv = first_period_inventory.get(pt_code, 0)
+                    period_supply = product_summary[product_summary['pt_code'] == pt_code]['period_supply_sum'].iloc[0]
+                    total = product_summary[product_summary['pt_code'] == pt_code]['available_supply_sum'].iloc[0]
+                    st.write(f"🐛 {pt_code}: first_inv={first_inv:.0f} + period_supply={period_supply:.0f} = total={total:.0f}")
+            
         else:
-            # Ensure we have original_demand_qty for consistency
-            if demand_col != 'original_demand_qty':
-                filtered_data['original_demand_qty'] = filtered_data[demand_col]
+            # === STANDARD LOGIC (no carry forward) ===
+            if st.session_state.get('debug_mode', False):
+                st.write("🐛 Using standard logic for aggregation")
+            
+            # Prepare demand column - check multiple possible column names
+            demand_col = None
+            possible_demand_cols = ['original_demand_qty', 'total_demand_qty', 'demand_quantity']
+            
+            for col in possible_demand_cols:
+                if col in filtered_data.columns:
+                    demand_col = col
+                    break
+            
+            # If no demand column found, create one
+            if demand_col is None:
+                st.warning("⚠️ No demand column found, using total_demand_qty as fallback")
+                filtered_data['original_demand_qty'] = filtered_data.get('total_demand_qty', 0)
+                demand_col = 'original_demand_qty'
+            else:
+                # Ensure we have original_demand_qty for consistency
+                if demand_col != 'original_demand_qty':
+                    filtered_data['original_demand_qty'] = filtered_data[demand_col]
+            
+            # Build aggregation dict
+            agg_dict = {
+                'original_demand_qty': 'sum',
+                'total_available': 'sum',
+                'gap_quantity': 'sum',
+                'fulfillment_rate_percent': 'mean'
+            }
+            
+            # Include package_size và standard_uom if they exist
+            if 'package_size' in filtered_data.columns:
+                agg_dict['package_size'] = 'first'
+            if 'standard_uom' in filtered_data.columns:
+                agg_dict['standard_uom'] = 'first'
+            
+            # Remove columns that don't exist
+            agg_dict = {k: v for k, v in agg_dict.items() if k in filtered_data.columns}
+            
+            product_summary = filtered_data.groupby(['pt_code', 'product_name']).agg(agg_dict).reset_index()
+            
+            # Rename columns
+            product_summary = product_summary.rename(columns={
+                'original_demand_qty': 'period_demand_sum',
+                'total_available': 'available_supply_sum'
+            })
         
-        # Debug: Check demand values
-        if st.session_state.get('debug_mode', False):
-            st.write(f"🐛 Using demand column: {demand_col}")
-            st.write(f"🐛 Sample demand values: {filtered_data['original_demand_qty'].head()}")
-        
-        # Group by product
-        group_cols = ['pt_code', 'product_name']
-        
-        # Build aggregation dict
-        agg_dict = {
-            'original_demand_qty': 'sum',
-            'total_available': 'sum',
-            'gap_quantity': 'sum',
-            'fulfillment_rate_percent': 'mean'
-        }
-        
-        # Include package_size và standard_uom using 'first' since they're same for each product
-        if 'package_size' in filtered_data.columns:
-            agg_dict['package_size'] = 'first'
-        if 'standard_uom' in filtered_data.columns:
-            agg_dict['standard_uom'] = 'first'
-        
-        # Remove columns that don't exist
-        agg_dict = {k: v for k, v in agg_dict.items() if k in filtered_data.columns}
-        
-        product_summary = filtered_data.groupby(group_cols).agg(agg_dict).reset_index()
+        # === COMMON LOGIC FOR BOTH CASES ===
         
         # Add period count
         if 'period' in filtered_data.columns:
@@ -604,12 +670,6 @@ def prepare_product_summary(filtered_data):
             product_summary = product_summary.merge(period_counts, on='pt_code', how='left')
         else:
             product_summary['period_count'] = 1
-        
-        # Rename columns
-        product_summary = product_summary.rename(columns={
-            'original_demand_qty': 'period_demand_sum',
-            'total_available': 'available_supply_sum'
-        })
         
         # Ensure required columns exist with defaults
         if 'period_demand_sum' not in product_summary.columns:
@@ -623,11 +683,15 @@ def prepare_product_summary(filtered_data):
         if 'standard_uom' not in product_summary.columns:
             product_summary['standard_uom'] = ''
         
-        # Recalculate net GAP
+        # Recalculate net GAP correctly
         product_summary['net_gap'] = (
             product_summary['available_supply_sum'] - 
             product_summary['period_demand_sum']
         )
+        
+        # Keep gap_quantity if it exists (for backward compatibility)
+        if 'gap_quantity' not in product_summary.columns:
+            product_summary['gap_quantity'] = product_summary['net_gap']
         
         # Add status
         def get_status(row):
@@ -657,13 +721,17 @@ def prepare_product_summary(filtered_data):
         # Add absolute gap for sorting
         product_summary['gap_abs'] = product_summary['net_gap'].abs()
         
-        # Sort by absolute gap
+        # Sort by absolute gap (largest gaps first)
         product_summary = product_summary.sort_values('gap_abs', ascending=False)
         
         # Debug final summary
         if st.session_state.get('debug_mode', False):
             st.write("🐛 Product summary sample:")
-            st.dataframe(product_summary.head())
+            st.write(f"- Total products: {len(product_summary)}")
+            st.write(f"- Products with shortage: {len(product_summary[product_summary['net_gap'] < 0])}")
+            st.write(f"- Products with surplus: {len(product_summary[product_summary['net_gap'] > 0])}")
+            if not product_summary.empty:
+                st.dataframe(product_summary.head(3))
         
         return product_summary
         
@@ -673,6 +741,7 @@ def prepare_product_summary(filtered_data):
             import traceback
             st.code(traceback.format_exc())
         return pd.DataFrame()
+
 
 def show_summary_metrics(product_summary):
     """Show summary metrics"""
