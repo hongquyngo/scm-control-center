@@ -118,6 +118,7 @@ class PeriodBasedGAPProcessor:
         # Simple aggregation - demand_quantity is already net of delivered
         agg_dict = {
             'demand_quantity': 'sum',
+            'brand': 'first', 
             'product_name': 'first',
             'package_size': 'first',
             'standard_uom': 'first'
@@ -132,6 +133,7 @@ class PeriodBasedGAPProcessor:
         
         agg_dict = {
             'quantity': 'sum',
+            'brand': 'first',
             'product_name': 'first',
             'package_size': 'first',
             'standard_uom': 'first'
@@ -164,12 +166,14 @@ class PeriodBasedGAPProcessor:
         
         # Get from demand first
         if not demand_df.empty and 'product_name' in demand_df.columns:
-            demand_product_info = demand_df[['pt_code', 'product_name', 'package_size', 'standard_uom']].drop_duplicates()
+            demand_product_info = demand_df[['pt_code', 'brand', 'product_name', 'package_size', 'standard_uom']].drop_duplicates()
             product_info_list.append(demand_product_info)
         
         # Get from supply (for supply-only products)
         if not supply_df.empty:
             supply_info_cols = ['pt_code']
+            if 'brand' in supply_df.columns:
+                supply_info_cols.append('brand')
             if 'product_name' in supply_df.columns:
                 supply_info_cols.append('product_name')
             if 'package_size' in supply_df.columns:
@@ -190,7 +194,7 @@ class PeriodBasedGAPProcessor:
         # Merge demand data
         if not demand_df.empty:
             demand_cols = [col for col in demand_df.columns 
-                          if col not in ['product_name', 'package_size', 'standard_uom']]
+                          if col not in ['brand','product_name', 'package_size', 'standard_uom']]
             base_data = base_data.merge(
                 demand_df[demand_cols],
                 on=['pt_code', 'period'],
@@ -200,7 +204,7 @@ class PeriodBasedGAPProcessor:
         # Merge supply data
         if not supply_df.empty:
             supply_cols = [col for col in supply_df.columns 
-                          if col not in ['product_name', 'package_size', 'standard_uom']]
+                          if col not in ['brand','product_name', 'package_size', 'standard_uom']]
             base_data = base_data.merge(
                 supply_df[supply_cols],
                 on=['pt_code', 'period'],

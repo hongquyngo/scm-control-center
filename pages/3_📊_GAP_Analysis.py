@@ -924,6 +924,7 @@ def calculate_gap_with_carry_forward(df_demand, df_supply, period_type="Weekly",
             # Build result row
             result_row = {
                 'pt_code': row['pt_code'],
+                'brand': row.get('brand', ''),
                 'product_name': row.get('product_name', ''),
                 'package_size': row.get('package_size', ''),
                 'standard_uom': row.get('standard_uom', ''),
@@ -2205,6 +2206,7 @@ def format_gap_display_df(df: pd.DataFrame, display_options: Dict) -> pd.DataFra
     # Define desired column order
     column_order = [
         "pt_code",
+        "brand",
         "product_name",
         "package_size", 
         "standard_uom",
@@ -2234,6 +2236,7 @@ def format_gap_display_df(df: pd.DataFrame, display_options: Dict) -> pd.DataFra
     # 4. Rename columns for user-friendly display
     rename_map = {
         "pt_code": "PT Code",
+        "brand": "Brand",
         "product_name": "Product", 
         "package_size": "Pack Size",
         "standard_uom": "UOM",
